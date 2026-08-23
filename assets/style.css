@@ -16,7 +16,54 @@ body {
 .ev-chart {
   background: #11151c;
   border-radius: 6px;
+  width: 100%;
+  max-width: 1200px;
 }
+
+.pt-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.pt-link {
+  color: #93c5fd;
+  font-size: 0.85rem;
+  text-decoration: none;
+}
+
+.pt-link:hover { text-decoration: underline; }
+
+.pt-page-title { font-weight: 700; color: #fbbf24; }
+
+.pt-empty {
+  background: #0d1117;
+  border: 1px solid #1f2937;
+  border-radius: 12px;
+  padding: 2rem;
+  text-align: center;
+  color: #6b7280;
+}
+
+.pt-tournament {
+  background: #0d1117;
+  border: 1px solid #1f2937;
+  border-radius: 12px;
+  padding: 0.75rem 1rem;
+  margin-bottom: 1rem;
+}
+
+.pt-tournament-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  padding-bottom: 0.5rem;
+  font-size: 0.85rem;
+  color: #9ca3af;
+}
+
+.pt-tournament-title { font-weight: 700; color: #e5e7eb; }
 
 #ws-status {
   min-width: 12rem;

@@ -18,6 +18,8 @@ pub enum Error {
     Solver(String),
     #[error("decision layer error: {0}")]
     Decision(String),
+    #[error("analytics error: {0}")]
+    Analytics(String),
     #[error("database error: {0}")]
     Sqlx(#[from] sqlx::Error),
     #[error("io error: {0}")]

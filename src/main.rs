@@ -24,7 +24,7 @@ async fn main() -> Result<()> {
         bind: config.bind_addr,
         ..ServerConfig::live()
     };
-    server::serve(server_config).await?;
+    server::serve(server_config, Some(pool)).await?;
 
     Ok(())
 }

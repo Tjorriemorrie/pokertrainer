@@ -1,5 +1,6 @@
 use rand::Rng;
 
+use crate::analytics::PendingDecision;
 use crate::blunder::{BlunderConfig, Tracker};
 use crate::card::Deck;
 use crate::decision::{self, AnalyzedDecision, SurvivalConfig, validate_action};
@@ -65,6 +66,7 @@ pub struct TableSession {
     rng: SeededRng,
     blunder_tracker: Tracker,
     pending: Option<PendingInterception>,
+    records: Vec<PendingDecision>,
 }
 
 impl TableSession {
@@ -89,6 +91,7 @@ impl TableSession {
             rng,
             blunder_tracker: Tracker::new(blunder),
             pending: None,
+            records: Vec::new(),
         }
     }
 
@@ -114,6 +117,7 @@ impl TableSession {
             rng: crate::rng::seeded_rng(seed),
             blunder_tracker: Tracker::new(blunder),
             pending: None,
+            records: Vec::new(),
         }
     }
 
@@ -127,6 +131,24 @@ impl TableSession {
 
     pub fn log(&self) -> &[String] {
         &self.log
+    }
+
+    /// Queues one evaluated hero decision for persistence (S9); the session
+    /// stays database-free and the ownership of the write is the WebSocket
+    /// layer's.
+    fn record_decision(&mut self, analyzed: &AnalyzedDecision, played: Action, ev_loss: f64) {
+        self.records.push(PendingDecision {
+            hand_no: self.hand_no,
+            street: self.state.street(),
+            played: views::action_label(played),
+            optimal: views::action_label(analyzed.optimal.action),
+            ev_loss,
+        });
+    }
+
+    /// Drains the decisions awaiting a database write.
+    pub fn take_records(&mut self) -> Vec<PendingDecision> {
+        std::mem::take(&mut self.records)
     }
 
     /// Test hook: seeds the blunder tracker's rolling EV-loss history.
@@ -261,6 +283,7 @@ impl TableSession {
             }]);
         }
 
+        self.record_decision(&analyzed, action, ev_loss);
         self.apply_submission(action, self.action_no, ev_loss)
     }
 
@@ -283,6 +306,7 @@ impl TableSession {
             hand_no = self.hand_no,
             "review confirmed — applying the intercepted action"
         );
+        self.record_decision(&pending.analyzed, pending.action, ev_loss);
         self.apply_submission(pending.action, pending.action_index, ev_loss)
     }
 
@@ -605,6 +629,39 @@ mod tests {
         assert_eq!(session.state().to_act(), Seat::Hero);
     }
 
+    /// S9: every applied hero submission queues a database record carrying the
+    /// hand, street, played/optimal labels, and the EV lost.
+    #[test]
+    fn every_applied_submission_queues_a_decision_record() {
+        let state = river_facing_bet();
+        let mut session = TableSession::resume(
+            state,
+            Deck::default(),
+            1,
+            43,
+            probe_config(),
+            survival(),
+            never_intercepts(),
+        );
+        session.submit(Action::Fold).unwrap();
+
+        let records = session.take_records();
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(record.hand_no, 1);
+        assert_eq!(record.street, Street::River);
+        assert_eq!(record.played, "Fold");
+        assert!(
+            !record.optimal.is_empty(),
+            "the optimal action is stored too"
+        );
+        assert!(record.ev_loss >= 0.0);
+        assert!(
+            session.take_records().is_empty(),
+            "draining empties the queue"
+        );
+    }
+
     /// The S8 replacement for the S7 unconditional overlay: below the dynamic
     /// threshold there is no feedback at all, and the action applies.
     #[test]
@@ -705,6 +762,10 @@ mod tests {
         assert!(session.has_pending_interception());
         assert_eq!(session.state().to_act(), Seat::Hero, "the game is frozen");
         assert_eq!(session.hand_no(), 1, "still the same hand");
+        assert!(
+            session.take_records().is_empty(),
+            "nothing is recorded while the interception awaits review"
+        );
 
         let stuck = session.submit(Action::Call);
         assert!(
@@ -725,6 +786,22 @@ mod tests {
         );
         assert!(events.contains(&TableEvent::State));
         assert!(!session.has_pending_interception());
+        let records = session.take_records();
+        assert_eq!(
+            records.len(),
+            1,
+            "intercepted actions are recorded on confirmation"
+        );
+        assert_eq!(records[0].played, views::action_label(alternative));
+        assert_eq!(
+            records[0].optimal,
+            views::action_label(probed.optimal.action)
+        );
+        assert_eq!(
+            records[0].street,
+            Street::River,
+            "the frozen street is stored"
+        );
         assert!(
             session.log().iter().any(|line| line.starts_with("You ")),
             "the intercepted action is logged when applied"

@@ -17,6 +17,8 @@ pub use session::{TableEvent, TableSession};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use sqlx::PgPool;
+
 use crate::blunder::BlunderConfig;
 use crate::decision::SurvivalConfig;
 use crate::error::Result;
@@ -31,14 +33,16 @@ pub const LIVE_MCTS: MctsConfig = MctsConfig {
     max_depth: 3,
 };
 
-/// Everything the server needs to run: the bind address and the solver
-/// configuration applied to every new table session.
+/// Everything the server needs to run: the bind address, the solver
+/// configuration applied to every new table session, and how often the
+/// decimated chart snapshot refreshes (S9).
 #[derive(Clone, Copy, Debug)]
 pub struct ServerConfig {
     pub bind: SocketAddr,
     pub mcts: MctsConfig,
     pub survival: SurvivalConfig,
     pub blunder: BlunderConfig,
+    pub snapshot_interval: usize,
 }
 
 impl ServerConfig {
@@ -49,18 +53,22 @@ impl ServerConfig {
             mcts: LIVE_MCTS,
             survival: SurvivalConfig::default(),
             blunder: BlunderConfig::default(),
+            snapshot_interval: 100,
         }
     }
 }
 
 /// Boots the server on the configured address and serves until the process
-/// ends.
-pub async fn serve(config: ServerConfig) -> Result<()> {
+/// ends. `pool` is the analytics store for decision persistence and the
+/// tournaments page (S9); [`None`] keeps the table playable without it.
+pub async fn serve(config: ServerConfig, pool: Option<PgPool>) -> Result<()> {
     let state = Arc::new(AppState {
         assets: http::default_assets(),
         mcts: config.mcts,
         survival: config.survival,
         blunder: config.blunder,
+        pool,
+        snapshot_interval: config.snapshot_interval,
     });
     http::serve(config.bind, state).await
 }
@@ -83,17 +91,22 @@ mod tests {
         assert_eq!(config.bind.to_string(), "127.0.0.1:8744");
         config.mcts.validate().unwrap();
         config.blunder.validate().unwrap();
+        assert!(config.snapshot_interval > 0);
     }
 
     #[tokio::test]
     async fn serve_starts_and_accepts_connections() {
         let bind = ephemeral_addr();
-        let task = tokio::spawn(serve(ServerConfig {
-            bind,
-            mcts: MctsConfig::test(),
-            survival: SurvivalConfig::default(),
-            blunder: crate::blunder::BlunderConfig::default(),
-        }));
+        let task = tokio::spawn(serve(
+            ServerConfig {
+                bind,
+                mcts: MctsConfig::test(),
+                survival: SurvivalConfig::default(),
+                blunder: crate::blunder::BlunderConfig::default(),
+                snapshot_interval: 100,
+            },
+            None,
+        ));
 
         let mut connected = false;
         for _ in 0..100 {

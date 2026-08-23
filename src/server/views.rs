@@ -1,10 +1,12 @@
+use crate::analytics::{ChartPoint, SessionSummary};
 use crate::card::Card;
 use crate::decision::AnalyzedDecision;
 use crate::game::{Action, GameState, HandEndReason, Seat};
 use crate::range::BetSize;
 
-/// The full app shell page: dark table skin, placeholder top-bar chart, and
-/// the containers the WS client swaps fragments into.
+/// The full app shell page: dark table skin, top-bar lifetime EV chart, the
+/// table controls (finish, tournament history), and the containers the WS
+/// client swaps fragments into.
 pub fn index_page() -> String {
     r#"<!doctype html>
 <html lang="en">
@@ -19,6 +21,10 @@ pub fn index_page() -> String {
   <header class="pt-topwrap">
     <div id="ws-status" class="status-wait">connecting…</div>
     <canvas id="ev-chart" width="1200" height="48" class="ev-chart"></canvas>
+    <div class="pt-header-actions">
+      <a href="/tournaments" class="pt-link">Tournament history</a>
+      <button id="finish-table" class="action-btn">Finish table</button>
+    </div>
   </header>
   <main class="pt-main">
     <div id="table"></div>
@@ -28,6 +34,85 @@ pub fn index_page() -> String {
 </body>
 </html>"#
         .to_string()
+}
+
+/// The finished-tournament history page (S9): one server-rendered card per
+/// finished session whose decimated EV dataset is drawn client-side with the
+/// same canvas style as the live top-bar chart.
+pub fn tournaments_page(sessions: &[(SessionSummary, Vec<ChartPoint>)]) -> String {
+    let mut html = String::from(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Poker Trainer — Tournaments</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link rel="stylesheet" href="/assets/style.css">
+</head>
+<body class="bg-[#0b0e13] text-gray-200 min-h-screen">
+<header class="pt-topwrap">
+  <h1 class="pt-page-title">Tournaments</h1>
+  <a href="/" class="pt-link">Back to the table</a>
+</header>
+<main class="pt-main">
+"#,
+    );
+
+    if sessions.is_empty() {
+        html.push_str(
+            r#"<div class="pt-empty">No finished tournaments yet — play a table and finish it (or just close the tab) to see its EV history here.</div>"#,
+        );
+    } else {
+        for (summary, points) in sessions {
+            let dataset = serde_json::to_string(points).unwrap_or_else(|_| "[]".to_string());
+            html.push_str(&format!(
+                r#"<section class="pt-tournament" data-tournament-id="{}">
+  <div class="pt-tournament-head">
+    <span class="pt-tournament-title">Tournament #{}</span>
+    <span class="pt-tournament-meta">{} → {}</span>
+    <span class="pt-tournament-meta">{} hands · {} actions · avg EV loss {:.2}</span>
+  </div>
+  <canvas class="ev-chart" width="1200" height="48" data-points='{}'></canvas>
+</section>"#,
+                summary.id,
+                summary.id,
+                escape(&summary.started),
+                escape(&summary.ended),
+                summary.hands,
+                summary.actions,
+                summary.avg_ev_loss,
+                dataset
+            ));
+        }
+        html.push_str(
+            r##"<script>
+(() => {
+  "use strict";
+  document.querySelectorAll("canvas[data-points]").forEach((canvas) => {
+    const ctx = canvas.getContext("2d");
+    const values = JSON.parse(canvas.dataset.points || "[]").map((point) => point[1]);
+    if (values.length < 2) return;
+    const max = Math.max(1, ...values);
+    const step = canvas.width / (values.length - 1);
+    ctx.beginPath();
+    values.forEach((value, i) => {
+      const x = i * step;
+      const y = canvas.height - (value / max) * (canvas.height - 6) - 3;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.strokeStyle = "#f59e0b";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  });
+})();
+</script>"##,
+        );
+    }
+
+    html.push_str("</main>\n</body>\n</html>\n");
+    html
 }
 
 /// Escapes a dynamic string for safe HTML embedding.
@@ -384,6 +469,95 @@ mod tests {
         assert!(page.contains(r#"<div id="table"></div>"#));
         assert!(page.contains(r#"<div id="overlay"></div>"#));
         assert!(page.contains(r#"/assets/app.js"#));
+        assert!(
+            page.contains(r#"id="finish-table""#),
+            "the S9 finish control is present"
+        );
+        assert!(
+            page.contains(r#"href="/tournaments""#),
+            "the tournament history link is present"
+        );
+    }
+
+    fn summary(
+        id: i32,
+        started: &str,
+        ended: &str,
+        actions: i64,
+        hands: i32,
+        avg_ev_loss: f64,
+    ) -> SessionSummary {
+        SessionSummary {
+            id,
+            started: started.to_string(),
+            ended: ended.to_string(),
+            actions,
+            hands,
+            avg_ev_loss,
+        }
+    }
+
+    #[test]
+    fn tournaments_page_has_an_empty_state() {
+        let empty: Vec<(SessionSummary, Vec<ChartPoint>)> = Vec::new();
+        let page = tournaments_page(&empty);
+        assert!(page.contains("<title>Poker Trainer — Tournaments</title>"));
+        assert!(page.contains("No finished tournaments yet"));
+        assert!(
+            !page.contains("data-tournament-id"),
+            "no cards without finished sessions"
+        );
+    }
+
+    #[test]
+    fn tournaments_page_renders_one_card_per_session_with_chart_data() {
+        let sessions = vec![
+            (
+                summary(
+                    7,
+                    "2026-08-01T10:00:00Z",
+                    "2026-08-01T10:05:00Z",
+                    3,
+                    3,
+                    12.5,
+                ),
+                vec![(1, 0.0), (2, 30.0), (3, 12.5)],
+            ),
+            (
+                summary(
+                    42,
+                    "2026-08-02T09:00:00Z",
+                    "2026-08-02T09:07:00Z",
+                    5,
+                    2,
+                    2.25,
+                ),
+                vec![(1, 4.5), (2, 0.0)],
+            ),
+        ];
+        let page = tournaments_page(&sessions);
+        assert!(page.contains(r#"data-tournament-id="7""#));
+        assert!(page.contains("Tournament #7"));
+        assert!(page.contains("3 hands · 3 actions · avg EV loss 12.50"));
+        assert!(page.contains("2026-08-01T10:00:00Z → 2026-08-01T10:05:00Z"));
+        assert!(page.contains("Tournament #42"));
+        assert!(
+            page.contains(r#"data-points='[[1,0.0],[2,30.0],[3,12.5]]'"#),
+            "decimated datasets are embedded for the client chart"
+        );
+        assert!(page.contains(r#"data-points='[[1,4.5],[2,0.0]]'"#));
+        assert!(page.contains("canvas[data-points]"));
+    }
+
+    #[test]
+    fn tournaments_page_escapes_database_strings() {
+        let sessions = vec![(
+            summary(1, r#"<script>"evil"</script>"#, "end", 1, 1, 0.0),
+            vec![(1, 0.0)],
+        )];
+        let page = tournaments_page(&sessions);
+        assert!(!page.contains(r#"<script>"evil""#));
+        assert!(page.contains("&lt;script&gt;"));
     }
 
     #[test]

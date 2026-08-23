@@ -4,44 +4,184 @@ use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
+use sqlx::PgPool;
 
-use crate::error::{Error, Result};
+use crate::analytics;
+use crate::error::Result;
 use crate::server::http::AppState;
 use crate::server::protocol::{self, ClientMessage, ServerMessage};
 use crate::server::session::{TableEvent, TableSession};
 use crate::server::views;
 
+/// Where the client is sent once it finishes the table (S9).
+pub const TOURNAMENTS_URL: &str = "/tournaments";
+
+/// The outcome of handling one client frame: the frames to send back, how
+/// many chart ticks were produced (snapshot refresh pacing), and whether the
+/// player finished the table.
+pub struct FrameOutcome {
+    pub messages: Vec<String>,
+    pub chart_ticks: usize,
+    pub finish_table: bool,
+}
+
 /// Upgrades `/ws` connections; each connection owns an isolated table session
-/// seeded from OS entropy.
+/// seeded from OS entropy and, when the database is available, an analytics
+/// session that stores every hero decision (S9).
 pub async fn handler(State(app): State<Arc<AppState>>, ws: WebSocketUpgrade) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_socket(socket, app))
 }
 
 async fn handle_socket(socket: WebSocket, app: Arc<AppState>) {
+    let session_id = open_session(app.pool.as_ref()).await;
     let mut session = TableSession::new(rand::random::<u64>(), app.mcts, app.survival, app.blunder);
     if let Err(error) = bootstrap(&mut session) {
         tracing::warn!(%error, "table session bootstrap failed; closing connection");
+        close_session(app.pool.as_ref(), session_id).await;
         return;
     }
 
     let (mut sender, mut receiver) = socket.split();
-    let initial = state_message(&session).unwrap_or_else(|error| error_message(&error.to_string()));
-    if sender.send(Message::Text(initial.into())).await.is_err() {
-        return;
+
+    let mut initial =
+        vec![state_message(&session).unwrap_or_else(|error| error_message(&error.to_string()))];
+    if let Some(snapshot) = snapshot_frame(app.pool.as_ref()).await {
+        initial.push(snapshot);
+    }
+    for frame in initial {
+        if sender.send(Message::Text(frame.into())).await.is_err() {
+            close_session(app.pool.as_ref(), session_id).await;
+            return;
+        }
     }
 
-    while let Some(message) = receiver.next().await {
-        match message {
-            Ok(Message::Text(text)) => {
-                for outgoing in handle_client_message(&mut session, text.as_str()) {
-                    if sender.send(Message::Text(outgoing.into())).await.is_err() {
-                        return;
-                    }
-                }
+    let mut ticks_since_snapshot = 0usize;
+    loop {
+        let message = match receiver.next().await {
+            Some(message) => message,
+            None => break,
+        };
+        let text = match message {
+            Ok(Message::Text(text)) => text,
+            Ok(Message::Close(_)) | Err(_) => break,
+            Ok(_) => continue,
+        };
+
+        let outcome = handle_client_message(&mut session, text.as_str());
+        ticks_since_snapshot += outcome.chart_ticks;
+        persist_records(app.pool.as_ref(), session_id, &mut session).await;
+
+        for frame in outcome.messages {
+            if sender.send(Message::Text(frame.into())).await.is_err() {
+                close_session(app.pool.as_ref(), session_id).await;
+                return;
             }
-            Ok(Message::Close(_)) | Err(_) => return,
-            Ok(_) => {}
         }
+
+        if outcome.finish_table {
+            close_session(app.pool.as_ref(), session_id).await;
+            if let Some(frame) = session_finished_message()
+                && sender.send(Message::Text(frame.into())).await.is_err()
+            {
+                return;
+            }
+            return;
+        }
+
+        if ticks_since_snapshot >= app.snapshot_interval.max(1) {
+            ticks_since_snapshot = 0;
+            if let Some(frame) = snapshot_frame(app.pool.as_ref()).await
+                && sender.send(Message::Text(frame.into())).await.is_err()
+            {
+                close_session(app.pool.as_ref(), session_id).await;
+                return;
+            }
+        }
+    }
+    close_session(app.pool.as_ref(), session_id).await;
+}
+
+/// Opens the analytics session backing this connection; persistence is
+/// best-effort — the table keeps playing without it.
+async fn open_session(pool: Option<&PgPool>) -> Option<i32> {
+    let pool = pool?;
+    match analytics::start_session(pool).await {
+        Ok(session_id) => Some(session_id),
+        Err(error) => {
+            tracing::warn!(%error, "analytics session could not be opened — playing without persistence");
+            None
+        }
+    }
+}
+
+/// Finalizes the analytics session when the table ends (disconnect or an
+/// explicit finish).
+async fn close_session(pool: Option<&PgPool>, session_id: Option<i32>) {
+    let (Some(pool), Some(session_id)) = (pool, session_id) else {
+        return;
+    };
+    if let Err(error) = analytics::finish_session(pool, session_id).await {
+        tracing::warn!(%error, session_id, "analytics session could not be finalized");
+    }
+}
+
+/// Persists every decision queued by the table since the last frame.
+/// Failures are logged and dropped — the game never blocks on the database.
+async fn persist_records(
+    pool: Option<&PgPool>,
+    session_id: Option<i32>,
+    session: &mut TableSession,
+) {
+    let records = session.take_records();
+    if records.is_empty() {
+        return;
+    }
+    let (Some(pool), Some(session_id)) = (pool, session_id) else {
+        return;
+    };
+    if let Err(error) = analytics::persist_records(pool, session_id, &records).await {
+        tracing::warn!(
+            %error,
+            session_id,
+            dropped = records.len(),
+            "decisions could not be persisted — the table keeps playing"
+        );
+    }
+}
+
+/// The decimated chart dataset mapping the last 1,000 stored actions (S9);
+/// an empty dataset means there is no stored history.
+async fn snapshot_frame(pool: Option<&PgPool>) -> Option<String> {
+    let pool = pool?;
+    match analytics::load_recent(pool, analytics::CHART_WINDOW).await {
+        Ok(points) => {
+            let decimated = analytics::decimate(&points, analytics::DECIMATED_POINTS);
+            Some(
+                match (ServerMessage::ChartSnapshot { points: decimated }).to_json() {
+                    Ok(json) => json,
+                    Err(error) => error_message(&error.to_string()),
+                },
+            )
+        }
+        Err(error) => {
+            tracing::warn!(%error, "stored chart history unavailable — sending an empty snapshot");
+            Some(
+                ServerMessage::ChartSnapshot { points: Vec::new() }
+                    .to_json()
+                    .unwrap_or_else(|error| error_message(&error.to_string())),
+            )
+        }
+    }
+}
+
+fn session_finished_message() -> Option<String> {
+    match (ServerMessage::SessionFinished {
+        url: TOURNAMENTS_URL.to_string(),
+    })
+    .to_json()
+    {
+        Ok(json) => Some(json),
+        Err(error) => Some(error_message(&error.to_string())),
     }
 }
 
@@ -61,11 +201,15 @@ fn state_message(session: &TableSession) -> Result<String> {
 
 /// Handles one client text frame; never fails the connection — problems are
 /// reported back as [`ServerMessage::Error`] frames.
-fn handle_client_message(session: &mut TableSession, text: &str) -> Vec<String> {
+fn handle_client_message(session: &mut TableSession, text: &str) -> FrameOutcome {
     let client_message: ClientMessage = match serde_json::from_str(text) {
         Ok(message) => message,
         Err(error) => {
-            return vec![error_message(&format!("malformed message: {error}"))];
+            return FrameOutcome {
+                messages: vec![error_message(&format!("malformed message: {error}"))],
+                chart_ticks: 0,
+                finish_table: false,
+            };
         }
     };
 
@@ -73,16 +217,41 @@ fn handle_client_message(session: &mut TableSession, text: &str) -> Vec<String> 
         ClientMessage::ActionSubmit { action } => {
             match protocol::resolve_action(&action, session.state()) {
                 Ok(resolved) => match session.submit(resolved) {
-                    Ok(events) => events_to_messages(session, events),
-                    Err(error) => vec![error_message(&error.to_string())],
+                    Ok(events) => outcome(session, events),
+                    Err(error) => error_outcome(&error.to_string()),
                 },
-                Err(error) => vec![error_message(&error.to_string())],
+                Err(error) => error_outcome(&error.to_string()),
             }
         }
         ClientMessage::ReviewDone => match session.confirm_review() {
-            Ok(events) => events_to_messages(session, events),
-            Err(error) => vec![error_message(&error.to_string())],
+            Ok(events) => outcome(session, events),
+            Err(error) => error_outcome(&error.to_string()),
         },
+        ClientMessage::FinishTable => FrameOutcome {
+            messages: Vec::new(),
+            chart_ticks: 0,
+            finish_table: true,
+        },
+    }
+}
+
+fn outcome(session: &TableSession, events: Vec<TableEvent>) -> FrameOutcome {
+    let chart_ticks = events
+        .iter()
+        .filter(|event| matches!(event, TableEvent::ChartTick { .. }))
+        .count();
+    FrameOutcome {
+        messages: events_to_messages(session, events),
+        chart_ticks,
+        finish_table: false,
+    }
+}
+
+fn error_outcome(message: &str) -> FrameOutcome {
+    FrameOutcome {
+        messages: vec![error_message(message)],
+        chart_ticks: 0,
+        finish_table: false,
     }
 }
 
@@ -127,7 +296,9 @@ fn error_message(message: &str) -> String {
     .to_json()
     {
         Ok(json) => json,
-        Err(Error::Json(_)) => r#"{"type":"ERROR","message":"serialization failure"}"#.to_string(),
+        Err(crate::error::Error::Json(_)) => {
+            r#"{"type":"ERROR","message":"serialization failure"}"#.to_string()
+        }
         Err(other) => format!(
             r#"{{"type":"ERROR","message":"{}"}}"#,
             other.to_string().replace('\\', "\\\\").replace('"', "\\\"")
@@ -176,9 +347,11 @@ mod tests {
     #[test]
     fn malformed_json_yields_an_error_frame() {
         let mut session = make_session();
-        let messages = handle_client_message(&mut session, "{not json");
-        assert_eq!(messages.len(), 1);
-        let json = parse(&messages[0]);
+        let outcome = handle_client_message(&mut session, "{not json");
+        assert_eq!(outcome.messages.len(), 1);
+        assert!(!outcome.finish_table);
+        assert_eq!(outcome.chart_ticks, 0);
+        let json = parse(&outcome.messages[0]);
         assert_eq!(json["type"], "ERROR");
         assert!(
             json["message"]
@@ -192,12 +365,12 @@ mod tests {
     fn unknown_kinds_yield_errors_without_touching_the_session() {
         let mut session = make_session();
         let hand_no = session.hand_no();
-        let messages = handle_client_message(
+        let outcome = handle_client_message(
             &mut session,
             r#"{"type":"ACTION_SUBMIT","action":{"kind":"zzz"}}"#,
         );
-        assert_eq!(messages.len(), 1);
-        assert_eq!(parse(&messages[0])["type"], "ERROR");
+        assert_eq!(outcome.messages.len(), 1);
+        assert_eq!(parse(&outcome.messages[0])["type"], "ERROR");
         assert_eq!(session.hand_no(), hand_no);
         assert_eq!(session.state().to_act(), Seat::Hero);
     }
@@ -205,12 +378,12 @@ mod tests {
     #[test]
     fn illegal_submissions_are_rejected_over_the_same_frame() {
         let mut session = make_session();
-        let messages = handle_client_message(
+        let outcome = handle_client_message(
             &mut session,
             r#"{"type":"ACTION_SUBMIT","action":{"kind":"check"}}"#,
         );
-        assert_eq!(messages.len(), 1);
-        let json = parse(&messages[0]);
+        assert_eq!(outcome.messages.len(), 1);
+        let json = parse(&outcome.messages[0]);
         assert_eq!(json["type"], "ERROR");
         assert!(json["message"].as_str().unwrap().contains("not available"));
     }
@@ -218,19 +391,21 @@ mod tests {
     #[test]
     fn valid_submissions_run_the_full_pipeline() {
         let mut session = make_session();
-        let messages = handle_client_message(
+        let outcome = handle_client_message(
             &mut session,
             r#"{"type":"ACTION_SUBMIT","action":{"kind":"call"}}"#,
         );
-        assert!(!messages.is_empty());
-        let types: Vec<String> = messages
+        assert_eq!(outcome.chart_ticks, 1, "each applied action charts a tick");
+        assert!(!outcome.messages.is_empty());
+        let types: Vec<String> = outcome
+            .messages
             .iter()
             .map(|m| parse(m)["type"].as_str().unwrap().to_string())
             .collect();
         assert!(types.iter().any(|t| t == "CHART_TICK"));
         assert!(types.iter().any(|t| t == "TABLE_STATE_UPDATE"));
         assert_eq!(
-            parse(messages.last().unwrap())["type"],
+            parse(outcome.messages.last().unwrap())["type"],
             "TABLE_STATE_UPDATE"
         );
     }
@@ -257,11 +432,28 @@ mod tests {
     }
 
     #[test]
+    fn finish_table_yields_the_session_finished_frame() {
+        let mut session = make_session();
+        let outcome = handle_client_message(&mut session, r#"{"type":"FINISH_TABLE"}"#);
+        assert!(
+            outcome.finish_table,
+            "FINISH_TABLE ends the connection loop"
+        );
+        assert!(outcome.messages.is_empty());
+
+        let message = session_finished_message().unwrap();
+        assert_eq!(
+            parse(&message),
+            json!({"type": "SESSION_FINISHED", "url": TOURNAMENTS_URL})
+        );
+    }
+
+    #[test]
     fn review_done_without_a_pending_interception_is_an_error() {
         let mut session = make_session();
-        let messages = handle_client_message(&mut session, r#"{"type":"REVIEW_DONE"}"#);
-        assert_eq!(messages.len(), 1);
-        let json = parse(&messages[0]);
+        let outcome = handle_client_message(&mut session, r#"{"type":"REVIEW_DONE"}"#);
+        assert_eq!(outcome.messages.len(), 1);
+        let json = parse(&outcome.messages[0]);
         assert_eq!(json["type"], "ERROR");
         assert!(
             json["message"]
@@ -282,8 +474,9 @@ mod tests {
         };
         session.stage_pending_interception(action, sample_analysis());
 
-        let messages = handle_client_message(&mut session, r#"{"type":"REVIEW_DONE"}"#);
-        let types: Vec<String> = messages
+        let outcome = handle_client_message(&mut session, r#"{"type":"REVIEW_DONE"}"#);
+        let types: Vec<String> = outcome
+            .messages
             .iter()
             .map(|m| parse(m)["type"].as_str().unwrap().to_string())
             .collect();
@@ -339,7 +532,19 @@ mod tests {
         assert!(message.contains("Hand #1"));
     }
 
+    #[tokio::test]
+    async fn snapshot_frame_without_a_pool_is_none() {
+        assert_eq!(snapshot_frame(None).await, None);
+    }
+
     async fn spawn_server() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        spawn_server_with(None, 100).await
+    }
+
+    async fn spawn_server_with(
+        pool: Option<PgPool>,
+        snapshot_interval: usize,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = ServeListener::new(
@@ -349,6 +554,8 @@ mod tests {
                 mcts: MctsConfig::test(),
                 survival: SurvivalConfig::default(),
                 blunder: BlunderConfig::default(),
+                pool,
+                snapshot_interval,
             }),
         );
         let handle = tokio::spawn(async move {
@@ -448,6 +655,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn finishing_the_table_replies_with_the_navigation_frame() {
+        let (address, _server) = spawn_server().await;
+        let (mut stream, _) = connect_async(format!("ws://{address}/ws")).await.unwrap();
+        let initial = parse(&next_text(&mut stream).await);
+        assert_eq!(initial["type"], "TABLE_STATE_UPDATE");
+
+        stream
+            .send(TMessage::Text(r#"{"type":"FINISH_TABLE"}"#.into()))
+            .await
+            .unwrap();
+        let frame = parse(&next_text(&mut stream).await);
+        assert_eq!(
+            frame,
+            json!({"type": "SESSION_FINISHED", "url": TOURNAMENTS_URL})
+        );
+        drop(stream);
+    }
+
+    #[tokio::test]
     async fn server_survives_client_disconnects() {
         let (address, _server) = spawn_server().await;
         let (stream, _) = connect_async(format!("ws://{address}/ws")).await.unwrap();
@@ -459,5 +685,117 @@ mod tests {
         let initial = parse(&next_text(&mut stream).await);
         assert_eq!(initial["type"], "TABLE_STATE_UPDATE");
         drop(stream);
+    }
+
+    #[tokio::test]
+    async fn pooled_connection_persists_decisions_and_snapshots_history() {
+        let _guard = crate::analytics::DB_TEST_LOCK.lock().await;
+        dotenvy::dotenv().ok();
+        let database_url = match std::env::var("DATABASE_URL") {
+            Ok(url) if !url.is_empty() => url,
+            _ => panic!(
+                "DATABASE_URL is required for database integration tests; start PostgreSQL via pg.ps1"
+            ),
+        };
+        let pool = crate::db::connect(&database_url).await.unwrap();
+        let sessions_before: Option<i32> = sqlx::query_scalar("SELECT max(id) FROM hero_sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        let (address, _server) = spawn_server_with(Some(pool.clone()), 1).await;
+        let (mut stream, _) = connect_async(format!("ws://{address}/ws")).await.unwrap();
+
+        let initial = parse(&next_text(&mut stream).await);
+        assert_eq!(initial["type"], "TABLE_STATE_UPDATE");
+        let snapshot = parse(&next_text(&mut stream).await);
+        assert_eq!(
+            snapshot["type"], "CHART_SNAPSHOT",
+            "a pooled connection replays the stored history first"
+        );
+
+        stream
+            .send(TMessage::Text(
+                r#"{"type":"ACTION_SUBMIT","action":{"kind":"call"}}"#.into(),
+            ))
+            .await
+            .unwrap();
+        let mut refreshed = false;
+        let mut state_seen = false;
+        loop {
+            let frame = parse(&next_text(&mut stream).await);
+            match frame["type"].as_str().unwrap() {
+                "CHART_SNAPSHOT" => {
+                    refreshed = true;
+                    assert!(
+                        !frame["points"].as_array().unwrap().is_empty(),
+                        "the snapshot covers at least the played action"
+                    );
+                    if state_seen {
+                        break;
+                    }
+                }
+                "TRIGGER_TACTICAL_OVERLAY" => {
+                    stream
+                        .send(TMessage::Text(r#"{"type":"REVIEW_DONE"}"#.into()))
+                        .await
+                        .unwrap();
+                }
+                "TABLE_STATE_UPDATE" => {
+                    state_seen = true;
+                    if refreshed {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            refreshed,
+            "the snapshot refreshes once the interval elapses"
+        );
+        assert!(state_seen, "the table state followed the played action");
+
+        stream
+            .send(TMessage::Text(r#"{"type":"FINISH_TABLE"}"#.into()))
+            .await
+            .unwrap();
+        let frame = parse(&next_text(&mut stream).await);
+        assert_eq!(frame["type"], "SESSION_FINISHED");
+        drop(stream);
+
+        let recordings: Vec<(i32, i32, i32, f64)> = sqlx::query_as(
+            "SELECT d.session_id, d.hand_number, d.street, d.ev_loss
+             FROM hero_decisions d
+             JOIN hero_sessions s ON s.id = d.session_id
+             WHERE s.id > $1",
+        )
+        .bind(sessions_before.unwrap_or(0))
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert!(!recordings.is_empty(), "the hero decision was persisted");
+        let (recorded_session, hand_no, street, ev_loss) = recordings[0];
+        assert!(hand_no >= 1);
+        assert!((0..=3).contains(&street), "street index 0..=3");
+        assert!(ev_loss >= 0.0);
+
+        let finalized: Option<String> = sqlx::query_scalar(
+            "SELECT session_end::text FROM hero_sessions WHERE id = $1 AND session_end IS NOT NULL",
+        )
+        .bind(recorded_session)
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        assert!(
+            finalized.is_some(),
+            "finishing the table finalizes the analytics session"
+        );
+
+        sqlx::query("DELETE FROM hero_sessions WHERE id = $1")
+            .bind(recorded_session)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 }

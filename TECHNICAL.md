@@ -34,7 +34,7 @@ This list is the resume point for development. Work top-to-bottom; each stage ge
 - [x] **S6 — Decision layer:** Action submission, optimal-action selection, evaluation logic.
 - [x] **S7 — HTTP + WebSocket bridge:** Axum routes, static assets, templates, WS event protocol.
 - [x] **S8 — Blunder intervention engine:** Error-rate calc, dynamic threshold, ~1-in-3-hand calibration.
-- [ ] **S9 — Session persistence & analytics:** Decision logging, EV tracker, chart decimation.
+- [x] **S9 — Session persistence & analytics:** Decision logging, EV tracker, chart decimation.
 - [ ] **S10 — Frontend (server-rendered):** GGPoker table, control panel, feedback modal, top-bar chart.
 
 ---

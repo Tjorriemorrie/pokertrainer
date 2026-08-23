@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::analytics::ChartPoint;
 use crate::error::{Error, Result};
 use crate::game::{Action, GameState};
 use crate::range::BetSize;
@@ -31,6 +32,9 @@ pub enum ClientMessage {
     /// S8: the player has reviewed an intercepted blunder and wants the held
     /// back action applied.
     ReviewDone,
+    /// S9: the player is done with the table — the session is finalized and
+    /// the server replies with [`ServerMessage::SessionFinished`].
+    FinishTable,
 }
 
 /// Messages sent from the server to the client over the WebSocket.
@@ -47,8 +51,15 @@ pub enum ServerMessage {
         intercepted: bool,
     },
     /// One evaluated action: global action index and the EV lost against the
-    /// optimal action (the decimated 1,000-action dataset arrives in S9).
+    /// optimal action.
     ChartTick { action_index: u64, ev_loss: f64 },
+    /// S9: a decimated dataset (100 points mapping the chart window) sent on
+    /// connect and periodically, so the client renders the stored history
+    /// instantly instead of replaying every tick.
+    ChartSnapshot { points: Vec<ChartPoint> },
+    /// S9: the table was finished (`FINISH_TABLE`); the client navigates to
+    /// the given page.
+    SessionFinished { url: String },
     /// A rejected submission; the connection stays open.
     Error { message: String },
 }
@@ -373,6 +384,8 @@ mod tests {
         );
         let msg: ClientMessage = serde_json::from_str(r#"{"type":"REVIEW_DONE"}"#).unwrap();
         assert_eq!(msg, ClientMessage::ReviewDone);
+        let msg: ClientMessage = serde_json::from_str(r#"{"type":"FINISH_TABLE"}"#).unwrap();
+        assert_eq!(msg, ClientMessage::FinishTable);
     }
 
     #[test]
@@ -402,6 +415,22 @@ mod tests {
             .to_json()
             .unwrap(),
             r#"{"type":"CHART_TICK","action_index":12,"ev_loss":3.5}"#
+        );
+        assert_eq!(
+            ServerMessage::ChartSnapshot {
+                points: vec![(1, 0.0), (10, 2.5)]
+            }
+            .to_json()
+            .unwrap(),
+            r#"{"type":"CHART_SNAPSHOT","points":[[1,0.0],[10,2.5]]}"#
+        );
+        assert_eq!(
+            ServerMessage::SessionFinished {
+                url: "/tournaments".into()
+            }
+            .to_json()
+            .unwrap(),
+            r#"{"type":"SESSION_FINISHED","url":"/tournaments"}"#
         );
         assert_eq!(
             ServerMessage::Error {

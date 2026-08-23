@@ -1,26 +1,33 @@
 use std::sync::Arc;
 
 use axum::Router;
+use axum::extract::State;
 use axum::http::StatusCode;
-use axum::response::{Html, IntoResponse};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use serde_json::json;
+use sqlx::PgPool;
 use tower_http::services::ServeDir;
 
+use crate::analytics;
 use crate::blunder::BlunderConfig;
 use crate::decision::SurvivalConfig;
 use crate::error::Result;
 use crate::mcts::MctsConfig;
 use crate::server::{views, ws};
 
-/// Shared server state injected into handlers: static assets and the solver
-/// configuration used for every table session.
+/// Shared server state injected into handlers: static assets, the solver
+/// configuration used for every table session, the optional analytics store
+/// (S9) backing decision persistence and the tournaments page, and how many
+/// chart ticks pass between decimated snapshot refreshes.
 #[derive(Clone, Debug)]
 pub struct AppState {
     pub assets: ServeDir,
     pub mcts: MctsConfig,
     pub survival: SurvivalConfig,
     pub blunder: BlunderConfig,
+    pub pool: Option<PgPool>,
+    pub snapshot_interval: usize,
 }
 
 /// Serves the repository `assets/` directory, anchored at the crate manifest
@@ -35,6 +42,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/health", get(health))
+        .route("/tournaments", get(tournaments))
         .route("/ws", get(ws::handler))
         .nest_service("/assets", state.assets.clone())
         .with_state(state)
@@ -79,6 +87,45 @@ async fn health() -> impl IntoResponse {
     (StatusCode::OK, axum::Json(json!({ "status": "ok" })))
 }
 
+/// The finished-tournament history page (S9): one decimated EV chart per
+/// finished session. Without a database this endpoint cannot render anything.
+async fn tournaments(State(app): State<Arc<AppState>>) -> Response {
+    let Some(pool) = app.pool.clone() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(json!({ "error": "analytics store is unavailable" })),
+        )
+            .into_response();
+    };
+    match render_tournaments(&pool).await {
+        Ok(sessions) => Html(views::tournaments_page(&sessions)).into_response(),
+        Err(error) => {
+            tracing::warn!(%error, "tournaments page failed to render");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(json!({ "error": error.to_string() })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Loads every finished session plus its decimated chart dataset.
+pub async fn render_tournaments(
+    pool: &PgPool,
+) -> Result<Vec<(analytics::SessionSummary, Vec<analytics::ChartPoint>)>> {
+    let summaries = analytics::list_finished_sessions(pool, 500).await?;
+    let mut sessions = Vec::with_capacity(summaries.len());
+    for summary in summaries {
+        let points = analytics::load_session(pool, summary.id, analytics::CHART_WINDOW).await?;
+        sessions.push((
+            summary,
+            analytics::decimate(&points, analytics::DECIMATED_POINTS),
+        ));
+    }
+    Ok(sessions)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,11 +139,17 @@ mod tests {
             mcts: MctsConfig::test(),
             survival: SurvivalConfig::default(),
             blunder: BlunderConfig::default(),
+            pool: None,
+            snapshot_interval: 100,
         })
     }
 
     async fn get(path: &str) -> (StatusCode, String) {
-        let response = router(test_state())
+        get_with(test_state(), path).await
+    }
+
+    async fn get_with(state: Arc<AppState>, path: &str) -> (StatusCode, String) {
+        let response = router(state)
             .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
             .await
             .unwrap();
@@ -125,6 +178,64 @@ mod tests {
     async fn unknown_routes_return_404() {
         let (status, _) = get("/nope").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn tournaments_requires_an_analytics_store() {
+        let (status, body) = get("/tournaments").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(body.contains("analytics store is unavailable"));
+    }
+
+    #[tokio::test]
+    async fn tournaments_page_lists_finished_sessions_with_charts() {
+        use crate::game::Street;
+
+        let _guard = crate::analytics::DB_TEST_LOCK.lock().await;
+        dotenvy::dotenv().ok();
+        let database_url = match std::env::var("DATABASE_URL") {
+            Ok(url) if !url.is_empty() => url,
+            _ => panic!(
+                "DATABASE_URL is required for database integration tests; start PostgreSQL via pg.ps1"
+            ),
+        };
+        let pool = crate::db::connect(&database_url).await.unwrap();
+        let session_id = analytics::start_session(&pool).await.unwrap();
+        analytics::persist_records(
+            &pool,
+            session_id,
+            &[analytics::PendingDecision {
+                hand_no: 3,
+                street: Street::Turn,
+                played: "Call".into(),
+                optimal: "Fold".into(),
+                ev_loss: 12.5,
+            }],
+        )
+        .await
+        .unwrap();
+        analytics::finish_session(&pool, session_id).await.unwrap();
+
+        let state = Arc::new(AppState {
+            assets: default_assets(),
+            mcts: MctsConfig::test(),
+            survival: SurvivalConfig::default(),
+            blunder: BlunderConfig::default(),
+            pool: Some(pool.clone()),
+            snapshot_interval: 100,
+        });
+        let (status, body) = get_with(state, "/tournaments").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("<title>Poker Trainer — Tournaments</title>"));
+        assert!(body.contains(&format!("data-tournament-id=\"{session_id}\"")));
+        assert!(body.contains("3 hands"));
+        assert!(body.contains("12.5"));
+
+        sqlx::query("DELETE FROM hero_sessions WHERE id = $1")
+            .bind(session_id)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

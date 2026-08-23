@@ -53,6 +53,15 @@
     });
   }
 
+  const finishButton = document.getElementById("finish-table");
+  if (finishButton) {
+    finishButton.addEventListener("click", () => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "FINISH_TABLE" }));
+      }
+    });
+  }
+
   function drawChart() {
     const canvas = document.getElementById("ev-chart");
     if (!canvas) return;
@@ -99,6 +108,14 @@
       case "CHART_TICK":
         chartData.push(msg.ev_loss);
         drawChart();
+        break;
+      case "CHART_SNAPSHOT":
+        chartData.length = 0;
+        (msg.points || []).forEach((point) => chartData.push(point[1]));
+        drawChart();
+        break;
+      case "SESSION_FINISHED":
+        window.location.href = msg.url;
         break;
       case "ERROR":
         console.warn("server:", msg.message);

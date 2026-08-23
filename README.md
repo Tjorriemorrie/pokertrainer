@@ -41,8 +41,8 @@ interface and coaches decision-making with a range-based solver.
     stacks, board, action buttons, log) swapped into the DOM each turn.
   - Server → Client `TRIGGER_TACTICAL_OVERLAY`: the played-vs-optimal
     breakdown, flagged with `intercepted`.
-  - Server → Client `CHART_TICK`: one evaluated action for the top-bar EV
-    tracker (the decimated 1,000-action dataset arrives in S9).
+  - Server → Client `CHART_TICK`: one evaluated action appended to the
+    top-bar EV curve.
 
   Each connection owns a live table session that drives the opponents with a
   simple placeholder policy, runs the S6 survivability solver on your
@@ -60,6 +60,16 @@ interface and coaches decision-making with a range-based solver.
   vs the optimal move. You must press **I understand — continue** (which
   sends `REVIEW_DONE` over the WebSocket) before the held-back action is
   replayed and the game resumes.
+- **S9 — Session persistence & EV analytics:** every hero decision is stored
+  in the database (`hero_decisions`) with the hand number, street, played and
+  optimal action, and the EV lost. The top-bar chart plays back your lifetime
+  history: on connect the server sends a decimated `CHART_SNAPSHOT` (100
+  points mapping the last 1,000 actions across every table) and keeps it
+  refreshed while you play. When you finish a table — press **Finish table**
+  in the top bar or just close the tab — the session is finalized, and the
+  **Tournament history** link (or `/tournaments`) shows one such graph per
+  finished tournament with its hands/actions and average EV loss. Sessions
+  without any stored decision never appear.
 
 The app starts the game server immediately after connecting to the database;
 open the address below in a browser and play. The polished GGPoker table
@@ -110,6 +120,11 @@ Every decision is charted in the top bar; serious blunders pause the table
 with a *Blunder intercepted* modal comparing your move to the optimal one —
 review it and press **I understand — continue** to play on. Invalid clicks
 and reconnects are handled gracefully — the table keeps dealing.
+
+When you're done with a table, click **Finish table** in the top bar (or just
+close the tab): your session is stored, and the **Tournament history** link
+in the top bar takes you to <http://127.0.0.1:8744/tournaments>, where every
+finished tournament shows the same action-EV graph as the live top bar.
 
 ### Running the tests
 
