@@ -75,13 +75,16 @@ interface and coaches decision-making with a range-based solver.
   pods (opponents top-left/top-right, hero bottom-center) that stay in place
   when someone folds or busts, gold pot pill, and per-seat bet badges. The
   table sits top-left; the coach feedback panel renders beside it so
-  blunder breakdowns never cover the cards. The action dock floats on the
-  felt's bottom edge like the real client: steel-blue **Fold**, green
+  blunder breakdowns never cover the cards. The action dock lives in its own
+  block directly below the oval — steel-blue **Fold**, green
   **Check/Call**, red **Bet/Raise**, sizing chips (Min / ½-pot / ¾-pot / Pot /
   All-in) labelled in **chip values only** (stacks show their BB equivalent,
   so you build the conversion reflex yourself), and a golden bet slider with
   −/+ steppers, mouse-wheel fine grain (wheel ±5, shift-wheel ±25), and a
-  synced number box. Card deals, chip commits, folds, and hand wins play as
+  synced number box — so the controls never overlap the hero's cards and the
+  oval never clips any text. Cards use a **four-color deck** (hearts red,
+  diamonds blue, clubs green, spades black) with enlarged rank and suit
+  printing. Card deals, chip commits, folds, and hand wins play as
   WebAudio-synthesized sounds (no files — entirely offline), with a 🔊 mute
   toggle persisted in the browser. Styling is pure CSS: no CDN, works with no
   internet connection.

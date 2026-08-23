@@ -175,12 +175,16 @@ fn suit_symbol(suit: Suit) -> char {
 
 fn card_html(card: Card) -> String {
     let suit = card.suit();
-    let red = matches!(suit, Suit::Hearts | Suit::Diamonds);
+    let suit_class = match suit {
+        Suit::Hearts => " red",
+        Suit::Diamonds => " blue",
+        Suit::Clubs => " green",
+        Suit::Spades => "",
+    };
     let code = card.to_code();
     let rank = &code[..1];
     format!(
-        r#"<span class="pt-card{}" data-suit="{:?}" data-code="{}"><b>{}</b><i>{}</i></span>"#,
-        if red { " red" } else { "" },
+        r#"<span class="pt-card{suit_class}" data-suit="{:?}" data-code="{}"><b>{}</b><i>{}</i></span>"#,
         suit,
         escape(&code),
         escape(rank),
@@ -212,9 +216,10 @@ fn stack_text(stack: u32, big_blind: u32) -> String {
 
 /// The raw table-state HTML fragment swapped into the DOM on every state
 /// change: a GGPoker-style oval felt with fixed seat positions (folded and
-/// busted players stay seated), the board, the pot, the overlaid action dock,
-/// and a collapsible action log. `sounds` carries the WebAudio cues the
-/// client synthesizes for this update.
+/// busted players stay seated), the board, the pot, the action dock in its
+/// own block below the oval (never covering the hero's cards), and a
+/// collapsible action log. `sounds` carries the WebAudio cues the client
+/// synthesizes for this update.
 pub fn table_fragment(state: &GameState, hand_no: u64, log: &[String], sounds: &[Sound]) -> String {
     let level = state.blind_level();
     let mut html = String::new();
@@ -252,9 +257,7 @@ pub fn table_fragment(state: &GameState, hand_no: u64, log: &[String], sounds: &
 
     if state.is_hand_over() {
         html.push_str(&result_html(state));
-    } else if state.to_act() == Seat::Hero {
-        html.push_str(&action_panel(state));
-    } else {
+    } else if state.to_act() != Seat::Hero {
         html.push_str(&format!(
             r#"<div class="pt-wait">Waiting for {}…</div>"#,
             escape(&state.to_act().to_string())
@@ -271,6 +274,13 @@ pub fn table_fragment(state: &GameState, hand_no: u64, log: &[String], sounds: &
     html.push_str("</div>");
 
     html.push_str("</div></div>");
+
+    if !state.is_hand_over() && state.to_act() == Seat::Hero {
+        html.push_str(r#"<div class="pt-action-block">"#);
+        html.push_str(&action_panel(state));
+        html.push_str("</div>");
+    }
+
     html.push_str("</div>");
     html
 }
@@ -584,6 +594,7 @@ pub fn tactical_overlay_fragment(
 mod tests {
     use super::*;
     use crate::card::Deck;
+    use crate::card::Rank;
     use crate::decision::{Analysis, PlayedEvaluation};
     use crate::game::blinds::BlindLevel;
     use crate::rng::seeded_rng;
@@ -846,6 +857,44 @@ mod tests {
         let finished = table_fragment(&state, 1, &[], &[]);
         assert!(finished.contains("win 30 — everyone else folded"));
         assert!(!finished.contains(r#"id="action-panel""#));
+    }
+
+    #[test]
+    fn cards_render_with_four_deck_colors() {
+        for (rank, suit, class) in [
+            (Rank::Ace, Suit::Hearts, "pt-card red"),
+            (Rank::King, Suit::Diamonds, "pt-card blue"),
+            (Rank::Queen, Suit::Clubs, "pt-card green"),
+            (Rank::Jack, Suit::Spades, "pt-card"),
+        ] {
+            let html = card_html(Card::new(rank, suit));
+            assert!(
+                html.starts_with(&format!(r#"<span class="{class}""#)),
+                "suit {suit:?} maps to `{class}`: {html}"
+            );
+        }
+    }
+
+    #[test]
+    fn action_dock_sits_below_the_oval_never_over_the_cards() {
+        let mut state = GameState::new(Seat::Hero, level());
+        state
+            .start_hand(&mut Deck::shuffled(&mut seeded_rng(38)))
+            .unwrap();
+        state.apply_action(Action::Call).unwrap();
+        assert_eq!(state.to_act(), Seat::Hero);
+
+        let fragment = table_fragment(&state, 2, &[], &[]);
+        let felt_marker = fragment.find(r#"<button class="pt-log-toggle""#).unwrap();
+        let dock = fragment.find(r#"id="action-panel""#).unwrap();
+        assert!(
+            dock > felt_marker,
+            "the action panel renders in its own block below the oval: {fragment}"
+        );
+        assert!(
+            fragment.contains(r#"<div class="pt-action-block"><div id="action-panel""#),
+            "{fragment}"
+        );
     }
 
     fn sample_analysis() -> AnalyzedDecision {

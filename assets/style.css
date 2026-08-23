@@ -216,7 +216,6 @@ button { font-family: inherit; }
     inset 0 0 0 3px #0d171d,
     inset 0 0 0 7px rgba(207, 159, 93, 0.28),
     inset 0 0 130px rgba(0, 0, 0, 0.5);
-  overflow: hidden;
 }
 
 /* ------------------------------------------------------------- seats */
@@ -234,7 +233,7 @@ button { font-family: inherit; }
 
 .pt-seat[data-seat="Opponent 1"] { left: 14%; top: 6%; }
 .pt-seat[data-seat="Opponent 2"] { right: 14%; top: 6%; }
-.pt-seat[data-seat="Hero"] { left: 50%; transform: translateX(-50%); bottom: 118px; }
+.pt-seat[data-seat="Hero"] { left: 50%; transform: translateX(-50%); bottom: 46px; }
 
 .pt-avatar {
   position: relative;
@@ -313,9 +312,13 @@ button { font-family: inherit; }
   border: 1px solid #d9d4c6;
 }
 
-.pt-card b { font-size: 0.85rem; line-height: 1; font-weight: 800; }
-.pt-card i { font-style: normal; font-size: 0.95rem; line-height: 1.15; }
+.pt-card b { font-size: 1.02rem; line-height: 1; font-weight: 800; }
+.pt-card i { font-style: normal; font-size: 1.15rem; line-height: 1.1; }
+
+/* Four-color deck: hearts red, diamonds blue, clubs green, spades black. */
 .pt-card.red { color: #c02f2f; }
+.pt-card.blue { color: #2364c8; }
+.pt-card.green { color: #1d7a33; }
 
 .pt-card.back {
   background: repeating-linear-gradient(45deg, #15507c 0 4px, #104064 4px 8px);
@@ -415,8 +418,8 @@ button { font-family: inherit; }
   border-radius: 6px;
 }
 
-.pt-board .pt-card b { font-size: 1.05rem; }
-.pt-board .pt-card i { font-size: 1.1rem; }
+.pt-board .pt-card b { font-size: 1.22rem; }
+.pt-board .pt-card i { font-size: 1.3rem; }
 
 .pt-pot {
   position: absolute;
@@ -473,19 +476,17 @@ button { font-family: inherit; }
 
 /* ---------------------------------------------------------- action dock */
 
+.pt-action-block {
+  background: #0e131a;
+  border-top: 1px solid var(--line);
+  padding: 0.9rem 1.1rem 1.1rem;
+}
+
 .pt-action-dock {
-  position: absolute;
-  left: 50%;
-  bottom: 0;
-  transform: translateX(-50%);
-  width: 680px;
-  padding: 10px 14px 16px;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 9px;
-  background: linear-gradient(rgba(5, 10, 15, 0) 0%, rgba(5, 10, 15, 0.82) 34%);
-  z-index: 10;
 }
 
 .pt-bet-row {
