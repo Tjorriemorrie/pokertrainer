@@ -1,0 +1,12 @@
+[package]
+name = "pokertrainer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dotenvy = "0.15.7"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "derive", "migrate", "macros"] }
+thiserror = "2.0.20"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
