@@ -161,12 +161,17 @@ button { font-family: inherit; }
 /* ------------------------------------------------------------ table */
 
 .table-shell {
-  width: 980px;
+  width: 1180px;
   border-radius: 16px;
   overflow: hidden;
   background: var(--panel);
   border: 1px solid var(--line);
   box-shadow: 0 24px 70px rgba(0, 0, 0, 0.6);
+}
+
+.pt-table-body {
+  display: flex;
+  align-items: stretch;
 }
 
 .pt-topbar {
@@ -355,29 +360,31 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
 
 .pt-bet {
   position: absolute;
-  min-width: 40px;
+  min-width: 46px;
   text-align: center;
   background: linear-gradient(var(--gold-light), var(--gold));
   color: #2a2010;
-  font-size: 0.74rem;
+  font-size: 0.85rem;
   font-weight: 800;
   border-radius: 999px;
-  padding: 2px 9px;
-  border: 1px solid #fff0cc;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.5);
-  z-index: 8;
+  padding: 3px 12px;
+  border: 2px solid #fff0cc;
+  box-shadow:
+    0 2px 8px rgba(0, 0, 0, 0.55),
+    inset 0 1px 0 rgba(255, 255, 255, 0.55);
+  z-index: 9;
 }
 
 .pt-seat[data-seat="Opponent 1"] .pt-bet,
 .pt-seat[data-seat="Opponent 2"] .pt-bet {
   left: 50%;
-  bottom: -36px;
+  bottom: -38px;
   transform: translateX(-50%);
 }
 
 .pt-seat[data-seat="Hero"] .pt-bet {
   left: 50%;
-  top: -26px;
+  top: -38px;
   transform: translateX(-50%);
 }
 
@@ -611,42 +618,51 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
 }
 
 /* ------------------------------------------------------------------ log */
+/* Dock the action log to the left of the oval, exactly as tall as the
+   table; new entries land below older ones and the client auto-scrolls to
+   the newest line. */
 
-.pt-log-toggle {
-  position: absolute;
-  right: 30px;
-  top: 18px;
-  background: rgba(8, 13, 18, 0.72);
-  border: 1px solid rgba(159, 176, 191, 0.3);
-  color: #9fb0bf;
-  font-size: 0.72rem;
-  padding: 0.32rem 0.65rem;
-  border-radius: 8px;
-  cursor: pointer;
-  z-index: 12;
+.pt-hlog {
+  flex: 0 0 200px;
+  height: 600px;
+  display: flex;
+  flex-direction: column;
+  background: #0a0f16;
+  border-right: 1px solid var(--line);
 }
 
-.pt-log-toggle:hover { color: var(--gold); border-color: rgba(207, 159, 93, 0.5); }
+.pt-hlog-title {
+  flex: 0 0 auto;
+  padding: 0.6rem 0.9rem;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--gold);
+  border-bottom: 1px solid var(--line);
+  background: #0d1219;
+}
 
-.pt-log {
-  display: none;
-  position: absolute;
-  right: 20px;
-  top: 52px;
-  width: 240px;
-  max-height: 192px;
+.pt-hlog-lines {
+  flex: 1;
   overflow-y: auto;
-  background: rgba(6, 10, 15, 0.88);
-  border: 1px solid rgba(159, 176, 191, 0.22);
-  border-radius: 10px;
-  padding: 0.55rem 0.75rem;
-  font-size: 0.72rem;
-  color: #8896a5;
+  padding: 0.55rem 0.8rem;
+  font-size: 0.75rem;
   line-height: 1.6;
-  z-index: 12;
+  color: #93a1b0;
 }
 
-.pt-log.open { display: block; }
+.pt-hlog-line {
+  padding: 0.1rem 0;
+  border-bottom: 1px dashed rgba(31, 41, 55, 0.55);
+}
+
+.pt-hlog-line:last-child { border-bottom: none; }
+
+.pt-hlog-line.marker {
+  color: var(--gold);
+  font-weight: 700;
+}
 
 /* ------------------------------------------------------- feedback card */
 

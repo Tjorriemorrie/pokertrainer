@@ -73,7 +73,13 @@ interface and coaches decision-making with a range-based solver.
 - **S10 — GGPoker frontend:** a server-rendered GGPoker table skin with the
   Spin and Gold look — dark-teal oval felt on a wooden rail, three fixed seat
   pods (opponents top-left/top-right, hero bottom-center) that stay in place
-  when someone folds or busts, gold pot pill, and per-seat bet badges. The
+  when someone folds or busts, gold pot pill, and per-seat bet badges: every
+  player's current street bet (blinds included) shows as a gold chip pill in
+  front of their pod — hero included — and is swept into the pot pill as soon
+  as the betting round closes. An **action log** is docked to the left of the
+  oval, exactly as tall as the table, always visible: hand deals, folds,
+  calls, bets, raises and results are appended below earlier entries and the
+  panel auto-scrolls to the newest line. The
   table sits top-left; the coach feedback panel renders beside it so
   blunder breakdowns never cover the cards. The action dock lives in its own
   right-aligned block directly below the oval — steel-blue **Fold**, green

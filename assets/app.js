@@ -266,16 +266,6 @@
     });
   }
 
-  function bindLog() {
-    document.querySelectorAll("#table [data-log-toggle]").forEach((el) => {
-      el.addEventListener("click", () => {
-        const log = el.parentElement.querySelector(".pt-log");
-        if (!log) return;
-        log.classList.toggle("open");
-      });
-    });
-  }
-
   function bindFeedback() {
     document.querySelectorAll("#feedback [data-overlay-close]").forEach((el) => {
       el.addEventListener("click", () => {
@@ -342,7 +332,6 @@
       case "TABLE_STATE_UPDATE":
         swap(table, msg.fragment);
         bindDock();
-        bindLog();
         const shell = document.getElementById("table-state");
         if (shell && shell.dataset.sounds) {
           try {
@@ -351,6 +340,8 @@
             /* ignore malformed sound cues */
           }
         }
+        const logLines = document.getElementById("pt-hlog-lines");
+        if (logLines) logLines.scrollTop = logLines.scrollHeight;
         break;
       case "TRIGGER_TACTICAL_OVERLAY":
         swap(feedback, msg.fragment);

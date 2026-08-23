@@ -16,7 +16,7 @@ pub fn index_page() -> String {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Poker Trainer</title>
-<link rel="stylesheet" href="/assets/style.css?v=5">
+<link rel="stylesheet" href="/assets/style.css?v=6">
 </head>
 <body class="pt-body">
   <header class="pt-topwrap">
@@ -42,7 +42,7 @@ pub fn index_page() -> String {
       </aside>
     </div>
   </main>
-  <script src="/assets/app.js?v=2"></script>
+  <script src="/assets/app.js?v=3"></script>
 </body>
 </html>"#
         .to_string()
@@ -59,7 +59,7 @@ pub fn tournaments_page(sessions: &[(SessionSummary, Vec<ChartPoint>)]) -> Strin
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Poker Trainer — Tournaments</title>
-<link rel="stylesheet" href="/assets/style.css?v=5">
+<link rel="stylesheet" href="/assets/style.css?v=6">
 </head>
 <body class="pt-body">
 <header class="pt-topwrap">
@@ -211,8 +211,9 @@ fn stack_text(stack: u32, big_blind: u32) -> String {
 /// change: a GGPoker-style oval felt with fixed seat positions (folded and
 /// busted players stay seated), the board, the pot, the action dock in its
 /// own right-aligned block below the oval (never covering the hero's cards),
-/// and a collapsible action log. `sounds` carries the WebAudio cues the
-/// client synthesizes for this update.
+/// and an always-visible action log docked to the left of the oval, exactly
+/// as tall as the table. `sounds` carries the WebAudio cues the client
+/// synthesizes for this update.
 pub fn table_fragment(state: &GameState, hand_no: u64, log: &[String], sounds: &[Sound]) -> String {
     let level = state.blind_level();
     let mut html = String::new();
@@ -228,6 +229,8 @@ pub fn table_fragment(state: &GameState, hand_no: u64, log: &[String], sounds: &
         escape(&state.street().to_string())
     ));
 
+    html.push_str(r#"<div class="pt-table-body">"#);
+    html.push_str(&action_log_panel(log));
     html.push_str(r#"<div class="pt-oval"><div class="pt-felt">"#);
     for seat in Seat::ALL {
         html.push_str(&seat_html(state, seat));
@@ -257,16 +260,8 @@ pub fn table_fragment(state: &GameState, hand_no: u64, log: &[String], sounds: &
         ));
     }
 
-    html.push_str(
-        r#"<button class="pt-log-toggle" type="button" data-log-toggle>History <span>▾</span></button>"#,
-    );
-    html.push_str(r#"<div class="pt-log">"#);
-    for line in log {
-        html.push_str(&format!("<div>{}</div>", escape(line)));
-    }
-    html.push_str("</div>");
-
     html.push_str("</div></div>");
+    html.push_str("</div>");
 
     if !state.is_hand_over() && state.to_act() == Seat::Hero {
         html.push_str(r#"<div class="pt-action-block">"#);
@@ -275,6 +270,27 @@ pub fn table_fragment(state: &GameState, hand_no: u64, log: &[String], sounds: &
     }
 
     html.push_str("</div>");
+    html
+}
+
+/// The always-visible action log docked to the left of the oval, exactly as
+/// tall as the table. Lines render top-to-bottom in chronological order — new
+/// entries are inserted below older ones — and the client auto-scrolls the
+/// panel so the newest line stays in view. Hand markers (`— Hand #N …`) get
+/// gold emphasis so deals stand out between actions.
+fn action_log_panel(log: &[String]) -> String {
+    let mut html = String::from(
+        r#"<aside class="pt-hlog"><div class="pt-hlog-title">Action log</div><div id="pt-hlog-lines" class="pt-hlog-lines">"#,
+    );
+    for line in log {
+        let class = if line.starts_with('—') {
+            "pt-hlog-line marker"
+        } else {
+            "pt-hlog-line"
+        };
+        html.push_str(&format!("<div class=\"{class}\">{}</div>", escape(line)));
+    }
+    html.push_str("</div></aside>");
     html
 }
 
@@ -643,7 +659,7 @@ mod tests {
             "the S10 sound toggle is present"
         );
         assert!(
-            page.contains(r#"/assets/style.css?v=5"#),
+            page.contains(r#"/assets/style.css?v=6"#),
             "the stylesheet link is versioned so browsers drop stale cached CSS"
         );
         assert!(
@@ -879,10 +895,10 @@ mod tests {
         assert_eq!(state.to_act(), Seat::Hero);
 
         let fragment = table_fragment(&state, 2, &[], &[]);
-        let felt_marker = fragment.find(r#"<button class="pt-log-toggle""#).unwrap();
+        let oval_marker = fragment.find(r#"<div class="pt-oval""#).unwrap();
         let dock = fragment.find(r#"id="action-panel""#).unwrap();
         assert!(
-            dock > felt_marker,
+            dock > oval_marker,
             "the action panel renders in its own block below the oval: {fragment}"
         );
         assert!(
@@ -908,6 +924,82 @@ mod tests {
         assert!(
             fragment.contains(r#"<div class="pt-seat-cards">"#),
             "cards are still rendered: {fragment}"
+        );
+    }
+
+    #[test]
+    fn action_log_docks_left_of_the_table_with_newest_lines_below() {
+        let mut state = GameState::new(Seat::Hero, level());
+        state
+            .start_hand(&mut Deck::shuffled(&mut seeded_rng(40)))
+            .unwrap();
+        let log = vec![
+            "— Hand #1 — blinds 10/20".to_string(),
+            "Opponent 2 call 20".to_string(),
+            "You raise to 60".to_string(),
+        ];
+
+        let fragment = table_fragment(&state, 1, &log, &[]);
+        let panel = fragment.find(r#"class="pt-hlog""#).unwrap();
+        let oval = fragment.find(r#"<div class="pt-oval""#).unwrap();
+        assert!(
+            panel < oval,
+            "the action log docks left of the oval: {fragment}"
+        );
+        assert!(fragment.contains(r#"id="pt-hlog-lines""#));
+        let dealt = fragment.find("— Hand #1 — blinds 10/20").unwrap();
+        let latest = fragment.find("You raise to 60").unwrap();
+        assert!(
+            latest > dealt,
+            "newer lines render below older ones: {fragment}"
+        );
+        assert!(
+            fragment.contains(r#"class="pt-hlog-line marker">— Hand #1"#),
+            "hand markers get gold emphasis: {fragment}"
+        );
+        assert!(
+            !fragment.contains("pt-log-toggle"),
+            "the collapsible history toggle is gone: {fragment}"
+        );
+    }
+
+    #[test]
+    fn street_bets_render_in_front_of_every_seat_until_round_ends() {
+        let mut state = GameState::new(Seat::Hero, level());
+        let mut deck = Deck::shuffled(&mut seeded_rng(41));
+        state.start_hand(&mut deck).unwrap();
+
+        // Blinds count as street bets: the button (hero) posted 10, the BB 20.
+        let fragment = table_fragment(&state, 5, &[], &[]);
+        assert!(
+            fragment.contains(r#"class="pt-bet">10</div>"#),
+            "the small blind shows in front of the hero: {fragment}"
+        );
+        assert!(
+            fragment.contains(r#"class="pt-bet">20</div>"#),
+            "the big blind shows in front of its seat: {fragment}"
+        );
+
+        // Opponent 2 raises to 60: their street bet badge reads 60.
+        state.apply_action(Action::Raise(60)).unwrap();
+        let raised = table_fragment(&state, 5, &[], &[]);
+        assert!(
+            raised.contains(r#"class="pt-bet">60</div>"#),
+            "the raise amount shows in front of the raiser: {raised}"
+        );
+
+        // Close the betting round: street bets are swept into the pot pill.
+        state.apply_action(Action::Call).unwrap();
+        state.apply_action(Action::Call).unwrap();
+        state.advance_street(&mut deck).unwrap();
+        let settled = table_fragment(&state, 5, &[], &[]);
+        assert!(
+            !settled.contains("pt-bet"),
+            "street bets are gone once the round closes: {settled}"
+        );
+        assert!(
+            settled.contains(r#"class="pt-pot">180</div>"#),
+            "the pot pill carries the whole round: {settled}"
         );
     }
 
