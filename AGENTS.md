@@ -6,13 +6,16 @@
 - All public items must compile clean under `cargo clippy -- -D warnings` and `cargo fmt --check`.
 - No `unwrap()`/`expect()` or panics in runtime code paths that should propagate errors; use the crate-wide `Result`/`Error` convention from `src/error.rs`.
 - No `unsafe`. Use stable Rust only; no nightly features.
-- Prefer typed errors (`thiserror`) over boxed/string errors; keep dependencies minimal per TECHNICAL.md.
+- Prefer typed errors (`thiserror`) over boxed/string errors.
+- Crates may be used freely when they solve a real problem (e.g. `rand`, `rand_chacha`).
 - Log via `tracing` macros; never log secrets or credentials (redact URLs/keys).
 
 ## Tests
 
-- This repo requires no tests. Do not write unit/integration tests unless explicitly asked.
-- Verification is: `cargo check`, `cargo clippy -- -D warnings`, `cargo fmt --check`, and a manual `cargo run`.
+- Unit/integration tests are standard practice; write them for every module.
+- Every module must maintain >= 90% line coverage, verified with `cargo llvm-cov`. Per-module is the gate; all modules of a finished stage must pass before committing.
+- The entire test suite must finish within 30 seconds; keep tests fast, reduce or restructure anything slower.
+- Verification is: `cargo check`, `cargo clippy -- -D warnings`, `cargo fmt --check`, `cargo test`, the coverage check, and a manual `cargo run`.
 
 ## Commits
 
