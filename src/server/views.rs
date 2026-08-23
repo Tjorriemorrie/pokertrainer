@@ -16,7 +16,7 @@ pub fn index_page() -> String {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Poker Trainer</title>
-<link rel="stylesheet" href="/assets/style.css?v=2">
+<link rel="stylesheet" href="/assets/style.css?v=3">
 </head>
 <body class="pt-body">
   <header class="pt-topwrap">
@@ -42,7 +42,7 @@ pub fn index_page() -> String {
       </aside>
     </div>
   </main>
-  <script src="/assets/app.js"></script>
+  <script src="/assets/app.js?v=2"></script>
 </body>
 </html>"#
         .to_string()
@@ -59,7 +59,7 @@ pub fn tournaments_page(sessions: &[(SessionSummary, Vec<ChartPoint>)]) -> Strin
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Poker Trainer — Tournaments</title>
-<link rel="stylesheet" href="/assets/style.css?v=2">
+<link rel="stylesheet" href="/assets/style.css?v=3">
 </head>
 <body class="pt-body">
 <header class="pt-topwrap">
@@ -205,12 +205,13 @@ fn avatar_label(seat: Seat) -> String {
     }
 }
 
-/// Formats a stack pill: chips first, then the big-blind equivalent so the
-/// player learns to convert in their head.
+/// Formats a stack pill: chips first, then the big-blind equivalent hidden
+/// behind a `?` placeholder — holding Alt reveals the real value, so the
+/// player learns to convert chips to blinds without the client doing it.
 fn stack_text(stack: u32, big_blind: u32) -> String {
+    let bb = stack as f32 / big_blind as f32;
     format!(
-        "{stack}<span class=\"pt-bb\">{:.1} BB</span>",
-        stack as f32 / big_blind as f32
+        "{stack}<span class=\"pt-bb\"><span class=\"pt-bb-q\">?</span><span class=\"pt-bb-real\" data-bb=\"{bb:.1}\">{bb:.1}&nbsp;BB</span></span>"
     )
 }
 
@@ -657,7 +658,7 @@ mod tests {
             "the S10 sound toggle is present"
         );
         assert!(
-            page.contains(r#"/assets/style.css?v=2"#),
+            page.contains(r#"/assets/style.css?v=3"#),
             "the stylesheet link is versioned so browsers drop stale cached CSS"
         );
         assert!(
@@ -778,8 +779,12 @@ mod tests {
             "opponent cards stay hidden"
         );
         assert!(
-            fragment.contains("BB"),
-            "stacks show their big-blind equivalent"
+            fragment.contains(r#"<span class="pt-bb-q">?</span>"#),
+            "stacks show a `?` placeholder instead of the BB equivalent: {fragment}"
+        );
+        assert!(
+            fragment.contains(r#"class="pt-bb-real" data-bb="#),
+            "the BB equivalent is embedded for the Alt-hold reveal: {fragment}"
         );
     }
 

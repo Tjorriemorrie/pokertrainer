@@ -152,6 +152,18 @@
     if (!muted) ensureAudio();
   });
 
+  /* ------------------------------------------------------- alt bb reveal */
+
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "Alt") document.body.classList.add("alt-held");
+  });
+  window.addEventListener("keyup", (event) => {
+    if (event.key === "Alt") document.body.classList.remove("alt-held");
+  });
+  window.addEventListener("blur", () => {
+    document.body.classList.remove("alt-held");
+  });
+
   /* ------------------------------------------------------------ ws / dom */
 
   const swap = (el, html) => {

@@ -233,7 +233,7 @@ button { font-family: inherit; }
 
 .pt-seat[data-seat="Opponent 1"] { left: 14%; top: 6%; }
 .pt-seat[data-seat="Opponent 2"] { right: 14%; top: 6%; }
-.pt-seat[data-seat="Hero"] { left: 50%; transform: translateX(-50%); bottom: 46px; }
+.pt-seat[data-seat="Hero"] { left: 50%; transform: translateX(-50%); bottom: 4px; }
 
 .pt-avatar {
   position: relative;
@@ -299,8 +299,8 @@ button { font-family: inherit; }
 .pt-seat-cards .pt-card:nth-child(2) { transform: rotate(3deg) translateY(3px); }
 
 .pt-card {
-  width: 40px;
-  height: 56px;
+  width: 44px;
+  height: 62px;
   border-radius: 5px;
   background: #fbfaf6;
   color: #1d2733;
@@ -312,8 +312,8 @@ button { font-family: inherit; }
   border: 1px solid #d9d4c6;
 }
 
-.pt-card b { font-size: 1.02rem; line-height: 1; font-weight: 800; }
-.pt-card i { font-style: normal; font-size: 1.15rem; line-height: 1.1; }
+.pt-card b { font-size: 1.3rem; line-height: 1; font-weight: 800; }
+.pt-card i { font-style: normal; font-size: 1.45rem; line-height: 1.05; }
 
 /* Four-color deck: hearts red, diamonds blue, clubs green, spades black. */
 .pt-card.red { color: #c02f2f; }
@@ -353,6 +353,11 @@ button { font-family: inherit; }
   font-weight: 600;
   font-size: 0.68rem;
 }
+
+.pt-bb-real { display: none; }
+
+body.pt-body.alt-held .pt-bb-q { display: none; }
+body.pt-body.alt-held .pt-bb-real { display: inline; }
 
 .pt-flag {
   position: absolute;
@@ -413,13 +418,13 @@ button { font-family: inherit; }
 }
 
 .pt-board .pt-card {
-  width: 54px;
-  height: 76px;
+  width: 60px;
+  height: 84px;
   border-radius: 6px;
 }
 
-.pt-board .pt-card b { font-size: 1.22rem; }
-.pt-board .pt-card i { font-size: 1.3rem; }
+.pt-board .pt-card b { font-size: 1.5rem; }
+.pt-board .pt-card i { font-size: 1.7rem; }
 
 .pt-pot {
   position: absolute;
@@ -473,6 +478,8 @@ button { font-family: inherit; }
 }
 
 .pt-reveal .pt-card { width: 28px; height: 40px; }
+.pt-reveal .pt-card b { font-size: 0.78rem; }
+.pt-reveal .pt-card i { font-size: 0.88rem; }
 
 /* ---------------------------------------------------------- action dock */
 

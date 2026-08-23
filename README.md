@@ -78,8 +78,12 @@ interface and coaches decision-making with a range-based solver.
   blunder breakdowns never cover the cards. The action dock lives in its own
   right-aligned block directly below the oval — steel-blue **Fold**, green
   **Check/Call**, red **Bet/Raise**, sizing chips (Min / ½-pot / ¾-pot / Pot /
-  All-in) labelled in **chip values only** (stacks show their BB equivalent,
-  so you build the conversion reflex yourself), and a golden bet slider with
+  All-in) labelled in **chip values only** — stacks show their chip count
+  with a muted `?` placeholder for the BB equivalent, just like the real
+  client (hold **Alt** and the BB values appear, so you still build the
+  conversion reflex yourself), the hero pod sits at the bottom edge of the
+  felt, and the dock is right-aligned below the oval — and a golden bet
+  slider with
   −/+ steppers, mouse-wheel fine grain (wheel ±5, shift-wheel ±25), and a
   synced number box — so the controls never overlap the hero's cards and the
   oval never clips any text. Cards use a **four-color deck** (hearts red,
