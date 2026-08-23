@@ -252,13 +252,28 @@ fn result_html(state: &GameState) -> String {
 
 /// The tactical-breakdown fragment overlaid on the table: played vs optimal
 /// action, the EV given up, and the survivability-ranked candidate table.
-pub fn tactical_overlay_fragment(hand_no: u64, decision: &AnalyzedDecision) -> String {
+/// Intercepted blunders (S8) freezes the table: the modal is titled
+/// accordingly and only offers a confirmation that unlocks the transition.
+pub fn tactical_overlay_fragment(
+    hand_no: u64,
+    decision: &AnalyzedDecision,
+    intercepted: bool,
+) -> String {
     let optimal = decision.optimal;
     let mut html = String::from(r#"<div id="tactical-overlay" class="pt-overlay">"#);
     html.push_str(r#"<div class="pt-overlay-card">"#);
-    html.push_str(&format!(
-        r#"<h2 class="pt-overlay-title">Hand #{hand_no} — Decision review</h2>"#
-    ));
+    if intercepted {
+        html.push_str(&format!(
+            r#"<h2 class="pt-overlay-title">Hand #{hand_no} — Blunder intercepted</h2>"#
+        ));
+        html.push_str(
+            r#"<div class="pt-intercept-note">The table is paused. Review the blunder below before continuing.</div>"#,
+        );
+    } else {
+        html.push_str(&format!(
+            r#"<h2 class="pt-overlay-title">Hand #{hand_no} — Decision review</h2>"#
+        ));
+    }
 
     if let Some(played) = &decision.played {
         html.push_str(&format!(
@@ -305,7 +320,13 @@ pub fn tactical_overlay_fragment(hand_no: u64, decision: &AnalyzedDecision) -> S
     }
     html.push_str("</table>");
 
-    html.push_str(r#"<button class="action-btn" data-overlay-close>Continue</button>"#);
+    if intercepted {
+        html.push_str(
+            r#"<button class="action-btn pt-confirm" data-overlay-confirm>I understand — continue</button>"#,
+        );
+    } else {
+        html.push_str(r#"<button class="action-btn" data-overlay-close>Continue</button>"#);
+    }
     html.push_str("</div></div>");
     html
 }
@@ -445,7 +466,7 @@ mod tests {
 
     #[test]
     fn tactical_overlay_compares_played_and_optimal() {
-        let fragment = tactical_overlay_fragment(7, &sample_analysis());
+        let fragment = tactical_overlay_fragment(7, &sample_analysis(), false);
         assert!(fragment.contains("Hand #7 — Decision review"));
         assert!(fragment.contains("You played <b>Call</b>"));
         assert!(fragment.contains("Optimal: <b>Fold</b>"));
@@ -456,10 +477,23 @@ mod tests {
     }
 
     #[test]
+    fn intercepted_overlay_is_titled_flagged_and_only_confirms() {
+        let fragment = tactical_overlay_fragment(7, &sample_analysis(), true);
+        assert!(fragment.contains("Hand #7 — Blunder intercepted"));
+        assert!(fragment.contains("The table is paused"));
+        assert!(fragment.contains(r#"data-overlay-confirm"#));
+        assert!(fragment.contains("I understand — continue"));
+        assert!(
+            !fragment.contains(r#"data-overlay-close"#),
+            "an intercepted modal cannot be silently dismissed"
+        );
+    }
+
+    #[test]
     fn tactical_overlay_handles_a_missing_played_action() {
         let mut decision = sample_analysis();
         decision.played = None;
-        let fragment = tactical_overlay_fragment(7, &decision);
+        let fragment = tactical_overlay_fragment(7, &decision, false);
         assert!(!fragment.contains("EV lost"));
         assert!(fragment.contains("Optimal: <b>Fold</b>"));
     }

@@ -17,6 +17,7 @@ pub use session::{TableEvent, TableSession};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use crate::blunder::BlunderConfig;
 use crate::decision::SurvivalConfig;
 use crate::error::Result;
 use crate::mcts::MctsConfig;
@@ -37,6 +38,7 @@ pub struct ServerConfig {
     pub bind: SocketAddr,
     pub mcts: MctsConfig,
     pub survival: SurvivalConfig,
+    pub blunder: BlunderConfig,
 }
 
 impl ServerConfig {
@@ -46,6 +48,7 @@ impl ServerConfig {
             bind: SocketAddr::from(([127, 0, 0, 1], 8744)),
             mcts: LIVE_MCTS,
             survival: SurvivalConfig::default(),
+            blunder: BlunderConfig::default(),
         }
     }
 }
@@ -57,6 +60,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
         assets: http::default_assets(),
         mcts: config.mcts,
         survival: config.survival,
+        blunder: config.blunder,
     });
     http::serve(config.bind, state).await
 }
@@ -78,6 +82,7 @@ mod tests {
         let config = ServerConfig::live();
         assert_eq!(config.bind.to_string(), "127.0.0.1:8744");
         config.mcts.validate().unwrap();
+        config.blunder.validate().unwrap();
     }
 
     #[tokio::test]
@@ -87,6 +92,7 @@ mod tests {
             bind,
             mcts: MctsConfig::test(),
             survival: SurvivalConfig::default(),
+            blunder: crate::blunder::BlunderConfig::default(),
         }));
 
         let mut connected = false;

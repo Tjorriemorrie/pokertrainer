@@ -218,6 +218,15 @@ body {
   font-weight: 700;
 }
 
+.pt-intercept-note {
+  background: #78350f;
+  color: #fcd34d;
+  border-radius: 8px;
+  padding: 0.5rem 0.8rem;
+  margin: 0.6rem 0;
+  font-weight: 600;
+}
+
 .pt-ranking {
   width: 100%;
   border-collapse: collapse;
@@ -236,3 +245,6 @@ body {
 .pt-ranking tr.played { color: #fca5a5; }
 
 .pt-overlay-card .action-btn { width: 100%; }
+
+.pt-confirm { background: #064e3b; border-color: #065f46; font-weight: 700; }
+.pt-confirm:hover { background: #065f46; }

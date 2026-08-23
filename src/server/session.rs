@@ -1,8 +1,9 @@
 use rand::Rng;
 
+use crate::blunder::{BlunderConfig, Tracker};
 use crate::card::Deck;
 use crate::decision::{self, AnalyzedDecision, SurvivalConfig, validate_action};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::game::blinds::BLIND_SCHEDULE;
 use crate::game::{Action, ActionOutcome, GameState, HandEndReason, Seat, Street};
 use crate::mcts::MctsConfig;
@@ -25,21 +26,33 @@ pub enum TableEvent {
     ///
     /// [`TABLE_STATE_UPDATE`]: super::protocol::ServerMessage::TableStateUpdate
     State,
-    /// The played action was worse than optimal: overlay a full tactical
-    /// breakdown. Placeholder trigger — S8 replaces this with the dynamic
-    /// ~1-in-3-hand threshold logic.
+    /// The played action was a calibrated blunder: overlay a full tactical
+    /// breakdown and freeze the table until the review is confirmed.
+    /// Intercepted decisions are held back — the game state is only advanced
+    /// by [`TableSession::confirm_review`].
     TacticalOverlay {
         decision: AnalyzedDecision,
         hand_no: u64,
+        /// S8: whether the state transition was halted (the client must send
+        /// `REVIEW_DONE` to advance).
+        intercepted: bool,
     },
     /// One evaluated action for the top-bar EV tracker. S9 adds the decimated
     /// 1,000-action dataset.
     ChartTick { action_index: u64, ev_loss: f64 },
 }
 
-/// A live table session: one game state, a deck, the solver configuration, and
-/// a placeholder policy for the two opponents. Each WebSocket connection owns
-/// one session.
+/// An intercepted submission held back by the blunder engine: the action is
+/// replayed once the player confirms the review.
+pub struct PendingInterception {
+    action: Action,
+    analyzed: AnalyzedDecision,
+    action_index: u64,
+}
+
+/// A live table session: one game state, a deck, the solver configuration, the
+/// blunder-intervention tracker, and a placeholder policy for the two
+/// opponents. Each WebSocket connection owns one session.
 pub struct TableSession {
     state: GameState,
     deck: Deck,
@@ -50,11 +63,18 @@ pub struct TableSession {
     action_no: u64,
     log: Vec<String>,
     rng: SeededRng,
+    blunder_tracker: Tracker,
+    pending: Option<PendingInterception>,
 }
 
 impl TableSession {
     /// A fresh session at the first blind level with a shuffled deck.
-    pub fn new(seed: u64, mcts: MctsConfig, survival: SurvivalConfig) -> Self {
+    pub fn new(
+        seed: u64,
+        mcts: MctsConfig,
+        survival: SurvivalConfig,
+        blunder: BlunderConfig,
+    ) -> Self {
         let mut rng = crate::rng::seeded_rng(seed);
         let deck = Deck::shuffled(&mut rng);
         Self {
@@ -67,6 +87,8 @@ impl TableSession {
             action_no: 0,
             log: Vec::new(),
             rng,
+            blunder_tracker: Tracker::new(blunder),
+            pending: None,
         }
     }
 
@@ -78,6 +100,7 @@ impl TableSession {
         seed: u64,
         mcts: MctsConfig,
         survival: SurvivalConfig,
+        blunder: BlunderConfig,
     ) -> Self {
         Self {
             state,
@@ -89,6 +112,8 @@ impl TableSession {
             action_no: 0,
             log: Vec::new(),
             rng: crate::rng::seeded_rng(seed),
+            blunder_tracker: Tracker::new(blunder),
+            pending: None,
         }
     }
 
@@ -104,6 +129,35 @@ impl TableSession {
         &self.log
     }
 
+    /// Test hook: seeds the blunder tracker's rolling EV-loss history.
+    #[cfg(test)]
+    fn prime_blunder_history(&mut self, ev_losses: &[f64]) {
+        for &loss in ev_losses {
+            self.blunder_tracker.record_action(loss);
+        }
+    }
+
+    /// Test hook: parks an interception as if the dynamic threshold had
+    /// fired, so callers can exercise the review-confirmation path directly.
+    #[cfg(test)]
+    pub(crate) fn stage_pending_interception(
+        &mut self,
+        action: Action,
+        analyzed: AnalyzedDecision,
+    ) {
+        self.action_no += 1;
+        self.pending = Some(PendingInterception {
+            action,
+            analyzed,
+            action_index: self.action_no,
+        });
+    }
+
+    /// Whether a blunder interception is currently awaiting review.
+    pub fn has_pending_interception(&self) -> bool {
+        self.pending.is_some()
+    }
+
     /// Deals the next hand, rotating the button and reshuffling an exhausted
     /// deck.
     pub fn deal_next_hand(&mut self) -> crate::error::Result<()> {
@@ -113,6 +167,7 @@ impl TableSession {
         if self.hand_no == 0 {
             self.state.start_hand(&mut self.deck)?;
         } else {
+            self.blunder_tracker.end_hand();
             self.state.next_hand(&mut self.deck)?;
         }
         self.hand_no += 1;
@@ -152,8 +207,17 @@ impl TableSession {
     /// Validates, analyzes, and applies a hero action, returning the events to
     /// publish. The solve runs synchronously in the calling task (the local,
     /// single-user WebSocket connection).
+    ///
+    /// S8: when the played action's EV loss clears the calibrated dynamic
+    /// threshold the state transition is halted — the action is parked in
+    /// [`PendingInterception`] and only replayed by [`Self::confirm_review`].
     pub fn submit(&mut self, action: Action) -> Result<Vec<TableEvent>> {
         validate_action(&self.state, action)?;
+        if self.pending.is_some() {
+            return Err(Error::Decision(
+                "a blunder interception is pending review — confirm it first".into(),
+            ));
+        }
 
         let analyzed = decision::analyze(
             &mut self.rng,
@@ -171,18 +235,65 @@ impl TableSession {
             .map(|played| played.ev_loss)
             .unwrap_or(0.0);
 
-        let mut events = Vec::new();
-        if ev_loss > 0.0 {
-            events.push(TableEvent::TacticalOverlay {
-                decision: analyzed.clone(),
-                hand_no: self.hand_no,
-            });
-        }
-        events.push(TableEvent::ChartTick {
-            action_index: self.action_no,
-            ev_loss,
-        });
+        let intercepted = self
+            .blunder_tracker
+            .should_intercept(ev_loss, self.state.blind_level().big_blind);
+        self.blunder_tracker.record_action(ev_loss);
 
+        if intercepted {
+            tracing::info!(
+                ev_loss,
+                threshold = %(self.blunder_tracker.threshold(
+                    self.state.blind_level().big_blind
+                )),
+                hand_no = self.hand_no,
+                "blunder intercepted — freezing the state transition"
+            );
+            self.pending = Some(PendingInterception {
+                action,
+                analyzed: analyzed.clone(),
+                action_index: self.action_no,
+            });
+            return Ok(vec![TableEvent::TacticalOverlay {
+                decision: analyzed,
+                hand_no: self.hand_no,
+                intercepted: true,
+            }]);
+        }
+
+        self.apply_submission(action, self.action_no, ev_loss)
+    }
+
+    /// Applies the intercepted action after the review confirmation: replays
+    /// the held-back submission, lets opponents act, and publishes the chart
+    /// tick and new table state.
+    pub fn confirm_review(&mut self) -> Result<Vec<TableEvent>> {
+        let pending = self
+            .pending
+            .take()
+            .ok_or_else(|| Error::Decision("no blunder interception is pending review".into()))?;
+        let ev_loss = pending
+            .analyzed
+            .played
+            .as_ref()
+            .map(|played| played.ev_loss)
+            .unwrap_or(0.0);
+        tracing::info!(
+            action = ?pending.action,
+            hand_no = self.hand_no,
+            "review confirmed — applying the intercepted action"
+        );
+        self.apply_submission(pending.action, pending.action_index, ev_loss)
+    }
+
+    /// Applies one validated hero action and publishes its events: a chart
+    /// tick plus the refreshed table state.
+    fn apply_submission(
+        &mut self,
+        action: Action,
+        action_index: u64,
+        ev_loss: f64,
+    ) -> Result<Vec<TableEvent>> {
         let call_amount = self.state.legal_actions().call_amount;
         self.log_line(views::describe_action(Seat::Hero, action, call_amount));
         apply_settled(&mut self.state, &mut self.deck, action)?;
@@ -191,8 +302,13 @@ impl TableSession {
         }
         self.pump()?;
 
-        events.push(TableEvent::State);
-        Ok(events)
+        Ok(vec![
+            TableEvent::ChartTick {
+                action_index,
+                ev_loss,
+            },
+            TableEvent::State,
+        ])
     }
 
     fn log_line(&mut self, line: String) {
@@ -313,6 +429,7 @@ pub fn placeholder_action<R: Rng + ?Sized>(rng: &mut R, state: &GameState) -> Ac
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::blunder::BlunderConfig;
     use crate::card::{Card, Deck, Rank, Suit};
     use crate::decision::SurvivalConfig;
     use crate::game::STARTING_STACK;
@@ -336,6 +453,24 @@ mod tests {
 
     fn survival() -> SurvivalConfig {
         SurvivalConfig::default()
+    }
+
+    /// S8 test preset: the warm-up floor is unreachable, so nothing ever
+    /// intercepts — suboptimal actions apply immediately without feedback.
+    fn never_intercepts() -> BlunderConfig {
+        BlunderConfig {
+            fallback_bb: f64::MAX,
+            ..BlunderConfig::default()
+        }
+    }
+
+    /// S8 test preset: a zero-chip floor means every non-optimal decision
+    /// intercepts (a one-entry history is enough to leave the empty state).
+    fn always_intercepts() -> BlunderConfig {
+        BlunderConfig {
+            fallback_bb: 0.0,
+            ..BlunderConfig::default()
+        }
     }
 
     /// A full 52-card deck order whose first five board cards are the given
@@ -412,7 +547,7 @@ mod tests {
 
     #[test]
     fn dealing_and_pumping_reach_the_hero() {
-        let mut session = TableSession::new(41, probe_config(), survival());
+        let mut session = TableSession::new(41, probe_config(), survival(), never_intercepts());
         session.deal_next_hand().unwrap();
         session.pump().unwrap();
         assert_eq!(session.state().to_act(), Seat::Hero);
@@ -423,8 +558,15 @@ mod tests {
     #[test]
     fn pump_stops_immediately_when_it_is_already_the_heros_turn() {
         let state = river_facing_bet();
-        let mut session =
-            TableSession::resume(state, Deck::default(), 3, 42, probe_config(), survival());
+        let mut session = TableSession::resume(
+            state,
+            Deck::default(),
+            3,
+            42,
+            probe_config(),
+            survival(),
+            never_intercepts(),
+        );
         assert!(!session.pump().unwrap());
         assert_eq!(session.state().to_act(), Seat::Hero);
         assert_eq!(session.hand_no(), 3);
@@ -433,8 +575,15 @@ mod tests {
     #[test]
     fn submit_emits_a_chart_tick_and_a_state_update() {
         let state = river_facing_bet();
-        let mut session =
-            TableSession::resume(state, Deck::default(), 1, 43, probe_config(), survival());
+        let mut session = TableSession::resume(
+            state,
+            Deck::default(),
+            1,
+            43,
+            probe_config(),
+            survival(),
+            never_intercepts(),
+        );
         let events = session.submit(Action::Fold).unwrap();
         assert!(
             events.iter().any(|event| matches!(
@@ -456,8 +605,10 @@ mod tests {
         assert_eq!(session.state().to_act(), Seat::Hero);
     }
 
+    /// The S8 replacement for the S7 unconditional overlay: below the dynamic
+    /// threshold there is no feedback at all, and the action applies.
     #[test]
-    fn suboptimal_actions_trigger_the_overlay_optimal_ones_do_not() {
+    fn suboptimal_plays_below_the_threshold_apply_without_feedback() {
         let state = river_facing_bet();
         let mut probe_rng = seeded_rng(44);
         let probed = decision::analyze(
@@ -483,14 +634,45 @@ mod tests {
             44,
             probe_config(),
             survival(),
+            never_intercepts(),
         );
         let events = session.submit(alternative).unwrap();
         assert!(
             events
                 .iter()
-                .any(|event| matches!(event, TableEvent::TacticalOverlay { .. })),
-            "a suboptimal play must trigger the tactical overlay"
+                .all(|event| !matches!(event, TableEvent::TacticalOverlay { .. })),
+            "below the dynamic threshold no overlay is shown"
         );
+        assert!(
+            events.iter().any(
+                |event| matches!(event, TableEvent::ChartTick { ev_loss, .. } if *ev_loss > 0.0)
+            )
+        );
+        assert!(events.contains(&TableEvent::State));
+        assert!(!session.has_pending_interception());
+    }
+
+    /// Above the dynamic threshold the action is held back: only the overlay
+    /// fires, the state is untouched, and `REVIEW_DONE` replays it.
+    #[test]
+    fn blunders_above_the_threshold_intercept_and_await_review() {
+        let state = river_facing_bet();
+        let mut probe_rng = seeded_rng(44);
+        let probed = decision::analyze(
+            &mut probe_rng,
+            &state,
+            &[uniform(), uniform()],
+            &probe_config(),
+            &survival(),
+            None,
+        )
+        .unwrap();
+        let optimal = probed.optimal.action;
+        let alternative = *mcts::candidates(&state)
+            .iter()
+            .map(|(action, _)| action)
+            .find(|action| **action != optimal)
+            .expect("a river-facing state has multiple candidates");
 
         let mut session = TableSession::resume(
             river_facing_bet(),
@@ -499,8 +681,87 @@ mod tests {
             44,
             probe_config(),
             survival(),
+            always_intercepts(),
         );
-        let events = session.submit(optimal).unwrap();
+        session.prime_blunder_history(&[5.0]);
+
+        let events = session.submit(alternative).unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "an interception publishes only the overlay"
+        );
+        assert!(
+            matches!(
+                &events[0],
+                TableEvent::TacticalOverlay {
+                    intercepted: true,
+                    hand_no: 1,
+                    ..
+                }
+            ),
+            "the overlay must be flagged as intercepted: {events:?}"
+        );
+        assert!(session.has_pending_interception());
+        assert_eq!(session.state().to_act(), Seat::Hero, "the game is frozen");
+        assert_eq!(session.hand_no(), 1, "still the same hand");
+
+        let stuck = session.submit(Action::Call);
+        assert!(
+            matches!(stuck, Err(Error::Decision(_))),
+            "submissions are blocked while a review is pending"
+        );
+
+        let events = session.confirm_review().unwrap();
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                TableEvent::ChartTick {
+                    action_index: 1,
+                    ev_loss,
+                } if *ev_loss > 0.0
+            )),
+            "the chart tick is published on confirmation"
+        );
+        assert!(events.contains(&TableEvent::State));
+        assert!(!session.has_pending_interception());
+        assert!(
+            session.log().iter().any(|line| line.starts_with("You ")),
+            "the intercepted action is logged when applied"
+        );
+
+        assert!(
+            matches!(session.confirm_review(), Err(Error::Decision(_))),
+            "a second confirmation has nothing to replay"
+        );
+    }
+
+    /// Even with a zero-chip threshold, an optimal play never intercepts.
+    #[test]
+    fn optimal_plays_never_intercept() {
+        let state = river_facing_bet();
+        let mut probe_rng = seeded_rng(44);
+        let probed = decision::analyze(
+            &mut probe_rng,
+            &state,
+            &[uniform(), uniform()],
+            &probe_config(),
+            &survival(),
+            None,
+        )
+        .unwrap();
+
+        let mut session = TableSession::resume(
+            river_facing_bet(),
+            Deck::default(),
+            1,
+            44,
+            probe_config(),
+            survival(),
+            always_intercepts(),
+        );
+        session.prime_blunder_history(&[5.0]);
+        let events = session.submit(probed.optimal.action).unwrap();
         assert!(
             events
                 .iter()
@@ -510,13 +771,21 @@ mod tests {
         assert!(events.iter().any(
             |event| matches!(event, TableEvent::ChartTick { ev_loss, .. } if *ev_loss == 0.0)
         ));
+        assert!(!session.has_pending_interception());
     }
 
     #[test]
     fn submit_rejects_illegal_actions_without_touching_the_state() {
         let state = river_facing_bet();
-        let mut session =
-            TableSession::resume(state, Deck::default(), 1, 45, probe_config(), survival());
+        let mut session = TableSession::resume(
+            state,
+            Deck::default(),
+            1,
+            45,
+            probe_config(),
+            survival(),
+            never_intercepts(),
+        );
         // Snapshot what the session looked like before the rejected action.
         let to_act = session.state().to_act();
         assert!(session.submit(Action::Check).is_err());
@@ -592,8 +861,15 @@ mod tests {
     #[test]
     fn one_hero_submission_can_complete_more_than_one_opponent_hand() {
         let state = river_facing_bet();
-        let mut session =
-            TableSession::resume(state, Deck::default(), 1, 47, probe_config(), survival());
+        let mut session = TableSession::resume(
+            state,
+            Deck::default(),
+            1,
+            47,
+            probe_config(),
+            survival(),
+            never_intercepts(),
+        );
         let events = session.submit(Action::Call).unwrap();
         assert!(!events.is_empty());
         assert_eq!(session.hand_no(), 2);
@@ -602,7 +878,7 @@ mod tests {
 
     #[test]
     fn action_log_is_appended_and_trimmed() {
-        let mut session = TableSession::new(48, probe_config(), survival());
+        let mut session = TableSession::new(48, probe_config(), survival(), never_intercepts());
         session.deal_next_hand().unwrap();
         for _ in 0..40 {
             session.log_line("filler line".to_string());

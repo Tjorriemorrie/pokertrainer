@@ -7,6 +7,7 @@ use axum::routing::get;
 use serde_json::json;
 use tower_http::services::ServeDir;
 
+use crate::blunder::BlunderConfig;
 use crate::decision::SurvivalConfig;
 use crate::error::Result;
 use crate::mcts::MctsConfig;
@@ -19,6 +20,7 @@ pub struct AppState {
     pub assets: ServeDir,
     pub mcts: MctsConfig,
     pub survival: SurvivalConfig,
+    pub blunder: BlunderConfig,
 }
 
 /// Serves the repository `assets/` directory, anchored at the crate manifest
@@ -89,6 +91,7 @@ mod tests {
             assets: default_assets(),
             mcts: MctsConfig::test(),
             survival: SurvivalConfig::default(),
+            blunder: BlunderConfig::default(),
         })
     }
 

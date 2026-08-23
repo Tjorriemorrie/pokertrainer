@@ -44,6 +44,13 @@
         if (overlay) overlay.innerHTML = "";
       });
     });
+    document.querySelectorAll("#overlay [data-overlay-confirm]").forEach((el) => {
+      el.addEventListener("click", () => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        ws.send(JSON.stringify({ type: "REVIEW_DONE" }));
+        if (overlay) overlay.innerHTML = "";
+      });
+    });
   }
 
   function drawChart() {

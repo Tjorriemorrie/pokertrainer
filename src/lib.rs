@@ -1,3 +1,4 @@
+pub mod blunder;
 pub mod card;
 pub mod config;
 pub mod db;

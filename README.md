@@ -40,8 +40,7 @@ interface and coaches decision-making with a range-based solver.
   - Server → Client `TABLE_STATE_UPDATE`: the table HTML fragment (seats,
     stacks, board, action buttons, log) swapped into the DOM each turn.
   - Server → Client `TRIGGER_TACTICAL_OVERLAY`: the played-vs-optimal
-    breakdown. Currently fires on any suboptimal action; S8 replaces this
-    with the calibrated ~1-in-3-hand interception.
+    breakdown, flagged with `intercepted`.
   - Server → Client `CHART_TICK`: one evaluated action for the top-bar EV
     tracker (the decimated 1,000-action dataset arrives in S9).
 
@@ -49,6 +48,18 @@ interface and coaches decision-making with a range-based solver.
   simple placeholder policy, runs the S6 survivability solver on your
   decisions, and deals the next hand automatically. Opponent ranges are
   uniform until profile/sequence-node loading is wired into the loop.
+- **S8 — Blunder intervention engine:** monitors the hero's rolling error
+  rate (EV loss per action) and intercepts the worst blunders with a dynamic,
+  calibrated threshold. After a 24-action warm-up the trigger is the
+  `(1 − p)`-quantile of your own last 300 EV losses, where
+  `p = 1/(3 · A_hand)` and `A_hand` is the rolling actions-per-hand ratio —
+  tuned so about one hand in three is interrupted. Below the threshold the
+  game just continues (the chart still records every EV loss). When the
+  threshold is hit, the state transition halts before your action is applied:
+  the table freezes behind a *Blunder interrupted* modal showing the blunder
+  vs the optimal move. You must press **I understand — continue** (which
+  sends `REVIEW_DONE` over the WebSocket) before the held-back action is
+  replayed and the game resumes.
 
 The app starts the game server immediately after connecting to the database;
 open the address below in a browser and play. The polished GGPoker table
@@ -95,8 +106,9 @@ followed by `pokertrainer table server listening`.
 Open <http://127.0.0.1:8744> in a browser (change `SERVER_ADDR` in `.env` to
 serve elsewhere). The table deals automatically: when the yellow action
 buttons appear, click one (or enter a bet amount and press **Bet amount**).
-Suboptimal plays open a tactical overlay that shows the optimal move and the
-EV lost; the bar at the top charts your EV loss per action. Invalid clicks
+Every decision is charted in the top bar; serious blunders pause the table
+with a *Blunder intercepted* modal comparing your move to the optimal one —
+review it and press **I understand — continue** to play on. Invalid clicks
 and reconnects are handled gracefully — the table keeps dealing.
 
 ### Running the tests

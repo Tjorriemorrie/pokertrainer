@@ -18,7 +18,7 @@ pub async fn handler(State(app): State<Arc<AppState>>, ws: WebSocketUpgrade) -> 
 }
 
 async fn handle_socket(socket: WebSocket, app: Arc<AppState>) {
-    let mut session = TableSession::new(rand::random::<u64>(), app.mcts, app.survival);
+    let mut session = TableSession::new(rand::random::<u64>(), app.mcts, app.survival, app.blunder);
     if let Err(error) = bootstrap(&mut session) {
         tracing::warn!(%error, "table session bootstrap failed; closing connection");
         return;
@@ -79,6 +79,10 @@ fn handle_client_message(session: &mut TableSession, text: &str) -> Vec<String> 
                 Err(error) => vec![error_message(&error.to_string())],
             }
         }
+        ClientMessage::ReviewDone => match session.confirm_review() {
+            Ok(events) => events_to_messages(session, events),
+            Err(error) => vec![error_message(&error.to_string())],
+        },
     }
 }
 
@@ -90,12 +94,15 @@ fn events_to_messages(session: &TableSession, events: Vec<TableEvent>) -> Vec<St
                 fragment: views::table_fragment(session.state(), session.hand_no(), session.log()),
             }
             .to_json(),
-            TableEvent::TacticalOverlay { decision, hand_no } => {
-                ServerMessage::TriggerTacticalOverlay {
-                    fragment: views::tactical_overlay_fragment(hand_no, &decision),
-                }
-                .to_json()
+            TableEvent::TacticalOverlay {
+                decision,
+                hand_no,
+                intercepted,
+            } => ServerMessage::TriggerTacticalOverlay {
+                fragment: views::tactical_overlay_fragment(hand_no, &decision, intercepted),
+                intercepted,
             }
+            .to_json(),
             TableEvent::ChartTick {
                 action_index,
                 ev_loss,
@@ -131,6 +138,7 @@ fn error_message(message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::blunder::BlunderConfig;
     use crate::decision::{Analysis, AnalyzedDecision, PlayedEvaluation, SurvivalConfig};
     use crate::game::{Action, Seat};
     use crate::mcts::MctsConfig;
@@ -144,7 +152,12 @@ mod tests {
     use tokio_tungstenite::tungstenite::Message as TMessage;
 
     fn make_session() -> TableSession {
-        let mut session = TableSession::new(81, MctsConfig::test(), SurvivalConfig::default());
+        let mut session = TableSession::new(
+            81,
+            MctsConfig::test(),
+            SurvivalConfig::default(),
+            BlunderConfig::default(),
+        );
         bootstrap(&mut session).unwrap();
         session
     }
@@ -244,12 +257,49 @@ mod tests {
     }
 
     #[test]
+    fn review_done_without_a_pending_interception_is_an_error() {
+        let mut session = make_session();
+        let messages = handle_client_message(&mut session, r#"{"type":"REVIEW_DONE"}"#);
+        assert_eq!(messages.len(), 1);
+        let json = parse(&messages[0]);
+        assert_eq!(json["type"], "ERROR");
+        assert!(
+            json["message"]
+                .as_str()
+                .unwrap()
+                .contains("no blunder interception")
+        );
+    }
+
+    #[test]
+    fn review_done_applies_a_held_back_interception() {
+        let mut session = make_session();
+        let legal = session.state().legal_actions();
+        let action = if legal.can_check {
+            Action::Check
+        } else {
+            Action::Fold
+        };
+        session.stage_pending_interception(action, sample_analysis());
+
+        let messages = handle_client_message(&mut session, r#"{"type":"REVIEW_DONE"}"#);
+        let types: Vec<String> = messages
+            .iter()
+            .map(|m| parse(m)["type"].as_str().unwrap().to_string())
+            .collect();
+        assert!(types.iter().any(|t| t == "CHART_TICK"), "{types:?}");
+        assert_eq!(types.last().unwrap(), "TABLE_STATE_UPDATE");
+        assert!(!session.has_pending_interception());
+    }
+
+    #[test]
     fn events_map_to_the_three_server_frames() {
         let session = make_session();
         let events = vec![
             TableEvent::TacticalOverlay {
                 decision: sample_analysis(),
                 hand_no: 1,
+                intercepted: true,
             },
             TableEvent::ChartTick {
                 action_index: 7,
@@ -261,11 +311,12 @@ mod tests {
         assert_eq!(messages.len(), 3);
         let overlay = parse(&messages[0]);
         assert_eq!(overlay["type"], "TRIGGER_TACTICAL_OVERLAY");
+        assert_eq!(overlay["intercepted"], true);
         assert!(
             overlay["fragment"]
                 .as_str()
                 .unwrap()
-                .contains("Decision review")
+                .contains("Blunder intercepted")
         );
         assert_eq!(
             parse(&messages[1]),
@@ -297,6 +348,7 @@ mod tests {
                 assets: default_assets(),
                 mcts: MctsConfig::test(),
                 survival: SurvivalConfig::default(),
+                blunder: BlunderConfig::default(),
             }),
         );
         let handle = tokio::spawn(async move {
@@ -344,12 +396,20 @@ mod tests {
                     assert_eq!(frame["action_index"], 1);
                 }
                 "TRIGGER_TACTICAL_OVERLAY" => {
+                    assert_eq!(
+                        frame["intercepted"], true,
+                        "S8 overlays are always intercepted"
+                    );
                     assert!(
                         frame["fragment"]
                             .as_str()
                             .unwrap()
-                            .contains("Decision review")
+                            .contains("Blunder intercepted")
                     );
+                    stream
+                        .send(TMessage::Text(r#"{"type":"REVIEW_DONE"}"#.into()))
+                        .await
+                        .unwrap();
                 }
                 "TABLE_STATE_UPDATE" => break,
                 other => panic!("unexpected frame type {other}"),

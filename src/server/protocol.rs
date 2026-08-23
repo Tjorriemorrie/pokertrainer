@@ -25,7 +25,12 @@ pub struct SubmittedAction {
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(tag = "type", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ClientMessage {
-    ActionSubmit { action: SubmittedAction },
+    ActionSubmit {
+        action: SubmittedAction,
+    },
+    /// S8: the player has reviewed an intercepted blunder and wants the held
+    /// back action applied.
+    ReviewDone,
 }
 
 /// Messages sent from the server to the client over the WebSocket.
@@ -35,7 +40,12 @@ pub enum ServerMessage {
     /// A raw table-state HTML fragment to swap into the DOM.
     TableStateUpdate { fragment: String },
     /// A full tactical-breakdown fragment to overlay the table.
-    TriggerTacticalOverlay { fragment: String },
+    TriggerTacticalOverlay {
+        fragment: String,
+        /// S8: whether the state transition was halted — the client must
+        /// send `REVIEW_DONE` before the action is applied.
+        intercepted: bool,
+    },
     /// One evaluated action: global action index and the EV lost against the
     /// optimal action (the decimated 1,000-action dataset arrives in S9).
     ChartTick { action_index: u64, ev_loss: f64 },
@@ -361,6 +371,8 @@ mod tests {
             .is_err(),
             "wrong field types must be rejected"
         );
+        let msg: ClientMessage = serde_json::from_str(r#"{"type":"REVIEW_DONE"}"#).unwrap();
+        assert_eq!(msg, ClientMessage::ReviewDone);
     }
 
     #[test]
@@ -375,11 +387,12 @@ mod tests {
         );
         assert_eq!(
             ServerMessage::TriggerTacticalOverlay {
-                fragment: "<div>overlay</div>".into()
+                fragment: "<div>overlay</div>".into(),
+                intercepted: true
             }
             .to_json()
             .unwrap(),
-            r#"{"type":"TRIGGER_TACTICAL_OVERLAY","fragment":"<div>overlay</div>"}"#
+            r#"{"type":"TRIGGER_TACTICAL_OVERLAY","fragment":"<div>overlay</div>","intercepted":true}"#
         );
         assert_eq!(
             ServerMessage::ChartTick {
