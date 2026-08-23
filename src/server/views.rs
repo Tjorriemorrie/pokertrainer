@@ -421,7 +421,7 @@ fn action_panel(state: &GameState) -> String {
         }
         if legal.can_all_in {
             html.push_str(&format!(
-                r#"<button type="button" class="pt-chip-size allin" data-size="{stack}">All-in</button>"#
+                r#"<button type="button" class="pt-chip-size allin" data-bucket="ALLIN" data-size="{max}">All-in</button>"#
             ));
         }
         html.push_str("</div>");
@@ -462,6 +462,11 @@ fn action_panel(state: &GameState) -> String {
             r#"<button type="button" class="action-btn green" data-kind="call">Call {}</button>"#,
             legal.call_amount
         ));
+    }
+    if !sizing && legal.can_all_in {
+        html.push_str(
+            r#"<button type="button" class="action-btn red" data-kind="all_in">All-in</button>"#,
+        );
     }
     if sizing {
         let red_label = if betting {
@@ -831,6 +836,30 @@ mod tests {
             "bucket identity stays on the wire protocol: {fragment}"
         );
         assert!(fragment.contains(r#"data-kind="raise""#));
+        assert!(
+            fragment.contains(r#"data-bucket="ALLIN" data-size="500""#),
+            "the all-in chip is a live preset that drives the slider to the whole stack: {fragment}"
+        );
+    }
+
+    #[test]
+    fn action_panel_offers_a_direct_all_in_when_calling_costs_the_whole_stack() {
+        let mut state = GameState::new(Seat::Hero, level());
+        state
+            .start_hand(&mut Deck::shuffled(&mut seeded_rng(36)))
+            .unwrap();
+        state.apply_action(Action::Raise(500)).unwrap();
+        assert_eq!(state.to_act(), Seat::Hero);
+
+        let fragment = table_fragment(&state, 1, &[], &[]);
+        assert!(
+            fragment.contains(r#"data-kind="all_in""#),
+            "a hero who can only call for the whole stack still gets an all-in button: {fragment}"
+        );
+        assert!(
+            !fragment.contains(r#"data-bucket="ALLIN""#),
+            "the sizing dock is hidden when raising is impossible: {fragment}"
+        );
     }
 
     #[test]
