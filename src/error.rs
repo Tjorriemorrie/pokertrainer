@@ -10,6 +10,8 @@ pub enum Error {
     InvalidConfig(String),
     #[error("migration error: {0}")]
     Migration(String),
+    #[error("range store failure: {0}")]
+    Store(String),
     #[error("database error: {0}")]
     Sqlx(#[from] sqlx::Error),
 }

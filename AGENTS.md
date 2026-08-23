@@ -15,7 +15,8 @@
 - Unit/integration tests are standard practice; write them for every module.
 - Every module must maintain >= 90% line coverage, verified with `cargo llvm-cov`. Per-module is the gate; all modules of a finished stage must pass before committing.
 - The entire test suite must finish within 30 seconds; keep tests fast, reduce or restructure anything slower.
-- Verification is: `cargo check`, `cargo clippy -- -D warnings`, `cargo fmt --check`, `cargo test`, the coverage check, and a manual `cargo run`.
+- Database integration tests require the local PostgreSQL instance (start it with `pg.ps1`).
+- Verification is: `cargo check`, `cargo clippy -- -D warnings`, `cargo fmt --check`, `cargo test`, `cargo llvm-cov --lib --summary-only` (per-module gate), and a manual `cargo run`.
 
 ## Commits
 
