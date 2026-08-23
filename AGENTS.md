@@ -22,3 +22,9 @@
 
 - When a task or stage is finished and verified, commit immediately with a concise message (e.g. "S1 — Database layer"); do not wait for the user to ask.
 - Stage only intended files; never commit secrets, IDE config (`.idea/`), `data/`, or `target/`.
+
+## README
+
+- After finishing a task or stage, update `README.md` so it always reflects the current state of the app.
+- The README must explain how to run the app, assuming the reader has never run a Rust program: prerequisites, exact commands, and any local services (e.g. PostgreSQL via `pg.ps1`).
+- The README must give a basic explanation of the features that are implemented so far (only what exists, not planned work).
