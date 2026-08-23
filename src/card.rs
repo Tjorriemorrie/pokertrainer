@@ -49,6 +49,11 @@ impl Rank {
         Rank::King,
         Rank::Ace,
     ];
+
+    /// The single-character rank label (`'2'`..`'9'`, `'T'`, `'J'`, `'Q'`, `'K'`, `'A'`).
+    pub const fn as_char(self) -> char {
+        RANK_CHARS[self as usize] as char
+    }
 }
 
 const RANK_CHARS: &[u8; 13] = b"23456789TJQKA";

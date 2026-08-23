@@ -2,8 +2,17 @@ use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
 use crate::error::{Error, Result};
+use crate::range::hands::{HAND_COUNT, Range};
 
-pub const RANGE_SIZE: usize = 169;
+pub use crate::range::hands::HAND_COUNT as RANGE_SIZE;
+
+/// A stored contextual range: the 169-hand weights plus the number of hands
+/// that contributed to it (used for the population fallback).
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoredRange {
+    pub weights: Range,
+    pub sample_count: u32,
+}
 
 pub async fn connect(database_url: &str) -> Result<PgPool> {
     let pool = PgPoolOptions::new()
@@ -24,33 +33,45 @@ pub async fn load_contextual_range(
     pool: &PgPool,
     profile_id: i32,
     node: &str,
-) -> Result<Option<[f32; RANGE_SIZE]>> {
-    let weights: Option<Vec<f32>> = sqlx::query_scalar(
-        "SELECT weights FROM contextual_ranges WHERE profile_id = $1 AND node = $2",
+    stack_bucket: i16,
+) -> Result<Option<StoredRange>> {
+    let row: Option<(Vec<f32>, i32)> = sqlx::query_as(
+        "SELECT weights, sample_count FROM contextual_ranges
+         WHERE profile_id = $1 AND node = $2 AND stack_bucket = $3",
     )
     .bind(profile_id)
     .bind(node)
+    .bind(stack_bucket)
     .fetch_optional(pool)
     .await?;
 
-    weights.map(ensure_range_len).transpose()
+    row.map(|(weights, sample_count)| {
+        Ok(StoredRange {
+            weights: ensure_range_len(weights)?,
+            sample_count: sample_count.max(0) as u32,
+        })
+    })
+    .transpose()
 }
 
 pub async fn upsert_contextual_range(
     pool: &PgPool,
     profile_id: i32,
     node: &str,
-    weights: &[f32; RANGE_SIZE],
+    stack_bucket: i16,
+    range: &StoredRange,
 ) -> Result<()> {
     sqlx::query(
-        "INSERT INTO contextual_ranges (node, profile_id, weights, updated_at)
-         VALUES ($1, $2, $3, now())
-         ON CONFLICT (node, profile_id)
-         DO UPDATE SET weights = EXCLUDED.weights, updated_at = now()",
+        "INSERT INTO contextual_ranges (node, profile_id, stack_bucket, weights, sample_count, updated_at)
+         VALUES ($1, $2, $3, $4, $5, now())
+         ON CONFLICT (node, profile_id, stack_bucket)
+         DO UPDATE SET weights = EXCLUDED.weights, sample_count = EXCLUDED.sample_count, updated_at = now()",
     )
     .bind(node)
     .bind(profile_id)
-    .bind(weights.as_slice())
+    .bind(stack_bucket)
+    .bind(range.weights.as_slice())
+    .bind(range.sample_count as i32)
     .execute(pool)
     .await?;
     Ok(())
@@ -70,11 +91,11 @@ pub async fn upsert_opponent_profile(pool: &PgPool, name: &str, player_type: &st
     .map_err(Error::from)
 }
 
-fn ensure_range_len(weights: Vec<f32>) -> Result<[f32; RANGE_SIZE]> {
+fn ensure_range_len(weights: Vec<f32>) -> Result<Range> {
     weights.try_into().map_err(|short: Vec<f32>| {
         Error::Sqlx(sqlx::Error::Decode(
             format!(
-                "contextual_ranges.weights has length {}, expected {RANGE_SIZE}",
+                "contextual_ranges.weights has length {}, expected {HAND_COUNT}",
                 short.len()
             )
             .into(),
@@ -115,6 +136,13 @@ mod tests {
         connect(&database_url()).await.unwrap()
     }
 
+    fn stored(weights: Range, sample_count: u32) -> StoredRange {
+        StoredRange {
+            weights,
+            sample_count,
+        }
+    }
+
     #[tokio::test]
     async fn connect_and_run_migrations() {
         let pool = test_pool().await;
@@ -149,32 +177,40 @@ mod tests {
         let node = unique("test_range_node");
 
         assert_eq!(
-            load_contextual_range(&pool, profile_id, &node)
+            load_contextual_range(&pool, profile_id, &node, 25)
                 .await
                 .unwrap(),
             None
         );
 
         let first = [0.001f32; RANGE_SIZE];
-        upsert_contextual_range(&pool, profile_id, &node, &first)
+        upsert_contextual_range(&pool, profile_id, &node, 25, &stored(first, 0))
             .await
             .unwrap();
         assert_eq!(
-            load_contextual_range(&pool, profile_id, &node)
+            load_contextual_range(&pool, profile_id, &node, 25)
                 .await
                 .unwrap(),
-            Some(first)
+            Some(stored(first, 0))
         );
 
         let second = [0.005f32; RANGE_SIZE];
-        upsert_contextual_range(&pool, profile_id, &node, &second)
+        upsert_contextual_range(&pool, profile_id, &node, 25, &stored(second, 42))
             .await
             .unwrap();
         assert_eq!(
-            load_contextual_range(&pool, profile_id, &node)
+            load_contextual_range(&pool, profile_id, &node, 25)
                 .await
                 .unwrap(),
-            Some(second)
+            Some(stored(second, 42))
+        );
+
+        // A different stack bucket is a distinct range.
+        assert_eq!(
+            load_contextual_range(&pool, profile_id, &node, 10)
+                .await
+                .unwrap(),
+            None
         );
 
         let malformed_node = unique("test_range_malformed");
@@ -187,7 +223,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        let err = load_contextual_range(&pool, profile_id, &malformed_node)
+        let err = load_contextual_range(&pool, profile_id, &malformed_node, 25)
             .await
             .unwrap_err();
         assert!(matches!(err, Error::Sqlx(sqlx::Error::Decode(_))));
@@ -235,10 +271,12 @@ mod tests {
         let mirror = pool.clone();
         pool.close().await;
 
-        let err = load_contextual_range(&mirror, 1, "NODE").await.unwrap_err();
+        let err = load_contextual_range(&mirror, 1, "NODE", 25)
+            .await
+            .unwrap_err();
         assert!(matches!(err, Error::Sqlx(_)));
 
-        let err = upsert_contextual_range(&mirror, 1, "NODE", &[0.0; RANGE_SIZE])
+        let err = upsert_contextual_range(&mirror, 1, "NODE", 25, &stored([0.0; RANGE_SIZE], 0))
             .await
             .unwrap_err();
         assert!(matches!(err, Error::Sqlx(_)));

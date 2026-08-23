@@ -15,6 +15,10 @@ interface and coaches decision-making with a range-based solver.
 - **S3 — Game state engine:** full 3-max Spin and Gold rules — blinds/button
   rotation, 500-chip starting stacks, street progression, main/side pot
   accounting, and the legal-action flow (fold/check/call/bet/raise/all-in).
+- **S4 — Range model:** the 169-hand matrix (13×13 grid), GGPoker-style
+  bet-sizing buckets (preflop 2bb/3bb/4bb/pot, postflop 1/3/1/2/3/4/pot/
+  overbet), Bayesian range filtering, and sequence-node resolution with a
+  population fallback.
 
 The app currently runs as a library plus a small binary that starts up,
 connects to the database, and applies migrations. The table UI and solver are

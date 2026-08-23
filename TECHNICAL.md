@@ -29,7 +29,7 @@ This list is the resume point for development. Work top-to-bottom; each stage ge
 - [x] **S1 — Database layer:** Migrations for all tables; connection pool; in-memory range caching.
 - [x] **S2 — Core poker primitives:** Card/deck model, bitboard hand evaluator, thread-local RNG.
 - [x] **S3 — Game state engine:** 3-max Spin and Gold rules, blinds/button, stacks, streets, pots, action flow.
-- [ ] **S4 — Range model & archetypes:** 169-hand matrix, bet-sizing buckets, Bayesian narrowing, archetypes.
+- [x] **S4 — Range model:** 169-hand matrix, GGPoker bet-sizing buckets, Bayesian narrowing, sequence nodes.
 - [ ] **S5 — MCTS solver:** Range-based search, chance nodes, state isolation, expectimax backprop.
 - [ ] **S6 — Decision layer:** Action submission, optimal-action selection, evaluation logic.
 - [ ] **S7 — HTTP + WebSocket bridge:** Axum routes, static assets, templates, WS event protocol.
@@ -75,14 +75,14 @@ Full 3-max Spin and Gold rules, hero-perspective.
 - Blind-level escalation, button rotation, 500-chip starting stacks.
 - Main/side pot accounting, street progression (preflop/flop/turn/river), and the legal-action flow (fold/check/call/bet/raise/all-in).
 
-## S4 — Range Model & Archetypes
+## S4 — Range Model
 
 Feeds sampled distributions into the solver.
 
-- **Bet-sizing abstraction:** convert raw chip values into standardized buckets (Min, 0.5× Pot, 0.75× Pot, Pot, Overbet, All-In) for high sample density.
+- **169-hand matrix:** 13×13 row-major grid (AA..22), with index/label/combos mapping.
+- **Bet-sizing abstraction:** GGPoker-accurate buckets — preflop 2bb/3bb/4bb/pot, postflop 1/3/1/2/3/4/pot/overbet, plus min and all-in.
 - **Sequence nodes:** map game nodes by `(player_id, stack_bucket, abstracted_sequence)`, falling back to population averages when sample size < 30 hands.
 - **Bayesian range filtering:** after each Villain action, multiply their 169-hand matrix by conditional action probabilities to narrow their holding distribution.
-- **Opponent archetypes:** seeded profiles (Nit, Calling Station, Maniac, GTO Reg) assignable to Opponent 1/2 before a session.
 
 ## S5 — MCTS Solver
 
