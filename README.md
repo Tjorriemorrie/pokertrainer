@@ -70,10 +70,21 @@ interface and coaches decision-making with a range-based solver.
   **Tournament history** link (or `/tournaments`) shows one such graph per
   finished tournament with its hands/actions and average EV loss. Sessions
   without any stored decision never appear.
-
-The app starts the game server immediately after connecting to the database;
-open the address below in a browser and play. The polished GGPoker table
-interface itself is the S10 scope.
+- **S10 — GGPoker frontend:** a server-rendered GGPoker table skin with the
+  Spin and Gold look — dark-teal oval felt on a wooden rail, three fixed seat
+  pods (opponents top-left/top-right, hero bottom-center) that stay in place
+  when someone folds or busts, gold pot pill, and per-seat bet badges. The
+  table sits top-left; the coach feedback panel renders beside it so
+  blunder breakdowns never cover the cards. The action dock floats on the
+  felt's bottom edge like the real client: steel-blue **Fold**, green
+  **Check/Call**, red **Bet/Raise**, sizing chips (Min / ½-pot / ¾-pot / Pot /
+  All-in) labelled in **chip values only** (stacks show their BB equivalent,
+  so you build the conversion reflex yourself), and a golden bet slider with
+  −/+ steppers, mouse-wheel fine grain (wheel ±5, shift-wheel ±25), and a
+  synced number box. Card deals, chip commits, folds, and hand wins play as
+  WebAudio-synthesized sounds (no files — entirely offline), with a 🔊 mute
+  toggle persisted in the browser. Styling is pure CSS: no CDN, works with no
+  internet connection.
 
 ## How to run
 
@@ -114,12 +125,15 @@ followed by `pokertrainer table server listening`.
 ### 4. Play
 
 Open <http://127.0.0.1:8744> in a browser (change `SERVER_ADDR` in `.env` to
-serve elsewhere). The table deals automatically: when the yellow action
-buttons appear, click one (or enter a bet amount and press **Bet amount**).
-Every decision is charted in the top bar; serious blunders pause the table
-with a *Blunder intercepted* modal comparing your move to the optimal one —
-review it and press **I understand — continue** to play on. Invalid clicks
-and reconnects are handled gracefully — the table keeps dealing.
+serve elsewhere). The table deals automatically — you'll hear the cards land
+and the chips move (mute with 🔊 if you prefer silence). When the action dock
+appears, either click a sizing chip and the red **Bet/Raise** button, fine-tune
+the slider with the mouse wheel, or press **Fold** / **Call** outright — every
+amount is in chips. Every decision is charted in the top bar; serious blunders
+pause the table and render the played-vs-optimal breakdown in the **coach
+feedback** panel to the right of the felt — press **I understand — continue**
+to play on. Invalid clicks and reconnects are handled gracefully — the table
+keeps dealing.
 
 When you're done with a table, click **Finish table** in the top bar (or just
 close the tab): your session is stored, and the **Tournament history** link

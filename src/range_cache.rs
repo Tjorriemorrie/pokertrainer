@@ -125,9 +125,12 @@ mod tests {
     use crate::error::Error;
     use crate::range::hands::{HAND_COUNT, Range};
 
+    /// The mock store's shared, locked entry table.
+    type MockEntries = Arc<Mutex<HashMap<(i32, String, i16), StoredRange>>>;
+
     #[derive(Clone)]
     struct MockStore {
-        data: Arc<Mutex<HashMap<(i32, String, i16), StoredRange>>>,
+        data: MockEntries,
         failures: Arc<AtomicBool>,
         attempts: Arc<AtomicUsize>,
         writes_enabled: Arc<AtomicBool>,

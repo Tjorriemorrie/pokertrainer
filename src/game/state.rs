@@ -434,6 +434,13 @@ impl GameState {
             .saturating_sub(self.street_contrib[seat.index()])
     }
 
+    /// The chips this seat has committed on the current street (blind posts
+    /// count toward the preflop street). Drives the per-seat bet badges the
+    /// UI renders in front of each player.
+    pub fn street_contribution(&self, seat: Seat) -> u32 {
+        self.street_contrib[seat.index()]
+    }
+
     pub fn total_pot(&self) -> u32 {
         self.total_contrib.iter().sum()
     }
@@ -654,6 +661,30 @@ mod tests {
         assert!(state.hero_cards() != [card("2c"), card("2c")]);
         assert_eq!(state.hole_cards(Seat::Opponent1), None);
         assert_eq!(state.hole_cards(Seat::Opponent2), None);
+    }
+
+    #[test]
+    fn street_contribution_tracks_this_streets_chips_only() {
+        let mut state = GameState::new(Seat::Hero, level());
+        state.start_hand(&mut deck(1)).unwrap();
+
+        // Blinds count toward the preflop street: button posted SB, BB seat BB.
+        assert_eq!(state.street_contribution(Seat::Hero), 10);
+        assert_eq!(state.street_contribution(Seat::Opponent1), 20);
+        assert_eq!(state.street_contribution(Seat::Opponent2), 0);
+
+        // Opponent 2 limps 20: their street chips grow to match the blind.
+        state.apply_action(Action::Call).unwrap();
+        assert_eq!(state.street_contribution(Seat::Opponent2), 20);
+        assert_eq!(state.street_contribution(Seat::Hero), 10);
+
+        // A new street zeroes every seat's street chips.
+        state.apply_action(Action::Call).unwrap();
+        state.apply_action(Action::Check).unwrap();
+        state.advance_street(&mut deck(2)).unwrap();
+        for seat in Seat::ALL {
+            assert_eq!(state.street_contribution(seat), 0, "{seat}");
+        }
     }
 
     #[test]

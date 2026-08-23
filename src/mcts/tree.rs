@@ -588,10 +588,10 @@ mod tests {
             let probs = search.child_probs(index).unwrap();
             let (count, _) = search.children_summary(index).unwrap();
             let mut hand_sum = 0.0;
-            for position in 0..count {
+            for (position, prob) in probs.iter().enumerate().take(count) {
                 let (visits, value_sum) = search.child_stats(index, position).unwrap();
                 assert!(visits >= 1, "warm start should visit every chance child");
-                hand_sum += probs[position] * (value_sum / visits as f64);
+                hand_sum += prob * (value_sum / visits as f64);
             }
             let expectation = search.chance_value(index).unwrap();
             assert!((hand_sum - expectation).abs() < 1e-9);

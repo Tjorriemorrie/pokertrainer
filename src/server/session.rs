@@ -18,12 +18,39 @@ const MAX_LOG_LINES: usize = 28;
 /// A full hand consumes at most this many cards (6 hole + 5 board).
 const MIN_DECK_FOR_HAND: usize = 11;
 
+/// A short sound cue attached to a state update; the client synthesizes it
+/// with WebAudio — no audio files are shipped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sound {
+    /// Cards were dealt: a new hand begins (or the board grew).
+    Deal,
+    /// Chips were committed (blind, bet, call, raise, all-in).
+    Chip,
+    /// A player folded.
+    Fold,
+    /// A hand ended and chips were awarded.
+    Win,
+}
+
+impl Sound {
+    /// The wire tag rendered into the fragment's `data-sounds` attribute.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Sound::Deal => "deal",
+            Sound::Chip => "chip",
+            Sound::Fold => "fold",
+            Sound::Win => "win",
+        }
+    }
+}
+
 /// Events produced by one session step; the WebSocket layer maps them onto
 /// [`super::protocol::ServerMessage`]s.
 #[derive(Clone, Debug, PartialEq)]
 pub enum TableEvent {
     /// The table state changed: render and send a [`TABLE_STATE_UPDATE`]
-    /// fragment.
+    /// fragment. Sound cues accumulated since the previous update are drained
+    /// by the WebSocket layer when the fragment is rendered.
     ///
     /// [`TABLE_STATE_UPDATE`]: super::protocol::ServerMessage::TableStateUpdate
     State,
@@ -67,6 +94,8 @@ pub struct TableSession {
     blunder_tracker: Tracker,
     pending: Option<PendingInterception>,
     records: Vec<PendingDecision>,
+    /// Sound cues accumulated since the last rendered state update (S10).
+    sounds: Vec<Sound>,
 }
 
 impl TableSession {
@@ -92,6 +121,7 @@ impl TableSession {
             blunder_tracker: Tracker::new(blunder),
             pending: None,
             records: Vec::new(),
+            sounds: Vec::new(),
         }
     }
 
@@ -118,6 +148,7 @@ impl TableSession {
             blunder_tracker: Tracker::new(blunder),
             pending: None,
             records: Vec::new(),
+            sounds: Vec::new(),
         }
     }
 
@@ -149,6 +180,28 @@ impl TableSession {
     /// Drains the decisions awaiting a database write.
     pub fn take_records(&mut self) -> Vec<PendingDecision> {
         std::mem::take(&mut self.records)
+    }
+
+    /// Drains the sound cues accumulated since the last rendered state
+    /// update; the WebSocket layer attaches them to the fragment.
+    pub fn take_sounds(&mut self) -> Vec<Sound> {
+        std::mem::take(&mut self.sounds)
+    }
+
+    fn push_sound(&mut self, sound: Sound) {
+        if self.sounds.len() < MAX_LOG_LINES {
+            self.sounds.push(sound);
+        }
+    }
+
+    /// The sound cue for an applied action: folds swish, checks are silent,
+    /// everything that commits chips clacks.
+    fn sound_for(action: Action) -> Option<Sound> {
+        match action {
+            Action::Fold => Some(Sound::Fold),
+            Action::Check => None,
+            Action::Call | Action::Bet(_) | Action::Raise(_) | Action::AllIn => Some(Sound::Chip),
+        }
     }
 
     /// Test hook: seeds the blunder tracker's rolling EV-loss history.
@@ -193,6 +246,7 @@ impl TableSession {
             self.state.next_hand(&mut self.deck)?;
         }
         self.hand_no += 1;
+        self.push_sound(Sound::Deal);
         self.log_line(format!(
             "— Hand #{} — blinds {}/{}",
             self.hand_no,
@@ -221,6 +275,9 @@ impl TableSession {
             let call_amount = self.state.legal_actions().call_amount;
             let action = placeholder_action(&mut self.rng, &self.state);
             apply_settled(&mut self.state, &mut self.deck, action)?;
+            if let Some(sound) = Self::sound_for(action) {
+                self.push_sound(sound);
+            }
             self.log_line(views::describe_action(actor, action, call_amount));
             acted = true;
         }
@@ -320,6 +377,9 @@ impl TableSession {
     ) -> Result<Vec<TableEvent>> {
         let call_amount = self.state.legal_actions().call_amount;
         self.log_line(views::describe_action(Seat::Hero, action, call_amount));
+        if let Some(sound) = Self::sound_for(action) {
+            self.push_sound(sound);
+        }
         apply_settled(&mut self.state, &mut self.deck, action)?;
         if self.state.is_hand_over() {
             self.log_hand_result();
@@ -343,6 +403,7 @@ impl TableSession {
     }
 
     fn log_hand_result(&mut self) {
+        self.push_sound(Sound::Win);
         let Some(result) = self.state.hand_result() else {
             return;
         };
@@ -965,5 +1026,54 @@ mod tests {
         session.log_line("final".to_string());
         assert_eq!(session.log().len(), MAX_LOG_LINES);
         assert_eq!(session.log().last().unwrap(), "final");
+    }
+
+    /// S10: sound cues accumulate with the actions they describe and are
+    /// drained by the WebSocket layer when the state fragment is rendered.
+    #[test]
+    fn state_updates_accumulate_and_drain_sound_cues() {
+        let state = river_facing_bet();
+        let mut session = TableSession::resume(
+            state,
+            Deck::default(),
+            1,
+            49,
+            probe_config(),
+            survival(),
+            never_intercepts(),
+        );
+        session.submit(Action::Fold).unwrap();
+
+        let sounds = session.take_sounds();
+        assert!(
+            sounds.contains(&Sound::Fold),
+            "the hero's fold cues a fold sound: {sounds:?}"
+        );
+        assert!(
+            sounds.contains(&Sound::Win),
+            "ending the hand cues the win sound: {sounds:?}"
+        );
+        assert!(
+            sounds.contains(&Sound::Deal),
+            "the freshly dealt hand cues a deal sound: {sounds:?}"
+        );
+        assert!(
+            session.take_sounds().is_empty(),
+            "draining empties the cue buffer"
+        );
+    }
+
+    /// S10: checks stay silent — no chip sound without committing chips.
+    #[test]
+    fn sound_for_maps_actions_to_cues() {
+        assert_eq!(TableSession::sound_for(Action::Fold), Some(Sound::Fold));
+        assert_eq!(TableSession::sound_for(Action::Check), None);
+        assert_eq!(TableSession::sound_for(Action::Call), Some(Sound::Chip));
+        assert_eq!(TableSession::sound_for(Action::Bet(100)), Some(Sound::Chip));
+        assert_eq!(
+            TableSession::sound_for(Action::Raise(200)),
+            Some(Sound::Chip)
+        );
+        assert_eq!(TableSession::sound_for(Action::AllIn), Some(Sound::Chip));
     }
 }

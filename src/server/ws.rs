@@ -44,7 +44,7 @@ async fn handle_socket(socket: WebSocket, app: Arc<AppState>) {
     let (mut sender, mut receiver) = socket.split();
 
     let mut initial =
-        vec![state_message(&session).unwrap_or_else(|error| error_message(&error.to_string()))];
+        vec![state_message(&mut session).unwrap_or_else(|error| error_message(&error.to_string()))];
     if let Some(snapshot) = snapshot_frame(app.pool.as_ref()).await {
         initial.push(snapshot);
     }
@@ -192,9 +192,10 @@ fn bootstrap(session: &mut TableSession) -> Result<()> {
     Ok(())
 }
 
-fn state_message(session: &TableSession) -> Result<String> {
+fn state_message(session: &mut TableSession) -> Result<String> {
+    let sounds = session.take_sounds();
     ServerMessage::TableStateUpdate {
-        fragment: views::table_fragment(session.state(), session.hand_no(), session.log()),
+        fragment: views::table_fragment(session.state(), session.hand_no(), session.log(), &sounds),
     }
     .to_json()
 }
@@ -235,7 +236,7 @@ fn handle_client_message(session: &mut TableSession, text: &str) -> FrameOutcome
     }
 }
 
-fn outcome(session: &TableSession, events: Vec<TableEvent>) -> FrameOutcome {
+fn outcome(session: &mut TableSession, events: Vec<TableEvent>) -> FrameOutcome {
     let chart_ticks = events
         .iter()
         .filter(|event| matches!(event, TableEvent::ChartTick { .. }))
@@ -255,14 +256,22 @@ fn error_outcome(message: &str) -> FrameOutcome {
     }
 }
 
-fn events_to_messages(session: &TableSession, events: Vec<TableEvent>) -> Vec<String> {
+fn events_to_messages(session: &mut TableSession, events: Vec<TableEvent>) -> Vec<String> {
     let mut messages = Vec::with_capacity(events.len());
     for event in events {
         let serialized = match event {
-            TableEvent::State => ServerMessage::TableStateUpdate {
-                fragment: views::table_fragment(session.state(), session.hand_no(), session.log()),
+            TableEvent::State => {
+                let sounds = session.take_sounds();
+                ServerMessage::TableStateUpdate {
+                    fragment: views::table_fragment(
+                        session.state(),
+                        session.hand_no(),
+                        session.log(),
+                        &sounds,
+                    ),
+                }
+                .to_json()
             }
-            .to_json(),
             TableEvent::TacticalOverlay {
                 decision,
                 hand_no,
@@ -487,7 +496,7 @@ mod tests {
 
     #[test]
     fn events_map_to_the_three_server_frames() {
-        let session = make_session();
+        let mut session = make_session();
         let events = vec![
             TableEvent::TacticalOverlay {
                 decision: sample_analysis(),
@@ -500,7 +509,7 @@ mod tests {
             },
             TableEvent::State,
         ];
-        let messages = events_to_messages(&session, events);
+        let messages = events_to_messages(&mut session, events);
         assert_eq!(messages.len(), 3);
         let overlay = parse(&messages[0]);
         assert_eq!(overlay["type"], "TRIGGER_TACTICAL_OVERLAY");
@@ -526,8 +535,8 @@ mod tests {
 
     #[test]
     fn state_message_serializes_a_fragment() {
-        let session = make_session();
-        let message = state_message(&session).unwrap();
+        let mut session = make_session();
+        let message = state_message(&mut session).unwrap();
         assert!(message.contains("\"type\":\"TABLE_STATE_UPDATE\""));
         assert!(message.contains("Hand #1"));
     }
