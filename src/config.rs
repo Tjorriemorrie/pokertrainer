@@ -1,9 +1,12 @@
+use std::net::SocketAddr;
+
 use crate::error::{Error, Result};
 
 #[derive(Debug)]
 pub struct Config {
     pub database_url: String,
     pub log_level: String,
+    pub bind_addr: SocketAddr,
 }
 
 impl Config {
@@ -14,19 +17,25 @@ impl Config {
     pub fn from_env_with(get: impl Fn(&str) -> Option<String>) -> Result<Self> {
         let database_url = get("DATABASE_URL").ok_or(Error::MissingEnv("DATABASE_URL"))?;
         let log_level = get("RUST_LOG").unwrap_or_else(|| "info".to_string());
-        Config::parse(database_url, log_level)
+        let bind_addr = get("SERVER_ADDR").unwrap_or_else(|| "127.0.0.1:8744".to_string());
+        Config::parse(database_url, log_level, bind_addr)
     }
 
-    fn parse(database_url: String, log_level: String) -> Result<Self> {
+    fn parse(database_url: String, log_level: String, bind_addr: String) -> Result<Self> {
         if !database_url.starts_with("postgres://") && !database_url.starts_with("postgresql://") {
             return Err(Error::InvalidConfig(
                 "DATABASE_URL must be a postgres:// or postgresql:// URL".to_string(),
             ));
         }
 
+        let bind_addr: SocketAddr = bind_addr.parse().map_err(|_| {
+            Error::InvalidConfig(format!("SERVER_ADDR {bind_addr:?} is not a socket address"))
+        })?;
+
         Ok(Self {
             database_url,
             log_level,
+            bind_addr,
         })
     }
 }
@@ -53,6 +62,7 @@ mod tests {
             "postgres://user:pass@localhost:5433/db"
         );
         assert_eq!(config.log_level, "info");
+        assert_eq!(config.bind_addr, "127.0.0.1:8744".parse().unwrap());
 
         let env = HashMap::from([(
             "DATABASE_URL".to_string(),
@@ -90,6 +100,34 @@ mod tests {
         )]);
         let err = Config::from_env_with(env_lookup(&env)).unwrap_err();
         assert!(matches!(err, Error::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn honors_explicit_bind_address() {
+        let env = HashMap::from([
+            (
+                "DATABASE_URL".to_string(),
+                "postgres://localhost/db".to_string(),
+            ),
+            ("SERVER_ADDR".to_string(), "127.0.0.1:9000".to_string()),
+        ]);
+        let config = Config::from_env_with(env_lookup(&env)).unwrap();
+        assert_eq!(config.bind_addr, "127.0.0.1:9000".parse().unwrap());
+    }
+
+    #[test]
+    fn rejects_malformed_bind_addresses() {
+        for bad in ["localhost", "127.0.0.1", "999.1.1.1:80", "127.0.0.1:port"] {
+            let env = HashMap::from([
+                (
+                    "DATABASE_URL".to_string(),
+                    "postgres://localhost/db".to_string(),
+                ),
+                ("SERVER_ADDR".to_string(), bad.to_string()),
+            ]);
+            let err = Config::from_env_with(env_lookup(&env)).unwrap_err();
+            assert!(matches!(err, Error::InvalidConfig(_)));
+        }
     }
 
     #[test]

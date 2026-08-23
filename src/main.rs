@@ -1,6 +1,7 @@
 use pokertrainer::config::Config;
 use pokertrainer::db;
 use pokertrainer::error::Result;
+use pokertrainer::server::{self, ServerConfig};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -18,6 +19,12 @@ async fn main() -> Result<()> {
     let pool = db::connect(&config.database_url).await?;
     db::run_migrations(&pool).await?;
     tracing::info!("database ready, migrations up to date");
+
+    let server_config = ServerConfig {
+        bind: config.bind_addr,
+        ..ServerConfig::live()
+    };
+    server::serve(server_config).await?;
 
     Ok(())
 }

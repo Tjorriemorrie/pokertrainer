@@ -32,10 +32,27 @@ interface and coaches decision-making with a range-based solver.
   Kelly (γ = 1) — variance and bust risk are penalized more the shorter the
   hero's stack. The played action's exact chip EV loss is reported against
   the optimal one.
+- **S7 — HTTP + WebSocket bridge:** an Axum server (`127.0.0.1:8744` by
+  default, `SERVER_ADDR` to change) serving the rendered app shell and static
+  assets (`assets/`), plus a WebSocket at `/ws` with the event protocol:
+  - Client → Server `ACTION_SUBMIT`: an action type plus a bet-size bucket
+    (or exact slider amount), resolved server-side against the legal set.
+  - Server → Client `TABLE_STATE_UPDATE`: the table HTML fragment (seats,
+    stacks, board, action buttons, log) swapped into the DOM each turn.
+  - Server → Client `TRIGGER_TACTICAL_OVERLAY`: the played-vs-optimal
+    breakdown. Currently fires on any suboptimal action; S8 replaces this
+    with the calibrated ~1-in-3-hand interception.
+  - Server → Client `CHART_TICK`: one evaluated action for the top-bar EV
+    tracker (the decimated 1,000-action dataset arrives in S9).
 
-The app currently runs as a library plus a small binary that starts up,
-connects to the database, and applies migrations. The table UI is not built
-yet.
+  Each connection owns a live table session that drives the opponents with a
+  simple placeholder policy, runs the S6 survivability solver on your
+  decisions, and deals the next hand automatically. Opponent ranges are
+  uniform until profile/sequence-node loading is wired into the loop.
+
+The app starts the game server immediately after connecting to the database;
+open the address below in a browser and play. The polished GGPoker table
+interface itself is the S10 scope.
 
 ## How to run
 
@@ -70,7 +87,17 @@ Copy-Item .env.example .env
 cargo run
 ```
 
-You should see log output like `database ready, migrations up to date`.
+You should see log output like `database ready, migrations up to date`
+followed by `pokertrainer table server listening`.
+
+### 4. Play
+
+Open <http://127.0.0.1:8744> in a browser (change `SERVER_ADDR` in `.env` to
+serve elsewhere). The table deals automatically: when the yellow action
+buttons appear, click one (or enter a bet amount and press **Bet amount**).
+Suboptimal plays open a tactical overlay that shows the optimal move and the
+EV lost; the bar at the top charts your EV loss per action. Invalid clicks
+and reconnects are handled gracefully — the table keeps dealing.
 
 ### Running the tests
 

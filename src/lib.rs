@@ -9,3 +9,4 @@ pub mod mcts;
 pub mod range;
 pub mod range_cache;
 pub mod rng;
+pub mod server;

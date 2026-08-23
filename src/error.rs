@@ -20,4 +20,8 @@ pub enum Error {
     Decision(String),
     #[error("database error: {0}")]
     Sqlx(#[from] sqlx::Error),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("serialization error: {0}")]
+    Json(#[from] serde_json::Error),
 }
