@@ -2,7 +2,7 @@
 
 ## Overview & Architecture Philosophy
 
-The goal is to replicate the exact GGPoker 3-max Spin & Go table interface while running locally on a single desktop machine. The architecture uses a server-driven UI model: the Rust backend serves rendered HTML fragments over HTTP/WebSockets, swapped dynamically into the DOM, eliminating the need for a JavaScript build system.
+The goal is to replicate the exact GGPoker 3-max Spin and Gold table interface while running locally on a single desktop machine. The architecture uses a server-driven UI model: the Rust backend serves rendered HTML fragments over HTTP/WebSockets, swapped dynamically into the DOM, eliminating the need for a JavaScript build system.
 
 The solver models the game strictly from the hero's perspective rather than attempting a global equilibrium. It uses a custom range-based Monte Carlo Tree Search (MCTS) designed to eliminate strategy fusion, paired with a "blunder intervention" engine that interrupts suboptimal decisions to maximize pedagogical value.
 
@@ -28,7 +28,7 @@ This list is the resume point for development. Work top-to-bottom; each stage ge
 - [x] **S0 — Project scaffolding:** Cargo crate/bin, `.env` loading, config, logging, error handling.
 - [x] **S1 — Database layer:** Migrations for all tables; connection pool; in-memory range caching.
 - [x] **S2 — Core poker primitives:** Card/deck model, bitboard hand evaluator, thread-local RNG.
-- [ ] **S3 — Game state engine:** 3-max Spin & Go rules, blinds/button, stacks, streets, pots, action flow.
+- [ ] **S3 — Game state engine:** 3-max Spin and Gold rules, blinds/button, stacks, streets, pots, action flow.
 - [ ] **S4 — Range model & archetypes:** 169-hand matrix, bet-sizing buckets, Bayesian narrowing, archetypes.
 - [ ] **S5 — MCTS solver:** Range-based search, chance nodes, state isolation, expectimax backprop.
 - [ ] **S6 — Decision layer:** Action submission, optimal-action selection, evaluation logic.
@@ -53,7 +53,7 @@ Foundation for every later stage.
 **Purpose:** store dynamic player statistics and 13×13 hand-range distributions to feed the real-time MCTS engine.
 
 - **`opponent_profiles`** — base player identities and broad types (e.g. LAG, NIT).
-- **`opponent_stats`** — VPIP/PFR/3-Bet/C-Bet percentages, separated by Spin & Gold stack-depth buckets (25 BB, 15 BB, 10 BB); updated after every completed hand.
+- **`opponent_stats`** — VPIP/PFR/3-Bet/C-Bet percentages, separated by Spin and Gold stack-depth buckets (25 BB, 15 BB, 10 BB); updated after every completed hand.
 - **`contextual_ranges`** — maps a node (e.g. `BTN_OPEN_2BB_SB_FOLD`) to a fixed 169-element float array (the 13×13 matrix, AA to 72o) used for in-memory sampling.
 - **`hero_sessions` / `hero_decisions`** — session metadata and per-decision EV records (schema in S9).
 - Migrations applied idempotently at startup or via a migrate command.
@@ -69,7 +69,7 @@ Low-level, dependency-free building blocks.
 
 ## S3 — Game State Engine
 
-Full 3-max Spin & Go rules, hero-perspective.
+Full 3-max Spin and Gold rules, hero-perspective.
 
 - 3-max seating: Hero bottom-center, Opponent 1 top-left, Opponent 2 top-right.
 - Blind-level escalation, button rotation, 500-chip starting stacks.

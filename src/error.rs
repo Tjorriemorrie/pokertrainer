@@ -12,6 +12,8 @@ pub enum Error {
     Migration(String),
     #[error("range store failure: {0}")]
     Store(String),
+    #[error("game state error: {0}")]
+    Game(String),
     #[error("database error: {0}")]
     Sqlx(#[from] sqlx::Error),
 }
