@@ -479,14 +479,18 @@ button { font-family: inherit; }
 .pt-action-block {
   background: #0e131a;
   border-top: 1px solid var(--line);
-  padding: 0.9rem 1.1rem 1.1rem;
+  padding: 0.9rem 1.1rem 1.2rem;
+  display: flex;
+  justify-content: flex-end;
 }
 
 .pt-action-dock {
   display: flex;
   flex-direction: column;
-  align-items: center;
+  align-items: flex-end;
   gap: 9px;
+  width: 680px;
+  max-width: 100%;
 }
 
 .pt-bet-row {

@@ -16,7 +16,7 @@ pub fn index_page() -> String {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Poker Trainer</title>
-<link rel="stylesheet" href="/assets/style.css">
+<link rel="stylesheet" href="/assets/style.css?v=2">
 </head>
 <body class="pt-body">
   <header class="pt-topwrap">
@@ -59,7 +59,7 @@ pub fn tournaments_page(sessions: &[(SessionSummary, Vec<ChartPoint>)]) -> Strin
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Poker Trainer — Tournaments</title>
-<link rel="stylesheet" href="/assets/style.css">
+<link rel="stylesheet" href="/assets/style.css?v=2">
 </head>
 <body class="pt-body">
 <header class="pt-topwrap">
@@ -217,9 +217,9 @@ fn stack_text(stack: u32, big_blind: u32) -> String {
 /// The raw table-state HTML fragment swapped into the DOM on every state
 /// change: a GGPoker-style oval felt with fixed seat positions (folded and
 /// busted players stay seated), the board, the pot, the action dock in its
-/// own block below the oval (never covering the hero's cards), and a
-/// collapsible action log. `sounds` carries the WebAudio cues the client
-/// synthesizes for this update.
+/// own right-aligned block below the oval (never covering the hero's cards),
+/// and a collapsible action log. `sounds` carries the WebAudio cues the
+/// client synthesizes for this update.
 pub fn table_fragment(state: &GameState, hand_no: u64, log: &[String], sounds: &[Sound]) -> String {
     let level = state.blind_level();
     let mut html = String::new();
@@ -655,6 +655,10 @@ mod tests {
         assert!(
             page.contains(r#"id="sound-toggle""#),
             "the S10 sound toggle is present"
+        );
+        assert!(
+            page.contains(r#"/assets/style.css?v=2"#),
+            "the stylesheet link is versioned so browsers drop stale cached CSS"
         );
         assert!(
             !page.contains("cdn.tailwindcss.com"),
