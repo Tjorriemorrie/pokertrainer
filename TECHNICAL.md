@@ -27,7 +27,7 @@ This list is the resume point for development. Work top-to-bottom; each stage ge
 
 - [x] **S0 — Project scaffolding:** Cargo crate/bin, `.env` loading, config, logging, error handling.
 - [x] **S1 — Database layer:** Migrations for all tables; connection pool; in-memory range caching.
-- [ ] **S2 — Core poker primitives:** Card/deck model, bitboard hand evaluator, thread-local RNG.
+- [x] **S2 — Core poker primitives:** Card/deck model, bitboard hand evaluator, thread-local RNG.
 - [ ] **S3 — Game state engine:** 3-max Spin & Go rules, blinds/button, stacks, streets, pots, action flow.
 - [ ] **S4 — Range model & archetypes:** 169-hand matrix, bet-sizing buckets, Bayesian narrowing, archetypes.
 - [ ] **S5 — MCTS solver:** Range-based search, chance nodes, state isolation, expectimax backprop.
