@@ -30,7 +30,7 @@ This list is the resume point for development. Work top-to-bottom; each stage ge
 - [x] **S2 — Core poker primitives:** Card/deck model, bitboard hand evaluator, thread-local RNG.
 - [x] **S3 — Game state engine:** 3-max Spin and Gold rules, blinds/button, stacks, streets, pots, action flow.
 - [x] **S4 — Range model:** 169-hand matrix, GGPoker bet-sizing buckets, Bayesian narrowing, sequence nodes.
-- [ ] **S5 — MCTS solver:** Range-based search, chance nodes, state isolation, expectimax backprop.
+- [x] **S5 — MCTS solver:** Range-based search, chance nodes, state isolation, expectimax backprop.
 - [ ] **S6 — Decision layer:** Action submission, optimal-action selection, evaluation logic.
 - [ ] **S7 — HTTP + WebSocket bridge:** Axum routes, static assets, templates, WS event protocol.
 - [ ] **S8 — Blunder intervention engine:** Error-rate calc, dynamic threshold, ~1-in-3-hand calibration.

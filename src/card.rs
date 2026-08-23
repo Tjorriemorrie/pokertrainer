@@ -168,6 +168,19 @@ impl Deck {
         self.top += 1;
         Some(card)
     }
+
+    /// Builds a deck whose top contains the given cards in order (used by the
+    /// solver to deal only the cards still unknown at a decision point).
+    /// Returns `None` when more than 52 cards are supplied.
+    pub fn try_from_remaining(cards: Vec<Card>) -> Option<Self> {
+        if cards.len() > 52 {
+            return None;
+        }
+        let mut deck = Self::new();
+        deck.top = deck.cards.len() - cards.len();
+        deck.cards[deck.top..].copy_from_slice(&cards);
+        Some(deck)
+    }
 }
 
 #[cfg(test)]
@@ -259,5 +272,26 @@ mod tests {
         deck.shuffle(&mut rng);
         assert_eq!(deck.remaining(), 52);
         assert!(!deck.is_empty());
+    }
+
+    #[test]
+    fn deck_from_remaining_deals_only_supplied_cards_in_order() {
+        let cards = vec![
+            Card::new(Rank::Ace, Suit::Spades),
+            Card::new(Rank::King, Suit::Hearts),
+            Card::new(Rank::Two, Suit::Clubs),
+        ];
+        let mut deck = Deck::try_from_remaining(cards.clone()).unwrap();
+        assert_eq!(deck.remaining(), 3);
+        for expected in cards {
+            assert_eq!(deck.deal(), Some(expected));
+        }
+        assert!(deck.is_empty());
+    }
+
+    #[test]
+    fn deck_from_remaining_rejects_oversized_input() {
+        let oversize = vec![Card::new(Rank::Two, Suit::Clubs); 53];
+        assert!(Deck::try_from_remaining(oversize).is_none());
     }
 }

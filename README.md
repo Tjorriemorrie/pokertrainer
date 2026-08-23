@@ -19,10 +19,15 @@ interface and coaches decision-making with a range-based solver.
   bet-sizing buckets (preflop 2bb/3bb/4bb/pot, postflop 1/3/1/2/3/4/pot/
   overbet), Bayesian range filtering, and sequence-node resolution with a
   population fallback.
+- **S5 — MCTS solver:** a hero-perspective, range-based search. Opponent
+  holdings are sampled from range vectors with blocker (card-removal)
+  adjustment; every sampled world keeps its own isolated expectimax-UCT
+  search, and action EVs are the range-probability-weighted average across
+  worlds.
 
 The app currently runs as a library plus a small binary that starts up,
-connects to the database, and applies migrations. The table UI and solver are
-not built yet.
+connects to the database, and applies migrations. The table UI and decision
+layer are not built yet.
 
 ## How to run
 

@@ -14,6 +14,8 @@ pub enum Error {
     Store(String),
     #[error("game state error: {0}")]
     Game(String),
+    #[error("solver error: {0}")]
+    Solver(String),
     #[error("database error: {0}")]
     Sqlx(#[from] sqlx::Error),
 }

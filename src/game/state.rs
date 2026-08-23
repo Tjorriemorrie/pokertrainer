@@ -389,6 +389,18 @@ impl GameState {
         self.stacks[seat.index()]
     }
 
+    /// Overwrites a seat's stack. Used by the session layer when re-seating
+    /// or injecting test scenarios; the caller keeps betting state consistent.
+    pub fn set_stack(&mut self, seat: Seat, amount: u32) {
+        self.stacks[seat.index()] = amount;
+    }
+
+    /// Overwrites a seat's hole cards. Used by the session layer (and solver
+    /// tests) to inject specific holdings; does not change reveal status.
+    pub fn set_hole_cards(&mut self, seat: Seat, cards: [Card; 2]) {
+        self.hole_cards[seat.index()] = cards;
+    }
+
     pub fn stacks(&self) -> [u32; NUM_PLAYERS] {
         self.stacks
     }
@@ -430,6 +442,12 @@ impl GameState {
         compute_pots(&self.total_contrib, &self.folded)
     }
 
+    /// The strength of a seat's best current hand. Used by the solver's
+    /// rollout policy and the feedback UI; safe to call at any point.
+    pub fn eval_hand(&self, seat: Seat) -> Eval {
+        self.best_hand(seat)
+    }
+
     pub fn folded(&self, seat: Seat) -> bool {
         self.folded[seat.index()]
     }
@@ -450,6 +468,40 @@ impl GameState {
             Some(self.hole_cards[seat.index()])
         } else {
             None
+        }
+    }
+
+    /// Clones the state with every seat's hole cards replaced by the given
+    /// holdings. Solver-internal: builds the perfect-information snapshot a
+    /// single determinization is searched on; street, pots and action flow
+    /// are untouched.
+    pub fn clone_with_hole_cards(&self, hole_cards: [[Card; 2]; NUM_PLAYERS]) -> GameState {
+        let mut state = self.clone_without_result();
+        state.hole_cards = hole_cards;
+        state.revealed = [true; NUM_PLAYERS];
+        state
+    }
+
+    fn clone_without_result(&self) -> GameState {
+        GameState {
+            stacks: self.stacks,
+            button: self.button,
+            blind_level: self.blind_level,
+            street: self.street,
+            board: self.board.clone(),
+            hole_cards: self.hole_cards,
+            revealed: self.revealed,
+            street_contrib: self.street_contrib,
+            total_contrib: self.total_contrib,
+            current_bet: self.current_bet,
+            min_raise: self.min_raise,
+            last_full_raise: self.last_full_raise,
+            acted: self.acted,
+            folded: self.folded,
+            all_in: self.all_in,
+            to_act: self.to_act,
+            hand_over: self.hand_over,
+            hand_result: None,
         }
     }
 
@@ -741,6 +793,58 @@ mod tests {
             }]
         );
         assert_eq!(state.stack(Seat::Hero), 800);
+    }
+
+    #[test]
+    fn eval_hand_ranks_seat_holdings() {
+        let mut state = GameState::new(Seat::Hero, level());
+        state.hole_cards = [
+            [card("As"), card("Ad")],
+            [card("Kh"), card("Kd")],
+            [card("Qh"), card("Qd")],
+        ];
+        state.board = vec![card("2c"), card("7c"), card("9c"), card("Jc"), card("3s")];
+        let hero = state.eval_hand(Seat::Hero);
+        let opp1 = state.eval_hand(Seat::Opponent1);
+        let opp2 = state.eval_hand(Seat::Opponent2);
+        assert!(hero > opp1);
+        assert!(opp1 > opp2);
+        assert_eq!(hero.class(), crate::eval::HandClass::Pair);
+    }
+
+    #[test]
+    fn set_stack_and_set_hole_cards_override_snapshot_fields() {
+        let mut state = GameState::new(Seat::Hero, level());
+        state.start_hand(&mut deck(1)).unwrap();
+        state.set_stack(Seat::Hero, 123);
+        assert_eq!(state.stack(Seat::Hero), 123);
+        let aces = [card("As"), card("Ad")];
+        state.set_hole_cards(Seat::Hero, aces);
+        assert_eq!(state.hero_cards(), aces);
+    }
+
+    #[test]
+    fn clone_with_hole_cards_replaces_hands_and_keeps_action_state() {
+        let mut state = GameState::new(Seat::Hero, level());
+        state.start_hand(&mut deck(1)).unwrap();
+        state.apply_action(Action::Raise(60)).unwrap();
+
+        let world_cards = [
+            [card("As"), card("Ad")],
+            [card("Kh"), card("Kd")],
+            [card("Qh"), card("Qd")],
+        ];
+        let clone = state.clone_with_hole_cards(world_cards);
+        assert_eq!(clone.hero_cards(), world_cards[0]);
+        assert_eq!(clone.hole_cards(Seat::Opponent1), Some(world_cards[1]));
+        assert_eq!(clone.hole_cards(Seat::Opponent2), Some(world_cards[2]));
+        assert_eq!(clone.to_act(), state.to_act());
+        assert_eq!(clone.current_bet(), state.current_bet());
+        assert_eq!(clone.total_pot(), state.total_pot());
+        assert_eq!(clone.button(), state.button());
+        assert_eq!(clone.street(), state.street());
+        assert!(!clone.is_hand_over());
+        assert_eq!(clone.hand_result(), None);
     }
 
     #[test]
