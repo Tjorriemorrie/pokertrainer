@@ -7,6 +7,7 @@ use crate::game::{Action, ActionOutcome, GameState, Seat};
 use crate::rng::{gen_index, weighted_index};
 
 use super::actions::candidates;
+use super::tree::Payoff;
 
 /// Coarse strength tier of a made hand, used by the opponent rollout policy.
 fn strength_tier(class: HandClass) -> f64 {
@@ -182,8 +183,9 @@ fn leftover_deck(runout: &[Card], offset: usize) -> Result<Deck> {
 }
 
 /// Plays the remainder of the hand from `state` to the end and returns the
-/// hero's chip delta, defined as the hero's final stack minus `baseline`
-/// (the hero's stack at the decision point).
+/// hero's payoff, defined as the hero's final stack minus `baseline` (the
+/// hero's stack at the decision point), together with whether the hero busted
+/// (finished the hand with an empty stack).
 ///
 /// The hero plays a uniform random policy (this is the playout below the tree
 /// horizon); opponents play the heuristic [`opponent_probs`] policy.
@@ -193,14 +195,14 @@ pub(crate) fn rollout<R: Rng + ?Sized>(
     runout: &[Card],
     offset: usize,
     baseline: u32,
-) -> Result<f64> {
+) -> Result<Payoff> {
     let mut offset = offset;
     while !state.is_hand_over() {
         let seat = state.to_act();
         let action = if seat == Seat::Hero {
             let actions = candidates(state);
             if actions.is_empty() {
-                return Ok(state.stack(Seat::Hero) as f64 - f64::from(baseline));
+                return Ok(pay_off(state, baseline));
             }
             actions[gen_index(rng, actions.len())].0
         } else {
@@ -208,7 +210,15 @@ pub(crate) fn rollout<R: Rng + ?Sized>(
         };
         offset = step(state, action, runout, offset)?;
     }
-    Ok(state.stack(Seat::Hero) as f64 - f64::from(baseline))
+    Ok(pay_off(state, baseline))
+}
+
+fn pay_off(state: &GameState, baseline: u32) -> Payoff {
+    let stack = state.stack(Seat::Hero);
+    Payoff {
+        value: stack as f64 - f64::from(baseline),
+        busted: stack == 0,
+    }
 }
 
 #[cfg(test)]
@@ -334,9 +344,13 @@ mod tests {
         for world in &worlds {
             let mut replica = world.build_state(&state);
             let baseline = state.stack(Seat::Hero);
-            let delta = rollout(&mut rng, &mut replica, &world.runout, 0, baseline).unwrap();
-            assert!(delta.is_finite());
-            assert!(delta.abs() <= 1500.0, "impossible stack swing {delta}");
+            let payoff = rollout(&mut rng, &mut replica, &world.runout, 0, baseline).unwrap();
+            assert!(payoff.value.is_finite());
+            assert!(
+                payoff.value.abs() <= 1500.0,
+                "impossible stack swing {}",
+                payoff.value
+            );
         }
     }
 
@@ -349,8 +363,9 @@ mod tests {
         let dummy = [Card::new(Rank::Two, Suit::Clubs); 2];
         let mut replica = state.clone_with_hole_cards([dummy; 3]);
         let mut rng = seeded_rng(3);
-        let delta = rollout(&mut rng, &mut replica, &[], 0, 490).unwrap();
-        assert!((delta - (replica.stack(Seat::Hero) as f64 - 490.0)).abs() < 1e-9);
+        let payoff = rollout(&mut rng, &mut replica, &[], 0, 490).unwrap();
+        assert!((payoff.value - (replica.stack(Seat::Hero) as f64 - 490.0)).abs() < 1e-9);
+        assert!(!payoff.busted, "folded hero cannot bust");
     }
 
     #[test]
@@ -363,9 +378,9 @@ mod tests {
         let mut seen = HashSet::new();
         for world in &worlds {
             let mut replica = world.build_state(&state);
-            let delta = rollout(&mut rng, &mut replica, &world.runout, 0, 490).unwrap();
-            assert!(delta.is_finite());
-            seen.insert(delta.to_bits());
+            let payoff = rollout(&mut rng, &mut replica, &world.runout, 0, 490).unwrap();
+            assert!(payoff.value.is_finite());
+            seen.insert(payoff.value.to_bits());
         }
         assert!(seen.len() > 1, "rollouts should vary");
     }

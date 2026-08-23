@@ -16,6 +16,8 @@ pub enum Error {
     Game(String),
     #[error("solver error: {0}")]
     Solver(String),
+    #[error("decision layer error: {0}")]
+    Decision(String),
     #[error("database error: {0}")]
     Sqlx(#[from] sqlx::Error),
 }

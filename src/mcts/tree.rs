@@ -36,9 +36,19 @@ struct Child {
 /// leaf nodes.
 type Candidates = Vec<(Action, Option<BetSize>)>;
 
+/// One rollout payoff in the chip space of the search: the hero's terminal
+/// chip delta relative to the decision point, plus whether the hero busted
+/// (ended the hand with an empty stack).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Payoff {
+    pub(crate) value: f64,
+    pub(crate) busted: bool,
+}
+
 /// The world-search output for one action: the action itself, its bucket
-/// label, the mean rollout value, and total visits.
-pub(crate) type WorldValue = (Action, Option<BetSize>, f64, u64);
+/// label, the mean rollout value, the visit-weighted payoff variance, the
+/// bust probability, and total visits.
+pub(crate) type WorldValue = (Action, Option<BetSize>, f64, f64, f64, u64);
 
 /// One node of a single-world search tree. Every node keeps its own copy of
 /// the game state (boards and contributions are path-dependent), so worlds
@@ -52,6 +62,8 @@ struct Node {
     hero_depth: usize,
     visits: u64,
     value_sum: f64,
+    value_sq_sum: f64,
+    bust_sum: f64,
     children: Vec<Child>,
     untried: usize,
     candidates: Candidates,
@@ -83,6 +95,8 @@ impl<'a> WorldSearch<'a> {
             hero_depth: 0,
             visits: 0,
             value_sum: 0.0,
+            value_sq_sum: 0.0,
+            bust_sum: 0.0,
             children: Vec::new(),
             untried: 0,
             candidates: root_candidates.clone(),
@@ -179,6 +193,8 @@ impl<'a> WorldSearch<'a> {
             hero_depth,
             visits: 0,
             value_sum: 0.0,
+            value_sq_sum: 0.0,
+            bust_sum: 0.0,
             children: Vec::new(),
             untried: 0,
             candidates: node_candidates,
@@ -232,6 +248,8 @@ impl<'a> WorldSearch<'a> {
                     hero_depth,
                     visits: 0,
                     value_sum: 0.0,
+                    value_sq_sum: 0.0,
+                    bust_sum: 0.0,
                     children: Vec::new(),
                     untried: 0,
                     candidates: node_candidates,
@@ -310,10 +328,14 @@ impl<'a> WorldSearch<'a> {
             .unwrap_or(index)
     }
 
-    fn leaf_payoff<R: Rng + ?Sized>(&self, rng: &mut R, index: usize) -> Result<f64> {
+    fn leaf_payoff<R: Rng + ?Sized>(&self, rng: &mut R, index: usize) -> Result<Payoff> {
         let node = &self.nodes[index];
         if node.state.is_hand_over() {
-            return Ok(node.state.stack(Seat::Hero) as f64 - f64::from(self.baseline));
+            let stack = node.state.stack(Seat::Hero);
+            return Ok(Payoff {
+                value: stack as f64 - f64::from(self.baseline),
+                busted: stack == 0,
+            });
         }
         let mut state = node.state.clone_with_hole_cards(self.cards_of(node));
         rollout(rng, &mut state, self.runout, node.offset, self.baseline)
@@ -341,11 +363,15 @@ impl<'a> WorldSearch<'a> {
         node.state.clone_with_hole_cards(self.cards_of(node))
     }
 
-    fn backprop(&mut self, path: &[usize], payoff: f64) {
+    fn backprop(&mut self, path: &[usize], payoff: Payoff) {
         for &index in path {
             let node = &mut self.nodes[index];
             node.visits += 1;
-            node.value_sum += payoff;
+            node.value_sum += payoff.value;
+            node.value_sq_sum += payoff.value * payoff.value;
+            if payoff.busted {
+                node.bust_sum += 1.0;
+            }
         }
     }
 
@@ -375,9 +401,11 @@ impl<'a> WorldSearch<'a> {
                 continue;
             };
             let node = &self.nodes[child.node];
-            let visits = node.visits.max(1);
-            let value = node.value_sum / visits as f64;
-            values.push((*action, *bucket, value, node.visits));
+            let visits = node.visits.max(1) as f64;
+            let value = node.value_sum / visits;
+            let variance = (node.value_sq_sum / visits - value * value).max(0.0);
+            let bust_prob = node.bust_sum / visits;
+            values.push((*action, *bucket, value, variance, bust_prob, node.visits));
         }
         Ok(values)
     }
@@ -505,7 +533,7 @@ mod tests {
         let mut rng = seeded_rng(22);
         let values = search.run(&mut rng).unwrap();
         assert_eq!(values.len(), candidates(&state).len());
-        for (action, _, value, visits) in &values {
+        for (action, _, value, _, _, visits) in &values {
             assert!(value.is_finite(), "{action:?} EV not finite");
             assert!(*visits >= 1, "{action:?} never visited");
             assert!(candidates(&state).iter().any(|(a, _)| a == action));

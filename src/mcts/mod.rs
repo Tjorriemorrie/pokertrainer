@@ -17,20 +17,32 @@ use crate::range::hands::Range;
 
 use tree::WorldSearch;
 
-/// Per-world action statistics: action, mean rollout value, total visits.
-type WorldStats = Vec<(Action, f64, u64)>;
+/// Per-world action statistics: action, mean rollout value, payoff variance,
+/// bust probability, and total visits.
+type WorldStats = Vec<(Action, f64, f64, f64, u64)>;
 /// One world's weight and its action statistics.
 type PerWorld = (f64, WorldStats);
 
 /// The solver's estimate for one candidate action: its expectimax EV in
-/// chips relative to the hero's stack at the decision point, with the
-/// aggregate number of visits that backed it.
+/// chips relative to the hero's stack at the decision point, the
+/// visit-weighted variance of the payoff, the probability the hero busts
+/// (ends the hand with an empty stack), and the aggregate number of visits
+/// that backed it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ActionValue {
     pub action: Action,
     pub bucket: Option<BetSize>,
     pub ev: f64,
+    pub variance: f64,
+    pub bust_prob: f64,
     pub visits: u64,
+}
+
+impl ActionValue {
+    /// The standard deviation of the action's payoff, in chips.
+    pub fn sigma(&self) -> f64 {
+        self.variance.sqrt()
+    }
 }
 
 /// The outcome of one solve: one EV per candidate action, sorted from best
@@ -54,6 +66,19 @@ pub fn solve<R: Rng + ?Sized>(
     ranges: &[Range; 2],
     config: &MctsConfig,
 ) -> Result<SolveResult> {
+    solve_with_candidates(rng, state, ranges, config, &candidates(state))
+}
+
+/// Like [`solve`], but searches an explicitly supplied candidate set. Extra
+/// candidates (e.g. a bet-slider amount the player chose) are searched on
+/// equal footing with the standard buckets.
+pub fn solve_with_candidates<R: Rng + ?Sized>(
+    rng: &mut R,
+    state: &GameState,
+    ranges: &[Range; 2],
+    config: &MctsConfig,
+    root_candidates: &[(Action, Option<BetSize>)],
+) -> Result<SolveResult> {
     config.validate()?;
     if state.is_hand_over() {
         return Err(Error::Solver("cannot solve a hand that is over".into()));
@@ -64,7 +89,6 @@ pub fn solve<R: Rng + ?Sized>(
 
     let worlds = WorldSampler::sample(rng, state, ranges, config.worlds)?;
     let baseline = state.stack(Seat::Hero);
-    let root_candidates = candidates(state);
 
     let mut per_world: Vec<PerWorld> = Vec::with_capacity(worlds.len());
     for world in &worlds {
@@ -72,7 +96,7 @@ pub fn solve<R: Rng + ?Sized>(
             world.build_state(state),
             &world.runout,
             baseline,
-            root_candidates.clone(),
+            root_candidates.to_vec(),
             *config,
         );
         let values = search.run(rng)?;
@@ -80,7 +104,9 @@ pub fn solve<R: Rng + ?Sized>(
             world.weight,
             values
                 .into_iter()
-                .map(|(action, _bucket, value, visits)| (action, value, visits))
+                .map(|(action, _bucket, value, variance, bust_prob, visits)| {
+                    (action, value, variance, bust_prob, visits)
+                })
                 .collect(),
         ));
     }
@@ -91,11 +117,13 @@ pub fn solve<R: Rng + ?Sized>(
         .filter_map(|(action, bucket)| {
             combined
                 .iter()
-                .find(|(a, _)| a == action)
-                .map(|(_, ev)| ActionValue {
+                .find(|(a, _, _, _)| a == action)
+                .map(|(_, ev, variance, bust_prob)| ActionValue {
                     action: *action,
                     bucket: *bucket,
                     ev: *ev,
+                    variance: *variance,
+                    bust_prob: *bust_prob,
                     visits: visits_for(action, &per_world),
                 })
         })
@@ -112,44 +140,52 @@ fn visits_for(action: &Action, per_world: &[PerWorld]) -> u64 {
     per_world
         .iter()
         .flat_map(|(_, values)| values.iter())
-        .filter(|(a, _, _)| a == action)
-        .map(|(_, _, visits)| *visits)
+        .filter(|(a, _, _, _, _)| a == action)
+        .map(|(_, _, _, _, visits)| *visits)
         .sum()
 }
 
-/// Merges per-world action values with the worlds' weights: the expectimax
-/// step over sampled opponent holdings. Each world must report the same set
-/// of actions in the same order; returns an empty vector for no worlds.
-fn combine_world_values(per_world: &[PerWorld]) -> Result<Vec<(Action, f64)>> {
+/// Merges per-world action statistics with the worlds' weights: the
+/// expectimax step over sampled opponent holdings. Each world must report the
+/// same set of actions in the same order; returns an empty vector for no
+/// worlds. Variances combine as `E[x²] − E[x]²` over the world mixture.
+fn combine_world_values(per_world: &[PerWorld]) -> Result<Vec<(Action, f64, f64, f64)>> {
     let Some((_, reference)) = per_world.first() else {
         return Ok(Vec::new());
     };
-    let mut combined: Vec<(Action, f64)> = reference
-        .iter()
-        .map(|(action, _, _)| (*action, 0.0))
-        .collect();
+    let mut means = vec![0.0f64; reference.len()];
+    let mut second_moments = vec![0.0f64; reference.len()];
+    let mut busts = vec![0.0f64; reference.len()];
 
     let mut weight_sum = 0.0;
     for (weight, values) in per_world {
-        if values.len() != combined.len() {
+        if values.len() != reference.len() {
             return Err(Error::Solver(
                 "worlds disagree on the candidate action set".into(),
             ));
         }
         weight_sum += *weight;
-        for (index, (action, value, _)) in values.iter().enumerate() {
-            if combined[index].0 != *action {
+        for (index, (action, value, variance, bust_prob, _)) in values.iter().enumerate() {
+            if reference[index].0 != *action {
                 return Err(Error::Solver(
                     "worlds disagree on candidate ordering".into(),
                 ));
             }
-            combined[index].1 += *weight * *value;
+            means[index] += *weight * *value;
+            second_moments[index] += *weight * (*variance + value * value);
+            busts[index] += *weight * *bust_prob;
         }
     }
-    for (_, value) in &mut combined {
-        *value /= weight_sum;
-    }
-    Ok(combined)
+
+    Ok(reference
+        .iter()
+        .enumerate()
+        .map(|(index, (action, _, _, _, _))| {
+            let mean = means[index] / weight_sum;
+            let variance = (second_moments[index] / weight_sum - mean * mean).max(0.0);
+            (*action, mean, variance, busts[index] / weight_sum)
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -177,27 +213,65 @@ mod tests {
         let fold = Action::Fold;
         let call = Action::Call;
         let per_world = vec![
-            (0.25, vec![(fold, 10.0, 100), (call, 0.0, 90)]),
-            (0.75, vec![(fold, 20.0, 80), (call, 0.0, 70)]),
+            (
+                0.25,
+                vec![(fold, 10.0, 0.0, 0.0, 100), (call, 0.0, 0.0, 0.0, 90)],
+            ),
+            (
+                0.75,
+                vec![(fold, 20.0, 0.0, 0.0, 80), (call, 0.0, 0.0, 0.0, 70)],
+            ),
         ];
         let combined = combine_world_values(&per_world).unwrap();
+        let mean = 0.25 * 10.0 + 0.75 * 20.0;
+        let second = 0.25 * 100.0 + 0.75 * 400.0;
         assert_eq!(
             combined,
-            vec![(fold, 0.25 * 10.0 + 0.75 * 20.0), (call, 0.0)]
+            vec![
+                (fold, mean, second - mean * mean, 0.0),
+                (call, 0.0, 0.0, 0.0)
+            ]
         );
+    }
+
+    #[test]
+    fn combine_mixes_variances_and_bust_probabilities() {
+        let fold = Action::Fold;
+        let all_in = Action::AllIn;
+        let per_world = vec![
+            (
+                0.5,
+                vec![(fold, 0.0, 0.0, 0.0, 10), (all_in, -50.0, 40.0, 0.8, 10)],
+            ),
+            (
+                0.5,
+                vec![(fold, 0.0, 0.0, 0.0, 12), (all_in, -60.0, 20.0, 0.6, 12)],
+            ),
+        ];
+        let combined = combine_world_values(&per_world).unwrap();
+        assert_eq!(combined[0], (fold, 0.0, 0.0, 0.0));
+        let mean = -55.0;
+        let second = 0.5 * (40.0 + 2500.0) + 0.5 * (20.0 + 3600.0);
+        assert_eq!(combined[1], (all_in, mean, second - mean * mean, 0.7));
     }
 
     #[test]
     fn combine_rejects_mismatched_world_action_sets() {
         let ok = vec![
-            (0.5, vec![(Action::Fold, 1.0, 1)]),
-            (0.5, vec![(Action::Fold, 2.0, 2)]),
+            (0.5, vec![(Action::Fold, 1.0, 0.0, 0.0, 1)]),
+            (0.5, vec![(Action::Fold, 2.0, 0.0, 0.0, 2)]),
         ];
         assert!(combine_world_values(&ok).is_ok());
 
         let mismatched = vec![
-            (0.5, vec![(Action::Fold, 1.0, 1), (Action::Call, 0.0, 0)]),
-            (0.5, vec![(Action::Fold, 2.0, 2)]),
+            (
+                0.5,
+                vec![
+                    (Action::Fold, 1.0, 0.0, 0.0, 1),
+                    (Action::Call, 0.0, 0.0, 0.0, 0),
+                ],
+            ),
+            (0.5, vec![(Action::Fold, 2.0, 0.0, 0.0, 2)]),
         ];
         assert!(matches!(
             combine_world_values(&mismatched),
@@ -205,8 +279,20 @@ mod tests {
         ));
 
         let reordered = vec![
-            (0.5, vec![(Action::Fold, 1.0, 1), (Action::Call, 0.0, 0)]),
-            (0.5, vec![(Action::Call, 0.0, 0), (Action::Fold, 2.0, 2)]),
+            (
+                0.5,
+                vec![
+                    (Action::Fold, 1.0, 0.0, 0.0, 1),
+                    (Action::Call, 0.0, 0.0, 0.0, 0),
+                ],
+            ),
+            (
+                0.5,
+                vec![
+                    (Action::Call, 0.0, 0.0, 0.0, 0),
+                    (Action::Fold, 2.0, 0.0, 0.0, 2),
+                ],
+            ),
         ];
         assert!(matches!(
             combine_world_values(&reordered),
@@ -391,6 +477,29 @@ mod tests {
         let mut weights = [0.0f32; HAND_COUNT];
         weights[Hand::new(Rank::Ace, Rank::Ace, false).index()] = 1.0;
         weights
+    }
+
+    #[test]
+    fn folding_has_zero_risk_and_bust_probability() {
+        let state = river_facing_bet([
+            card(Rank::Nine, Suit::Hearts),
+            card(Rank::King, Suit::Hearts),
+        ]);
+        let mut rng = seeded_rng(10);
+        let ranges = [uniform(), uniform()];
+        let result = solve(&mut rng, &state, &ranges, &MctsConfig::test()).unwrap();
+        let fold = result
+            .actions
+            .iter()
+            .find(|a| a.action == Action::Fold)
+            .expect("fold should have an estimate");
+        assert_eq!(fold.variance, 0.0, "folding has no payoff variance");
+        assert_eq!(fold.bust_prob, 0.0, "folding never busts");
+        assert_eq!(fold.sigma(), 0.0);
+        for action in &result.actions {
+            assert!(action.variance.is_finite() && action.variance >= 0.0);
+            assert!(action.bust_prob.is_finite() && (0.0..=1.0).contains(&action.bust_prob));
+        }
     }
 
     #[test]

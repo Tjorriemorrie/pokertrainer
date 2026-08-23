@@ -31,7 +31,7 @@ This list is the resume point for development. Work top-to-bottom; each stage ge
 - [x] **S3 — Game state engine:** 3-max Spin and Gold rules, blinds/button, stacks, streets, pots, action flow.
 - [x] **S4 — Range model:** 169-hand matrix, GGPoker bet-sizing buckets, Bayesian narrowing, sequence nodes.
 - [x] **S5 — MCTS solver:** Range-based search, chance nodes, state isolation, expectimax backprop.
-- [ ] **S6 — Decision layer:** Action submission, optimal-action selection, evaluation logic.
+- [x] **S6 — Decision layer:** Action submission, optimal-action selection, evaluation logic.
 - [ ] **S7 — HTTP + WebSocket bridge:** Axum routes, static assets, templates, WS event protocol.
 - [ ] **S8 — Blunder intervention engine:** Error-rate calc, dynamic threshold, ~1-in-3-hand calibration.
 - [ ] **S9 — Session persistence & analytics:** Decision logging, EV tracker, chart decimation.
@@ -97,8 +97,8 @@ Simulation core; quality over speed first, optimize later.
 
 Bridge between engine decisions and the UI.
 
-- **Action submission:** player clicks an action or uses the bet slider.
-- **Optimal action selection:** strict Pure Max EV — recommend the single highest-EV action down to the decimal.
+- **Action submission:** player clicks an action or uses the bet slider; submissions are validated against the legal-action set.
+- **Optimal action selection:** survivability-based. The solver reports per-action chip EV, payoff variance, and bust probability; the decision layer ranks candidates by the risk-adjusted score `EV − λσ² − κ·P(bust)`, where λ = γ/(2S) and the bust cost κ = [U(S) − U(b)]/U′(S) come from a CRRA utility of the hero's stack (γ = 1 is Kelly/log utility: κ = S·ln(S/b)). Variance and bust risk are thus penalized harder the shorter the hero's stack — the winner-take-all objective is surviving the longest. The single highest-scoring action is optimal, ties broken strictly by chip EV, then bust probability, then variance.
 - **Evaluation logic:** compare a played action against the optimal action to yield an EV loss.
 
 ## S7 — HTTP + WebSocket Bridge

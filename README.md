@@ -24,10 +24,18 @@ interface and coaches decision-making with a range-based solver.
   adjustment; every sampled world keeps its own isolated expectimax-UCT
   search, and action EVs are the range-probability-weighted average across
   worlds.
+- **S6 — Decision layer:** validates player-submitted actions (including
+  off-bucket bet-slider amounts) and evaluates them against the optimal
+  action. Because only first place pays, "optimal" maximizes a survivability
+  score derived from CRRA utility over the hero's stack:
+  `EV − λσ² − κ·P(bust)` with λ = γ/(2S) and bust cost κ = S·ln(S/b) under
+  Kelly (γ = 1) — variance and bust risk are penalized more the shorter the
+  hero's stack. The played action's exact chip EV loss is reported against
+  the optimal one.
 
 The app currently runs as a library plus a small binary that starts up,
-connects to the database, and applies migrations. The table UI and decision
-layer are not built yet.
+connects to the database, and applies migrations. The table UI is not built
+yet.
 
 ## How to run
 
