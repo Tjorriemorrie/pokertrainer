@@ -16,7 +16,7 @@ pub fn index_page() -> String {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Poker Trainer</title>
-<link rel="stylesheet" href="/assets/style.css?v=3">
+<link rel="stylesheet" href="/assets/style.css?v=5">
 </head>
 <body class="pt-body">
   <header class="pt-topwrap">
@@ -59,7 +59,7 @@ pub fn tournaments_page(sessions: &[(SessionSummary, Vec<ChartPoint>)]) -> Strin
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Poker Trainer — Tournaments</title>
-<link rel="stylesheet" href="/assets/style.css?v=3">
+<link rel="stylesheet" href="/assets/style.css?v=5">
 </head>
 <body class="pt-body">
 <header class="pt-topwrap">
@@ -197,14 +197,6 @@ fn sounds_json(sounds: &[Sound]) -> String {
     serde_json::to_string(&tags).unwrap_or_else(|_| "[]".to_string())
 }
 
-fn avatar_label(seat: Seat) -> String {
-    match seat {
-        Seat::Hero => "H".to_string(),
-        Seat::Opponent1 => "O1".to_string(),
-        Seat::Opponent2 => "O2".to_string(),
-    }
-}
-
 /// Formats a stack pill: chips first, then the big-blind equivalent hidden
 /// behind a `?` placeholder — holding Alt reveals the real value, so the
 /// player learns to convert chips to blinds without the client doing it.
@@ -292,6 +284,7 @@ fn seat_html(state: &GameState, seat: Seat) -> String {
     let folded = state.folded(seat);
     let all_in = state.all_in(seat);
     let stack = state.stack(seat);
+    let stack_pill = stack_text(stack, level.big_blind);
 
     let cards = match seat {
         Seat::Hero => format!(
@@ -344,19 +337,11 @@ fn seat_html(state: &GameState, seat: Seat) -> String {
     let seat_name = escape(&seat.to_string());
     format!(
         r#"<div class="{cls}" data-seat="{seat_name}">
-<div class="pt-avatar">{avatar}{flag}</div>
 <div class="pt-seat-name">{seat_name}{badges}</div>
-<div class="pt-seat-cards">{cards}</div>
-<div class="pt-stack"><i class="pt-chip-dot"></i>{stack_text}</div>
+<div class="pt-seat-cards">{cards}{flag}</div>
+<div class="pt-stack"><i class="pt-chip-dot"></i>{stack_pill}</div>
 {bet_html}
-</div>"#,
-        avatar = avatar_label(seat),
-        seat_name = seat_name,
-        flag = flag,
-        badges = badges,
-        cards = cards,
-        stack_text = stack_text(stack, level.big_blind),
-        bet_html = bet_html
+</div>"#
     )
 }
 
@@ -658,7 +643,7 @@ mod tests {
             "the S10 sound toggle is present"
         );
         assert!(
-            page.contains(r#"/assets/style.css?v=3"#),
+            page.contains(r#"/assets/style.css?v=5"#),
             "the stylesheet link is versioned so browsers drop stale cached CSS"
         );
         assert!(
@@ -903,6 +888,26 @@ mod tests {
         assert!(
             fragment.contains(r#"<div class="pt-action-block"><div id="action-panel""#),
             "{fragment}"
+        );
+    }
+
+    #[test]
+    fn seats_render_without_avatar_icons() {
+        let mut state = GameState::new(Seat::Hero, level());
+        state
+            .start_hand(&mut Deck::shuffled(&mut seeded_rng(39)))
+            .unwrap();
+        state.apply_action(Action::Call).unwrap();
+        let fragment = table_fragment(&state, 4, &[], &[]);
+        assert!(
+            !fragment.contains(r#"class="pt-avatar""#),
+            "no round avatar icons for any seat: {fragment}"
+        );
+        assert!(fragment.contains(r#"data-seat="Hero""#));
+        assert!(fragment.contains(r#"data-seat="Opponent 1""#));
+        assert!(
+            fragment.contains(r#"<div class="pt-seat-cards">"#),
+            "cards are still rendered: {fragment}"
         );
     }
 

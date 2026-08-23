@@ -235,33 +235,9 @@ button { font-family: inherit; }
 .pt-seat[data-seat="Opponent 2"] { right: 14%; top: 6%; }
 .pt-seat[data-seat="Hero"] { left: 50%; transform: translateX(-50%); bottom: 4px; }
 
-.pt-avatar {
-  position: relative;
-  width: 58px;
-  height: 58px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: 800;
-  font-size: 1.1rem;
-  color: #d7dde6;
-  border: 3px solid #3f4b5c;
-  background: radial-gradient(circle at 32% 28%, #37465a, #182230 70%);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
-}
-
-.pt-seat[data-seat="Opponent 1"] .pt-avatar { border-color: #2f7d6d; }
-.pt-seat[data-seat="Opponent 2"] .pt-avatar { border-color: #7156a8; }
-.pt-seat[data-seat="Hero"] .pt-avatar { border-color: var(--gold); }
-
-.pt-active .pt-avatar::after {
-  content: "";
-  position: absolute;
-  inset: -8px;
-  border-radius: 50%;
-  border: 2px solid var(--gold);
-  box-shadow: 0 0 16px rgba(207, 159, 93, 0.65);
+.pt-active .pt-seat-name {
+  color: var(--gold);
+  text-shadow: 0 0 12px rgba(207, 159, 93, 0.6);
 }
 
 .pt-seat-name {
@@ -366,7 +342,7 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
   align-items: center;
   justify-content: center;
   background: rgba(4, 8, 12, 0.66);
-  border-radius: 50%;
+  border-radius: 8px;
   font-size: 0.58rem;
   font-weight: 800;
   letter-spacing: 0.06em;
@@ -429,7 +405,7 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
 .pt-pot {
   position: absolute;
   left: 50%;
-  top: 29%;
+  top: 32%;
   transform: translateX(-50%);
   background: rgba(8, 13, 18, 0.78);
   color: var(--gold);

@@ -81,9 +81,10 @@ interface and coaches decision-making with a range-based solver.
   All-in) labelled in **chip values only** — stacks show their chip count
   with a muted `?` placeholder for the BB equivalent, just like the real
   client (hold **Alt** and the BB values appear, so you still build the
-  conversion reflex yourself), the hero pod sits at the bottom edge of the
-  felt, and the dock is right-aligned below the oval — and a golden bet
-  slider with
+  conversion reflex yourself), seat pods carry no avatar icons — just name,
+  cards and stack — and the active seat's name glows gold; the hero pod sits
+  at the bottom edge of the felt, and the dock is right-aligned below the
+  oval — and a golden bet slider with
   −/+ steppers, mouse-wheel fine grain (wheel ±5, shift-wheel ±25), and a
   synced number box — so the controls never overlap the hero's cards and the
   oval never clips any text. Cards use a **four-color deck** (hearts red,
