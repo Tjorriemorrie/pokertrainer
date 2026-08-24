@@ -341,15 +341,17 @@ impl GameState {
         }
 
         for seat in Seat::ALL {
-            self.revealed[seat.index()] = true;
+            if !self.eliminated[seat.index()] {
+                self.revealed[seat.index()] = true;
+            }
         }
 
-        let pots = compute_pots(&self.total_contrib, &self.folded);
+        let pots = compute_pots(&self.total_contrib, &self.folded, &self.eliminated);
         let mut awards: Vec<PotAward> = Vec::new();
         let mut revealed = Vec::new();
 
         for seat in Seat::ALL {
-            if !self.folded[seat.index()] {
+            if !self.folded[seat.index()] && !self.eliminated[seat.index()] {
                 let hand = self.best_hand(seat);
                 revealed.push((seat, self.hole_cards[seat.index()], hand.class()));
             }
@@ -447,6 +449,19 @@ impl GameState {
         self.button
     }
 
+    /// The seat posting the small blind: in 3-max the button is the small
+    /// blind.
+    pub fn small_blind_seat(&self) -> Seat {
+        self.button
+    }
+
+    /// The seat posting the big blind: the next active seat after the
+    /// button, skipping eliminated seats (heads-up this is the only
+    /// opponent).
+    pub fn big_blind_seat(&self) -> Seat {
+        self.next_active(self.button)
+    }
+
     pub fn blind_level(&self) -> BlindLevel {
         self.blind_level
     }
@@ -484,7 +499,7 @@ impl GameState {
     }
 
     pub fn pots(&self) -> Vec<Pot> {
-        compute_pots(&self.total_contrib, &self.folded)
+        compute_pots(&self.total_contrib, &self.folded, &self.eliminated)
     }
 
     /// The strength of a seat's best current hand. Used by the solver's
@@ -791,7 +806,7 @@ impl GameState {
     fn award_fold_win(&mut self, winner: Seat) {
         let total: u32 = self.total_contrib.iter().sum();
         self.stacks[winner.index()] += total;
-        let pots = compute_pots(&self.total_contrib, &self.folded);
+        let pots = compute_pots(&self.total_contrib, &self.folded, &self.eliminated);
         self.hand_result = Some(HandResult {
             reason: HandEndReason::Fold(winner),
             awards: vec![PotAward {
@@ -1410,6 +1425,56 @@ mod tests {
         assert!(state.eliminated(Seat::Opponent1));
         assert!(state.eliminated(Seat::Opponent2));
         assert_eq!(state.tournament_winner(), Some(Seat::Hero));
+    }
+
+    #[test]
+    fn showdown_skips_eliminated_seats() {
+        // Opponent 1 busted out of an earlier hand: at the next hand's
+        // showdown (heads-up between the hero and Opponent 2) they hold no
+        // cards, reveal nothing, and contest no pot.
+        let mut state = GameState::new(Seat::Hero, level());
+        state.hole_cards = [
+            [card("As"), card("Ad")],
+            [card("Kh"), card("Kd")],
+            [card("Qh"), card("Qd")],
+        ];
+        state.board = vec![card("2c"), card("7c"), card("9c"), card("Jc"), card("3s")];
+        state.total_contrib = [100, 100, 100];
+        state.folded = [false, false, false];
+        state.eliminated[Seat::Opponent1.index()] = true;
+
+        let result = state.showdown(&mut Deck::new()).unwrap();
+        assert_eq!(result.revealed.len(), 2);
+        assert!(
+            result
+                .revealed
+                .iter()
+                .all(|(seat, _, _)| *seat != Seat::Opponent1),
+            "an eliminated seat shows no cards: {result:?}"
+        );
+        assert_eq!(
+            state.hole_cards(Seat::Opponent1),
+            None,
+            "an eliminated seat's cards stay hidden after the showdown"
+        );
+        assert_eq!(
+            result.awards,
+            vec![PotAward {
+                seat: Seat::Hero,
+                amount: 300
+            }],
+            "the eliminated seat never contests the pot"
+        );
+        assert_eq!(state.stack(Seat::Hero), 800);
+        assert_eq!(
+            state.stack(Seat::Opponent1),
+            500,
+            "the eliminated seat never contests the pot"
+        );
+        assert!(
+            state.tournament_winner().is_none(),
+            "two seats remain in play"
+        );
     }
 
     #[test]

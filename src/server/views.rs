@@ -549,8 +549,8 @@ fn seat_html(state: &GameState, seat: Seat) -> String {
         },
     };
 
-    let small_blind = state.button();
-    let big_blind = state.button().next();
+    let small_blind = state.small_blind_seat();
+    let big_blind = state.big_blind_seat();
     let mut badges = String::new();
     if state.button() == seat {
         badges.push_str(r#"<span class="pt-badge btn">BTN</span>"#);

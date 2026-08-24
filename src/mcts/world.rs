@@ -12,9 +12,10 @@ use crate::rng::{gen_index, weighted_index};
 /// exact probability of this world under the opponent ranges.
 ///
 /// The hero's cards come from `GameState`; opponents' cards are sampled from
-/// their ranges with card-removal (blocker) adjustment. Each world keeps its
-/// own runout, so board cards dealt later are chance outcomes resolved per
-/// world and mix out over the range-weighted average.
+/// their ranges with card-removal (blocker) adjustment — eliminated seats get
+/// placeholder cards only and are skipped entirely. Each world keeps its own
+/// runout, so board cards dealt later are chance outcomes resolved per world
+/// and mix out over the range-weighted average.
 #[derive(Clone, Debug, PartialEq)]
 pub struct World {
     pub hole_cards: [[Card; 2]; NUM_PLAYERS],
@@ -57,10 +58,13 @@ impl WorldSampler {
 
         let mut worlds = Vec::with_capacity(count);
         for _ in 0..count {
-            let (opponent_cards, weight) = draw_opponents(rng, ranges, &dead).ok_or_else(|| {
-                Error::Solver("opponent range leaves no hand consistent with the dead cards".into())
-            })?;
-            worlds.push((opponent_cards, weight));
+            let (hole_cards, weight) =
+                draw_opponents(rng, state, ranges, &dead).ok_or_else(|| {
+                    Error::Solver(
+                        "opponent range leaves no hand consistent with the dead cards".into(),
+                    )
+                })?;
+            worlds.push((hole_cards, weight));
         }
 
         let total: f64 = worlds.iter().map(|(_, w)| *w).sum();
@@ -69,17 +73,18 @@ impl WorldSampler {
         }
 
         let mut out = Vec::with_capacity(count);
-        for ([opp1, opp2], weight) in worlds {
-            let mut hole_cards = [[Card::new(Rank::Two, Suit::Clubs); 2]; NUM_PLAYERS];
-            hole_cards[Seat::Hero.index()] = state.hero_cards();
-            hole_cards[Seat::Opponent1.index()] = opp1;
-            hole_cards[Seat::Opponent2.index()] = opp2;
-
+        for (hole_cards, weight) in worlds {
+            // Only cards actually held by live seats count as dead: an
+            // eliminated seat's placeholders must not remove cards from the
+            // future runout.
+            let mut dead_hands = dead.clone();
+            for seat in Seat::ALL {
+                if !state.eliminated(seat) {
+                    dead_hands.extend(hole_cards[seat.index()]);
+                }
+            }
             let mut runout: Vec<Card> = all_cards()
-                .filter(|card| {
-                    !hole_cards.iter().any(|hand| hand.contains(card))
-                        && !state.board().contains(card)
-                })
+                .filter(|card| !dead_hands.contains(card))
                 .collect();
             runout.shuffle(rng);
 
@@ -93,23 +98,31 @@ impl WorldSampler {
     }
 }
 
-/// Draws one holding per opponent and returns the joint exact probability.
+/// Draws one holding per active (non-eliminated) opponent and returns the
+/// joint exact probability. Eliminated seats keep placeholder cards and are
+/// never sampled.
 fn draw_opponents<R: Rng + ?Sized>(
     rng: &mut R,
+    state: &GameState,
     ranges: &[Range; 2],
     dead: &[Card],
-) -> Option<([[Card; 2]; 2], f64)> {
+) -> Option<([[Card; 2]; NUM_PLAYERS], f64)> {
+    let placeholder = [Card::new(Rank::Two, Suit::Clubs); 2];
     let mut dead = dead.to_vec();
-    let mut cards = [[Card::new(Rank::Two, Suit::Clubs); 2]; 2];
+    let mut hole_cards = [placeholder; NUM_PLAYERS];
+    hole_cards[Seat::Hero.index()] = state.hero_cards();
     let mut weight = 1.0f64;
 
-    for (index, range) in ranges.iter().enumerate() {
-        let (combo, class_prob) = draw_holding(rng, range, &dead)?;
+    for seat in [Seat::Opponent1, Seat::Opponent2] {
+        if state.eliminated(seat) {
+            continue;
+        }
+        let (combo, class_prob) = draw_holding(rng, &ranges[seat.index() - 1], &dead)?;
         dead.extend_from_slice(&combo);
-        cards[index] = combo;
+        hole_cards[seat.index()] = combo;
         weight *= f64::from(class_prob);
     }
-    Some((cards, weight))
+    Some((hole_cards, weight))
 }
 
 /// Draws one concrete two-card holding: a hand class proportional to its
@@ -381,6 +394,46 @@ mod tests {
         let mut rng = seeded_rng(10);
         let result = WorldSampler::sample(&mut rng, &state, &[aces, uniform()], 8);
         assert!(matches!(result, Err(Error::Solver(_))));
+    }
+
+    #[test]
+    fn eliminated_opponents_keep_placeholders_and_stay_live_in_runouts() {
+        let mut state = dealt_state();
+        state.set_eliminated(Seat::Opponent1, true);
+        let uniform = [uniform(), uniform()];
+        let mut rng = seeded_rng(17);
+        let worlds = WorldSampler::sample(&mut rng, &state, &uniform, 16).unwrap();
+        let placeholder = [Card::new(Rank::Two, Suit::Clubs); 2];
+
+        for world in &worlds {
+            assert_eq!(
+                world.hole_cards[Seat::Opponent1.index()],
+                placeholder,
+                "an eliminated opponent is never dealt sampled cards"
+            );
+            assert_ne!(
+                world.hole_cards[Seat::Opponent2.index()],
+                placeholder,
+                "the live opponent still draws from their range"
+            );
+            for hand in [Seat::Hero.index(), Seat::Opponent2.index()] {
+                for card in &world.hole_cards[hand] {
+                    assert!(!world.runout.contains(card));
+                }
+            }
+            let live_cards = state
+                .hero_cards()
+                .into_iter()
+                .chain(world.hole_cards[Seat::Opponent2.index()]);
+            if live_cards.clone().all(|card| card != placeholder[0]) {
+                assert!(
+                    world.runout.contains(&placeholder[0]),
+                    "placeholder cards never remove live cards from the runout"
+                );
+            }
+            // 52 cards minus the hero's two and the one live opponent's two.
+            assert_eq!(world.runout.len(), 48);
+        }
     }
 
     #[test]

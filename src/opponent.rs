@@ -139,8 +139,8 @@ impl OpponentTracker {
 
     /// Snapshots both opponents against the current table state for display.
     pub fn snapshots(&self, state: &GameState) -> Vec<OpponentSnapshot> {
-        let small_blind = state.button();
-        let big_blind = state.button().next();
+        let small_blind = state.small_blind_seat();
+        let big_blind = state.big_blind_seat();
         [Seat::Opponent1, Seat::Opponent2]
             .iter()
             .map(|&seat| {

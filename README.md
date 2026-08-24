@@ -154,7 +154,11 @@ interface and coaches decision-making with a range-based solver.
   bot recorded as the winner — or when a
   single seat is left standing. Busted opponents are **out** — they stop being
   dealt cards, stop posting blinds, and are skipped in the action order, with
-  an **OUT** badge over their seat. When the tournament ends, the table
+  an **OUT** badge over their seat. An out player never receives cards at a
+  later showdown: only the seats still in the hand reveal hands and contest
+  pots, and the solver's opponent sampling skips eliminated seats entirely
+  (they hold placeholder cards in the search, no runout cards are burned
+  for them, and they can never win a pot). When the tournament ends, the table
   **stops**: no further hand is dealt, the connection does not restart, and a
   winner/loser
   modal appears (gold for a win, red for a loss) whose **Continue** button
@@ -169,7 +173,10 @@ interface and coaches decision-making with a range-based solver.
   player's current street bet (blinds included) shows as a gold chip pill in
   front of their pod — hero included — and is swept into the pot pill as soon
   as the betting round closes. An **action log** is docked to the left of the
-  oval, exactly as tall as the table, always visible: hand deals, folds,
+  oval, exactly as tall as the table, always visible: every hand deal names
+  the button (`— Hand #3 — blinds 10/20 — BTN Opponent 2`) and logs both
+  blind posts (`Opponent 2 post SB 10`, `Opponent 1 post BB 20`), so every
+  chip each seat commits — blinds included — is on the record, plus folds,
   calls, bets, raises, the dealt board (each street's cards are logged as
   they land — `Flop 2c 7h Kd`, `Turn 4s`, `River Jd`), and results are
   appended below earlier entries and the

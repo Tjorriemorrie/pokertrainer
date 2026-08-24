@@ -452,11 +452,24 @@ impl TableSession {
         self.opponents.begin_hand();
         self.hero_all_in_this_hand = false;
         self.push_sound(Sound::Deal);
+        let small_blind = self.state.small_blind_seat();
+        let big_blind = self.state.big_blind_seat();
         self.log_line(format!(
-            "— Hand #{} — blinds {}/{}",
+            "— Hand #{} — blinds {}/{} — BTN {}",
             self.hand_no,
             self.state.blind_level().small_blind,
-            self.state.blind_level().big_blind
+            self.state.blind_level().big_blind,
+            actor_name(self.state.button()),
+        ));
+        self.log_line(format!(
+            "{} post SB {}",
+            actor_name(small_blind),
+            self.state.street_contribution(small_blind)
+        ));
+        self.log_line(format!(
+            "{} post BB {}",
+            actor_name(big_blind),
+            self.state.street_contribution(big_blind)
         ));
         tracing::info!(
             hand_no = self.hand_no,
@@ -820,6 +833,16 @@ fn cards_text(cards: &[Card]) -> String {
         .join(" ")
 }
 
+/// The action-log name of a seat: the hero is addressed as "You", opponents
+/// by their seat names.
+fn actor_name(seat: Seat) -> &'static str {
+    match seat {
+        Seat::Hero => "You",
+        Seat::Opponent1 => "Opponent 1",
+        Seat::Opponent2 => "Opponent 2",
+    }
+}
+
 /// Applies an action and settles any street or hand boundary it creates:
 /// advances streets that can continue, resolves showdowns (dealing out the
 /// board) when betting cannot.
@@ -1028,6 +1051,54 @@ mod tests {
         assert_eq!(session.state().to_act(), Seat::Hero);
         assert_eq!(session.hand_no(), 1);
         assert!(!session.state().is_hand_over());
+    }
+
+    /// Each deal names the button and logs both blind posts, so the action
+    /// log shows exactly what every seat committed before any action.
+    #[test]
+    fn deals_log_the_button_and_the_blind_posts() {
+        let mut session = TableSession::new(41, probe_config(), survival(), never_intercepts());
+        session.deal_next_hand().unwrap();
+        let log = session.log();
+        assert!(
+            log.contains(&"— Hand #1 — blinds 10/20 — BTN You".to_string()),
+            "{log:?}"
+        );
+        assert!(log.contains(&"You post SB 10".to_string()), "{log:?}");
+        assert!(
+            log.contains(&"Opponent 1 post BB 20".to_string()),
+            "{log:?}"
+        );
+    }
+
+    /// The next hand logs the rotated button and the moved blind posts.
+    #[test]
+    fn the_next_deal_logs_the_rotated_button_and_blinds() {
+        let mut session = TableSession::resume(
+            river_facing_bet(),
+            Deck::default(),
+            1,
+            71,
+            probe_config(),
+            survival(),
+            never_intercepts(),
+        );
+        session.submit(Action::Fold).unwrap();
+        session.advance_after_result().unwrap();
+        assert_eq!(session.hand_no(), 2);
+        let log = session.log();
+        assert!(
+            log.contains(&"— Hand #2 — blinds 10/20 — BTN Opponent 1".to_string()),
+            "{log:?}"
+        );
+        assert!(
+            log.contains(&"Opponent 1 post SB 10".to_string()),
+            "{log:?}"
+        );
+        assert!(
+            log.contains(&"Opponent 2 post BB 20".to_string()),
+            "{log:?}"
+        );
     }
 
     /// Every street action is logged and, when a street is dealt or run out,
