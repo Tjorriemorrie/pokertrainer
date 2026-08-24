@@ -65,7 +65,12 @@ interface and coaches decision-making with a range-based solver.
   - Server → Client `TABLE_STATE_UPDATE`: the table HTML fragment (seats,
     stacks, board, action buttons, log) swapped into the DOM each turn.
   - Server → Client `TRIGGER_TACTICAL_OVERLAY`: the played-vs-optimal
-    breakdown, flagged with `intercepted`.
+    breakdown, flagged with `intercepted`. The candidate table is always
+    sorted cheapest-first — fold leads when it is an action, then check,
+    call, bets/raises by size, and all-in last — and the raw EV numbers sit
+    below a plain-English sentence that reads the EV gap the way a player
+    would ("That one adds up: Call gives up about 0.9 BB versus Raise to 120
+    every time this spot repeats.").
   - Server → Client `CHART_TICK`: one evaluated action appended to the
     top-bar EV curve.
   - Server → Client `SEARCH_STATUS`: the background solver's live progress
@@ -100,10 +105,12 @@ interface and coaches decision-making with a range-based solver.
   tuned so about one hand in three is interrupted. Below the threshold the
   game just continues (the chart still records every EV loss). When the
   threshold is hit, the state transition halts before your action is applied:
-  the table freezes behind a *Blunder interrupted* modal showing the blunder
-  vs the optimal move. You must press **I understand — continue** (which
-  sends `REVIEW_DONE` over the WebSocket) before the held-back action is
-  replayed and the game resumes.
+  the table freezes behind a *Blunder intercepted* review showing the blunder
+  vs the optimal move. Press **Continue** (which sends `REVIEW_DONE` over the
+  WebSocket) and the coach's best-EV action is played for you — your original
+  click never reaches the table, but the blunder itself stays recorded in the
+  chart and stored history, so you can see how much this instinctive play
+  would have cost.
 - **Session persistence & EV analytics:** every hero decision is stored
   in the database (`hero_decisions`) with the hand number, street, played and
   optimal action, and the EV lost (in big blinds). The top-bar chart plays
@@ -200,9 +207,19 @@ appears, either click a sizing chip and the red **Bet/Raise** button, fine-tune
 the slider with the mouse wheel, or press **Fold** / **Call** outright — every
 amount is in chips. Every decision is charted in the top bar; serious blunders
 pause the table and render the played-vs-optimal breakdown in the **coach
-feedback** panel to the right of the felt — press **I understand — continue**
-to play on. Invalid clicks and reconnects are handled gracefully — the table
-keeps dealing.
+feedback** panel to the right of the felt — press **Continue** and the coach
+plays the best-EV action for you. Invalid clicks and reconnects are handled
+gracefully — the table keeps dealing.
+
+### Table events in the logs
+
+Every meaningful table event is also written to the server log (run with
+`RUST_LOG=info`, or `RUST_LOG=debug` for inbound client frames too): hand
+deals (button, blinds, stacks, your hole cards), each applied hero and
+opponent action (with street, pot, and acting seat), blunder interceptions
+(with the EV loss and threshold), review confirmations (played blunder vs
+applied correction), and hand results. If something misbehaves, send the
+relevant log lines and the bug report will land with full context.
 
 When you're done with a table, click **Finish table** in the top bar (or just
 close the tab): your session is stored, and the **Tournament history** link

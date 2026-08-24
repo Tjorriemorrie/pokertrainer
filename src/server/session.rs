@@ -2,7 +2,7 @@ use rand::Rng;
 
 use crate::analytics::PendingDecision;
 use crate::blunder::{BlunderConfig, Tracker};
-use crate::card::Deck;
+use crate::card::{Card, Deck};
 use crate::decision::{self, AnalyzedDecision, SurvivalConfig, validate_action};
 use crate::error::{Error, Result};
 use crate::game::blinds::BLIND_SCHEDULE;
@@ -72,8 +72,10 @@ pub enum TableEvent {
     ChartTick { action_index: u64, ev_loss: f64 },
 }
 
-/// An intercepted submission held back by the blunder engine: the action is
-/// replayed once the player confirms the review.
+/// An intercepted submission held back by the blunder engine: once the player
+/// confirms the review, the coach's survivability-optimal action is applied to
+/// the table in place of the blunder (the blunder itself stays what the
+/// session history and EV chart record).
 pub struct PendingInterception {
     action: Action,
     analyzed: AnalyzedDecision,
@@ -262,9 +264,13 @@ impl TableSession {
         self.pending.is_some()
     }
 
-    /// The hero action parked behind a pending interception, if any.
-    pub fn pending_action(&self) -> Option<Action> {
-        self.pending.as_ref().map(|pending| pending.action)
+    /// The action the coach will apply to the table once the pending
+    /// interception is confirmed: the survivability-optimal action replacing
+    /// the held-back blunder.
+    pub fn resolving_action(&self) -> Option<Action> {
+        self.pending
+            .as_ref()
+            .map(|pending| pending.analyzed.optimal.action)
     }
 
     /// Deals the next hand, rotating the button and reshuffling an exhausted
@@ -288,6 +294,15 @@ impl TableSession {
             self.state.blind_level().small_blind,
             self.state.blind_level().big_blind
         ));
+        tracing::info!(
+            hand_no = self.hand_no,
+            button = %self.state.button(),
+            small_blind = self.state.blind_level().small_blind,
+            big_blind = self.state.blind_level().big_blind,
+            stacks = ?self.state.stacks(),
+            hero_cards = %hole_cards_text(self.state.hole_cards(Seat::Hero)),
+            "hand dealt"
+        );
         Ok(())
     }
 
@@ -295,6 +310,10 @@ impl TableSession {
     /// until the hero must act. Called by the WebSocket layer once the client
     /// has shown the winner for a beat.
     pub fn advance_after_result(&mut self) -> Result<()> {
+        tracing::info!(
+            hand_won = self.hand_no,
+            "result pause over — dealing the next hand"
+        );
         self.deal_next_hand()?;
         self.pump()?;
         Ok(())
@@ -321,7 +340,17 @@ impl TableSession {
             self.opponents
                 .record(actor, action, self.state.street(), legal.call_amount > 0);
             self.pump_actions.push(action);
-            apply_settled(&mut self.state, &mut self.deck, action)?;
+            let outcome = apply_settled(&mut self.state, &mut self.deck, action)?;
+            tracing::info!(
+                hand_no = self.hand_no,
+                seat = %actor,
+                action = %views::action_label(action),
+                outcome = ?outcome,
+                street = %self.state.street(),
+                pot = self.state.total_pot(),
+                to_act = %self.state.to_act(),
+                "opponent action applied"
+            );
             if let Some(sound) = Self::sound_for(action) {
                 self.push_sound(sound);
             }
@@ -410,8 +439,12 @@ impl TableSession {
         if intercepted {
             tracing::info!(
                 ev_loss,
+                action = %views::action_label(action),
                 threshold = %(self.blunder_tracker.threshold()),
                 hand_no = self.hand_no,
+                street = %self.state.street(),
+                pot = self.state.total_pot(),
+                stacks = ?self.state.stacks(),
                 "blunder intercepted — freezing the state transition"
             );
             self.pending = Some(PendingInterception {
@@ -430,14 +463,16 @@ impl TableSession {
         self.apply_submission(action, self.action_no, ev_loss)
     }
 
-    /// Applies the intercepted action after the review confirmation: replays
-    /// the held-back submission, lets opponents act, and publishes the chart
-    /// tick and new table state.
+    /// Applies the coach's best-EV action after the review confirmation: the
+    /// held-back blunder is discarded on the table (but stays recorded in the
+    /// history and EV chart), opponents act, and the chart tick plus new table
+    /// state are published.
     pub fn confirm_review(&mut self) -> Result<Vec<TableEvent>> {
         let pending = self
             .pending
             .take()
             .ok_or_else(|| Error::Decision("no blunder interception is pending review".into()))?;
+        let optimal = pending.analyzed.optimal.action;
         let ev_loss = pending
             .analyzed
             .played
@@ -445,12 +480,14 @@ impl TableSession {
             .map(|played| played.ev_loss_bb)
             .unwrap_or(0.0);
         tracing::info!(
-            action = ?pending.action,
+            played = ?pending.action,
+            optimal = ?optimal,
+            ev_loss,
             hand_no = self.hand_no,
-            "review confirmed — applying the intercepted action"
+            "review confirmed — the coach's best-EV action replaces the blunder on the table"
         );
         self.record_decision(&pending.analyzed, pending.action, ev_loss);
-        self.apply_submission(pending.action, pending.action_index, ev_loss)
+        self.apply_submission(optimal, pending.action_index, ev_loss)
     }
 
     /// Applies one validated hero action and publishes its events: a chart
@@ -466,7 +503,19 @@ impl TableSession {
         if let Some(sound) = Self::sound_for(action) {
             self.push_sound(sound);
         }
-        apply_settled(&mut self.state, &mut self.deck, action)?;
+        let outcome = apply_settled(&mut self.state, &mut self.deck, action)?;
+        tracing::info!(
+            hand_no = self.hand_no,
+            action_index,
+            action = %views::action_label(action),
+            ev_loss,
+            outcome = ?outcome,
+            street = %self.state.street(),
+            pot = self.state.total_pot(),
+            stacks = ?self.state.stacks(),
+            to_act = %self.state.to_act(),
+            "hero action applied"
+        );
         if self.state.is_hand_over() {
             self.log_hand_result();
         }
@@ -497,6 +546,13 @@ impl TableSession {
         match result.reason {
             HandEndReason::Fold(winner) => {
                 self.log_line(format!("{winner} win {total} — everyone else folded"));
+                tracing::info!(
+                    hand_no = self.hand_no,
+                    winner = %winner,
+                    pot = total,
+                    stacks = ?self.state.stacks(),
+                    "hand finished — {winner} wins the pot uncontested"
+                );
             }
             HandEndReason::Showdown => {
                 for (seat, cards, class) in &result.revealed {
@@ -508,6 +564,13 @@ impl TableSession {
                     .map(|award| format!("{} +{}", award.seat, award.amount))
                     .collect();
                 self.log_line(format!("Showdown · {}", winners.join(" · ")));
+                tracing::info!(
+                    hand_no = self.hand_no,
+                    pot = total,
+                    awards = ?result.awards,
+                    stacks = ?self.state.stacks(),
+                    "hand finished — showdown awarded"
+                );
             }
         }
     }
@@ -518,6 +581,14 @@ fn uniform_ranges() -> [Range; 2] {
         [1.0 / HAND_COUNT as f32; HAND_COUNT],
         [1.0 / HAND_COUNT as f32; HAND_COUNT],
     ]
+}
+
+/// Formats optional hole cards for log lines: `"As Kh"` or `"—"`.
+fn hole_cards_text(cards: Option<[Card; 2]>) -> String {
+    match cards {
+        Some([first, second]) => format!("{first} {second}"),
+        None => "—".to_string(),
+    }
 }
 
 /// Applies an action and settles any street or hand boundary it creates:
@@ -866,7 +937,8 @@ mod tests {
     }
 
     /// Above the dynamic threshold the action is held back: only the overlay
-    /// fires, the state is untouched, and `REVIEW_DONE` replays it.
+    /// fires, the state is untouched, and `REVIEW_DONE` releases the table —
+    /// playing the coach's best-EV action while the blunder stays recorded.
     #[test]
     fn blunders_above_the_threshold_intercept_and_await_review() {
         let state = river_facing_bet();
@@ -929,7 +1001,13 @@ mod tests {
             "submissions are blocked while a review is pending"
         );
 
+        let call_amount = session.state().legal_actions().call_amount;
         let events = session.confirm_review().unwrap();
+        assert_eq!(
+            session.resolving_action(),
+            None,
+            "no action remains parked after confirmation"
+        );
         assert!(
             events.iter().any(|event| matches!(
                 event,
@@ -959,8 +1037,20 @@ mod tests {
             "the frozen street is stored"
         );
         assert!(
-            session.log().iter().any(|line| line.starts_with("You ")),
-            "the intercepted action is logged when applied"
+            session
+                .log()
+                .iter()
+                .any(|line| *line == views::describe_action(Seat::Hero, optimal, call_amount)),
+            "the coach's best-EV action is the one applied to the table: {:?}",
+            session.log()
+        );
+        assert!(
+            session
+                .log()
+                .iter()
+                .all(|line| *line != views::describe_action(Seat::Hero, alternative, call_amount)),
+            "the blunder itself must never reach the table: {:?}",
+            session.log()
         );
 
         assert!(

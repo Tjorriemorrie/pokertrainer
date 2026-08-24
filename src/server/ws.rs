@@ -50,6 +50,7 @@ async fn handle_socket(socket: WebSocket, app: Arc<AppState>) {
         close_session(app.pool.as_ref(), session_id).await;
         return;
     }
+    tracing::info!(session_id = ?session_id, "table session started");
 
     let (mut sender, mut receiver) = socket.split();
 
@@ -475,6 +476,7 @@ fn handle_client_message(
             };
         }
     };
+    tracing::debug!(message = ?client_message, "client frame received");
 
     match client_message {
         ClientMessage::ActionSubmit { action } => {
@@ -493,7 +495,7 @@ fn handle_client_message(
             }
         }
         ClientMessage::ReviewDone => {
-            let hero_action = session.pending_action();
+            let hero_action = session.resolving_action();
             match session.confirm_review() {
                 Ok(events) => outcome(session, events, hero_action),
                 Err(error) => error_outcome(&error.to_string()),
@@ -561,6 +563,8 @@ fn events_to_messages(session: &mut TableSession, events: Vec<TableEvent>) -> Ve
                     intercepted,
                     &session.opponent_snapshots(),
                     session.state().blind_level().big_blind,
+                    session.state().legal_actions().call_amount,
+                    session.state().stack(Seat::Hero),
                 ),
                 intercepted,
             }

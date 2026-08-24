@@ -29,8 +29,8 @@ pub enum ClientMessage {
     ActionSubmit {
         action: SubmittedAction,
     },
-    /// The player has reviewed an intercepted blunder and wants the held-back
-    /// action applied.
+    /// The player has reviewed an intercepted blunder and wants the coach's
+    /// best-EV action applied in place of the held-back one.
     ReviewDone,
     /// The player is done with the table — the session is finalized and the
     /// server replies with [`ServerMessage::SessionFinished`].

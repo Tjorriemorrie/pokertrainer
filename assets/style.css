@@ -759,13 +759,15 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
   font-weight: 700;
 }
 
-.pt-intercept-note {
-  background: #78350f;
-  color: #fcd34d;
+.pt-ev-diff {
+  background: #1c1917;
+  border: 1px solid #44403c;
+  color: #fde68a;
   border-radius: 8px;
-  padding: 0.5rem 0.8rem;
-  margin: 0.6rem 0;
-  font-weight: 700;
+  padding: 0.55rem 0.8rem;
+  margin: 0.9rem 0 0.2rem;
+  font-size: 0.9rem;
+  line-height: 1.45;
 }
 
 .pt-ranking {

@@ -1,6 +1,6 @@
 use crate::analytics::{ChartPoint, SessionSummary};
 use crate::card::{Card, Suit};
-use crate::decision::{AnalyzedDecision, SearchReport};
+use crate::decision::{Analysis, AnalyzedDecision, SearchReport};
 use crate::game::{Action, GameState, Seat, Street};
 use crate::opponent::OpponentSnapshot;
 use crate::range::BetSize;
@@ -17,7 +17,7 @@ pub fn index_page() -> String {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Poker Trainer</title>
-<link rel="stylesheet" href="/assets/style.css?v=9">
+<link rel="stylesheet" href="/assets/style.css?v=10">
 </head>
 <body class="pt-body">
   <header class="pt-topwrap">
@@ -62,7 +62,7 @@ pub fn tournaments_page(sessions: &[(SessionSummary, Vec<ChartPoint>)]) -> Strin
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Poker Trainer — Tournaments</title>
-<link rel="stylesheet" href="/assets/style.css?v=9">
+<link rel="stylesheet" href="/assets/style.css?v=10">
 </head>
 <body class="pt-body">
 <header class="pt-topwrap">
@@ -499,16 +499,19 @@ fn action_panel(state: &GameState) -> String {
 }
 
 /// The tactical-breakdown fragment rendered into the coach-feedback panel
-/// beside the table: the opponents' live HUD cards first, then the played vs
-/// optimal action comparison and the survivability-ranked candidate table.
-/// Intercepted blunders freeze the table: the card is titled accordingly and
-/// only offers a confirmation that unlocks the transition.
+/// beside the table: the opponents' live HUD cards first, then a plain-English
+/// takeaway sentence, the played vs optimal action comparison, and the
+/// candidate table sorted from cheapest (fold first) to all-in. Intercepted
+/// blunders freeze the table: the card is titled accordingly and only offers
+/// a confirmation that unlocks the transition (the coach's best-EV action).
 pub fn tactical_overlay_fragment(
     hand_no: u64,
     decision: &AnalyzedDecision,
     intercepted: bool,
     opponents: &[OpponentSnapshot],
     big_blind: u32,
+    call_amount: u32,
+    hero_stack: u32,
 ) -> String {
     let optimal = decision.optimal;
     let mut html = String::from(r#"<div id="tactical-overlay" class="pt-tactical">"#);
@@ -521,14 +524,13 @@ pub fn tactical_overlay_fragment(
         html.push_str(&format!(
             r#"<h2 class="pt-overlay-title">Hand #{hand_no} — Blunder intercepted</h2>"#
         ));
-        html.push_str(
-            r#"<div class="pt-intercept-note">The table is paused. Review the blunder below before continuing.</div>"#,
-        );
     } else {
         html.push_str(&format!(
             r#"<h2 class="pt-overlay-title">Hand #{hand_no} — Decision review</h2>"#
         ));
     }
+
+    html.push_str(&ev_diff_sentence(decision));
 
     if let Some(played) = &decision.played {
         html.push_str(&format!(
@@ -553,7 +555,9 @@ pub fn tactical_overlay_fragment(
     html.push_str(
         r#"<table class="pt-ranking"><tr><th>Action</th><th>EV</th><th>σ</th><th>Bust</th><th>Visits</th></tr>"#,
     );
-    for analysis in &decision.ranking {
+    let mut rows: Vec<&Analysis> = decision.ranking.iter().collect();
+    rows.sort_by_key(|analysis| chip_cost(analysis.action, call_amount, hero_stack));
+    for analysis in rows {
         let row_class = if analysis.action == optimal.action {
             "optimal"
         } else if decision
@@ -580,7 +584,7 @@ pub fn tactical_overlay_fragment(
 
     if intercepted {
         html.push_str(
-            r#"<button class="action-btn pt-confirm" data-overlay-confirm>I understand — continue</button>"#,
+            r#"<button class="action-btn pt-confirm" data-overlay-confirm>Continue</button>"#,
         );
     } else {
         html.push_str(r#"<button class="action-btn" data-overlay-close>Continue</button>"#);
@@ -588,6 +592,53 @@ pub fn tactical_overlay_fragment(
     html.push_str("</div></section>");
     html.push_str("</div>");
     html
+}
+
+/// The chips an action commits on the current street — the sort key for the
+/// candidate table, which always reads cheapest-first (fold leads everything
+/// else when it is an action, all-in closes the list).
+fn chip_cost(action: Action, call_amount: u32, hero_stack: u32) -> u32 {
+    match action {
+        Action::Fold | Action::Check => 0,
+        Action::Call => call_amount,
+        Action::Bet(amount) | Action::Raise(amount) => amount,
+        Action::AllIn => hero_stack,
+    }
+}
+
+/// A plain-language takeaway shown above the raw EV numbers: names the
+/// played and optimal actions and translates the EV gap into what it means
+/// for a human stack. Bigger leaks get sharper language.
+fn ev_diff_sentence(decision: &AnalyzedDecision) -> String {
+    let optimal_label = action_label(decision.optimal.action);
+    let sentence = match decision.played.as_ref() {
+        Some(played) if played.is_optimal => {
+            format!("Perfect — {optimal_label} was the highest-value line and you took it.")
+        }
+        Some(played) => {
+            let played_label = action_label(played.analysis.action);
+            let loss = played.ev_loss_bb;
+            if loss < 0.5 {
+                format!(
+                    "A rounding error: {played_label} instead of {optimal_label} costs only {loss:.2} BB in the long run — nothing to sweat."
+                )
+            } else if loss < 2.0 {
+                format!(
+                    "That one adds up: {played_label} gives up about {loss:.2} BB versus {optimal_label} every time this spot repeats."
+                )
+            } else if loss < 5.0 {
+                format!(
+                    "Costly: {played_label} sacrifices roughly {loss:.2} BB compared with {optimal_label} — you will feel this over a session."
+                )
+            } else {
+                format!(
+                    "A big leak: {played_label} burns about {loss:.2} BB relative to {optimal_label}. Mistakes this size turn green sessions red."
+                )
+            }
+        }
+        None => format!("The highest-value line in this spot is {optimal_label}."),
+    };
+    format!(r#"<div class="pt-ev-diff">{}</div>"#, escape(&sentence))
 }
 
 /// The opponents' HUD cards: seat name with position badges and live status,
@@ -814,7 +865,7 @@ mod tests {
             "the solver depth badge is present"
         );
         assert!(
-            page.contains(r#"/assets/style.css?v=9"#),
+            page.contains(r#"/assets/style.css?v=10"#),
             "the stylesheet link is versioned so browsers drop stale cached CSS"
         );
         assert!(
@@ -1238,9 +1289,21 @@ mod tests {
 
     #[test]
     fn tactical_overlay_compares_played_and_optimal() {
-        let fragment =
-            tactical_overlay_fragment(7, &sample_analysis(), false, &sample_opponents(), 20);
+        let fragment = tactical_overlay_fragment(
+            7,
+            &sample_analysis(),
+            false,
+            &sample_opponents(),
+            20,
+            20,
+            500,
+        );
         assert!(fragment.contains("Hand #7 — Decision review"));
+        assert!(fragment.contains(r#"class="pt-ev-diff""#));
+        assert!(
+            fragment.contains("That one adds up: Call gives up about 0.90 BB versus Fold"),
+            "{fragment}"
+        );
         assert!(fragment.contains("You played <b>Call</b>"));
         assert!(fragment.contains("Optimal: <b>Fold</b>"));
         assert!(fragment.contains("EV lost: <b>0.90</b> BB"));
@@ -1270,12 +1333,22 @@ mod tests {
 
     #[test]
     fn intercepted_overlay_is_titled_flagged_and_only_confirms() {
-        let fragment =
-            tactical_overlay_fragment(7, &sample_analysis(), true, &sample_opponents(), 20);
+        let fragment = tactical_overlay_fragment(
+            7,
+            &sample_analysis(),
+            true,
+            &sample_opponents(),
+            20,
+            20,
+            500,
+        );
         assert!(fragment.contains("Hand #7 — Blunder intercepted"));
-        assert!(fragment.contains("The table is paused"));
+        assert!(
+            !fragment.contains("The table is paused"),
+            "the pause note is gone — the title carries the message: {fragment}"
+        );
         assert!(fragment.contains(r#"data-overlay-confirm"#));
-        assert!(fragment.contains("I understand — continue"));
+        assert!(fragment.contains("Continue"));
         assert!(
             !fragment.contains(r#"data-overlay-close"#),
             "an intercepted modal cannot be silently dismissed"
@@ -1286,9 +1359,104 @@ mod tests {
     fn tactical_overlay_handles_a_missing_played_action() {
         let mut decision = sample_analysis();
         decision.played = None;
-        let fragment = tactical_overlay_fragment(7, &decision, false, &[], 20);
+        let fragment = tactical_overlay_fragment(7, &decision, false, &[], 20, 20, 500);
         assert!(!fragment.contains("EV lost"));
         assert!(fragment.contains("Optimal: <b>Fold</b>"));
+        assert!(
+            fragment.contains("The highest-value line in this spot is Fold."),
+            "{fragment}"
+        );
+    }
+
+    #[test]
+    fn candidate_table_sorts_cheapest_first_with_fold_on_top() {
+        let mut decision = sample_analysis();
+        // Survivability order is deliberate noise: the display must re-sort
+        // by chips committed — fold (0), check (0), call (20), raise (160),
+        // all-in (500).
+        decision.ranking = vec![
+            Analysis {
+                ev: 900.0,
+                score: 9.0,
+                ..decision.ranking[0]
+            },
+            Analysis {
+                action: Action::AllIn,
+                ev: 200.0,
+                score: 8.0,
+                ..decision.ranking[0]
+            },
+            Analysis {
+                action: Action::Raise(160),
+                ev: 150.0,
+                score: 7.0,
+                ..decision.ranking[0]
+            },
+            Analysis {
+                action: Action::Check,
+                ev: 0.0,
+                score: 6.0,
+                ..decision.ranking[0]
+            },
+            Analysis {
+                action: Action::Call,
+                ev: -20.0,
+                score: 5.0,
+                ..decision.ranking[0]
+            },
+        ];
+        decision.optimal = decision.ranking[0];
+        decision.played = None;
+        let fragment = tactical_overlay_fragment(7, &decision, false, &[], 20, 20, 500);
+        let fold = fragment.find("<td>Fold</td>").unwrap();
+        let check = fragment.find("<td>Check</td>").unwrap();
+        let call = fragment.find("<td>Call</td>").unwrap();
+        let raise = fragment.find("<td>Raise to 160</td>").unwrap();
+        let all_in = fragment.find("<td>All-in</td>").unwrap();
+        assert!(fold < check, "fold leads the table: {fragment}");
+        assert!(check < call);
+        assert!(call < raise);
+        assert!(
+            raise < all_in,
+            "losing chips sorts before all-in: {fragment}"
+        );
+    }
+
+    #[test]
+    fn chip_cost_orders_fold_check_call_bets_and_all_in() {
+        assert_eq!(chip_cost(Action::Fold, 20, 500), 0);
+        assert_eq!(chip_cost(Action::Check, 20, 500), 0);
+        assert_eq!(chip_cost(Action::Call, 20, 500), 20);
+        assert_eq!(chip_cost(Action::Bet(60), 20, 500), 60);
+        assert_eq!(chip_cost(Action::Raise(240), 20, 500), 240);
+        assert_eq!(chip_cost(Action::AllIn, 20, 500), 500);
+    }
+
+    #[test]
+    fn ev_diff_sentence_gets_sharper_as_losses_grow() {
+        let base = sample_analysis();
+        let played_ev_loss = |ev_loss_bb| {
+            let mut decision = base.clone();
+            decision
+                .played
+                .as_mut()
+                .expect("sample has a played evaluation")
+                .ev_loss_bb = ev_loss_bb;
+            decision
+        };
+
+        assert!(ev_diff_sentence(&played_ev_loss(0.25)).contains("rounding error"));
+        assert!(ev_diff_sentence(&played_ev_loss(0.9)).contains("adds up"));
+        assert!(ev_diff_sentence(&played_ev_loss(3.0)).contains("Costly"));
+        assert!(ev_diff_sentence(&played_ev_loss(6.5)).contains("big leak"));
+
+        let mut perfect = base.clone();
+        perfect
+            .played
+            .as_mut()
+            .expect("sample has a played evaluation")
+            .is_optimal = true;
+        assert!(ev_diff_sentence(&perfect).contains("you took it"));
     }
 
     #[test]
