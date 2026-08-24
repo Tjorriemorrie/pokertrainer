@@ -187,6 +187,76 @@ impl TableSession {
         }
     }
 
+    /// Rebuilds a session from a persisted tournament snapshot: the exact
+    /// game state (street, bets, board, stacks), the remaining deck in deal
+    /// order, the counters, the action log, and the opponent HUD counters.
+    pub fn from_snapshot(
+        snapshot: &crate::snapshot::TournamentSnapshot,
+        seed: u64,
+        mcts: MctsConfig,
+        survival: SurvivalConfig,
+        blunder: BlunderConfig,
+    ) -> Result<Self> {
+        let state = GameState::from_snapshot(&snapshot.state)?;
+        let deck_cards = snapshot
+            .deck
+            .iter()
+            .map(|code| {
+                Card::from_code(code)
+                    .ok_or_else(|| Error::Game(format!("invalid deck card {code:?}")))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let deck = Deck::try_from_remaining(deck_cards)
+            .ok_or_else(|| Error::Game("persisted deck holds more than 52 cards".to_string()))?;
+        let mut log = snapshot.log.clone();
+        while log.len() > MAX_LOG_LINES {
+            log.remove(0);
+        }
+        Ok(Self {
+            state,
+            deck,
+            mcts,
+            survival,
+            ranges: uniform_ranges(),
+            hand_no: snapshot.hand_no,
+            action_no: snapshot.action_no,
+            log,
+            rng: crate::rng::seeded_rng(seed),
+            blunder_tracker: Tracker::new(blunder),
+            pending: None,
+            records: Vec::new(),
+            hand_results: Vec::new(),
+            hero_all_in_this_hand: false,
+            opponents: OpponentTracker::from_snapshot(&snapshot.opponents),
+            sounds: Vec::new(),
+            pump_actions: Vec::new(),
+        })
+    }
+
+    /// Replays stored decisions through the blunder tracker so a resumed
+    /// table's interception threshold keeps its history.
+    pub fn hydrate_blunder(&mut self, history: &[(i64, f64)]) {
+        self.blunder_tracker.hydrate(history);
+    }
+
+    /// Serializes the complete resumable table: state, deck order, counters,
+    /// log, and HUD counters.
+    pub fn to_snapshot(&self) -> crate::snapshot::TournamentSnapshot {
+        crate::snapshot::TournamentSnapshot {
+            state: self.state.to_snapshot(),
+            deck: self
+                .deck
+                .remaining_in_order()
+                .iter()
+                .map(|card| card.to_code())
+                .collect(),
+            hand_no: self.hand_no,
+            action_no: self.action_no,
+            log: self.log.clone(),
+            opponents: self.opponents.to_snapshot(),
+        }
+    }
+
     pub fn state(&self) -> &GameState {
         &self.state
     }
@@ -810,6 +880,7 @@ mod tests {
     use crate::blunder::BlunderConfig;
     use crate::card::{Card, Deck, Rank, Suit};
     use crate::decision::SurvivalConfig;
+    use crate::error::Error;
     use crate::game::STARTING_STACK;
     use crate::game::Street;
     use crate::game::blinds::BlindLevel;
@@ -1771,5 +1842,233 @@ mod tests {
             never_intercepts(),
         );
         assert_eq!(session.tournament_result(), None);
+    }
+
+    /// A mid-hand snapshot round-trips every live fact: stacks, street, board,
+    /// per-seat contributions, current bet, the actor, the deck order, the
+    /// counters, and the action log.
+    #[test]
+    fn snapshot_round_trip_preserves_the_live_table() {
+        let mut deck = Deck::default();
+        let mut state = GameState::new(Seat::Hero, level());
+        state.start_hand(&mut deck).unwrap();
+        // Opponent 2 limps, hero raises, Opponent 1 calls — a live betting
+        // state with different per-seat contributions.
+        state.apply_action(Action::Call).unwrap();
+        state.apply_action(Action::Raise(60)).unwrap();
+        state.apply_action(Action::Call).unwrap();
+        state.apply_action(Action::Call).unwrap();
+        state.advance_street(&mut deck).unwrap();
+        state.apply_action(Action::Bet(40)).unwrap();
+
+        let mut session = TableSession::resume(
+            state,
+            deck,
+            7,
+            62,
+            probe_config(),
+            survival(),
+            never_intercepts(),
+        );
+        session.action_no = 15; // pinned via the test hook so the decision token round-trips
+        session.log_line("You bet 40".to_string());
+
+        let before = session.to_snapshot();
+        let restored = TableSession::from_snapshot(
+            &before,
+            999,
+            probe_config(),
+            survival(),
+            never_intercepts(),
+        )
+        .unwrap();
+
+        let live = &session.state;
+        let revived = restored.state();
+        assert_eq!(revived.stacks(), live.stacks());
+        assert_eq!(revived.button(), live.button());
+        assert_eq!(revived.blind_level(), live.blind_level());
+        assert_eq!(revived.street(), live.street());
+        assert_eq!(revived.board(), live.board());
+        assert_eq!(
+            revived.street_contribution(Seat::Hero),
+            live.street_contribution(Seat::Hero)
+        );
+        assert_eq!(
+            revived.street_contribution(Seat::Opponent1),
+            live.street_contribution(Seat::Opponent1)
+        );
+        assert_eq!(
+            revived.street_contribution(Seat::Opponent2),
+            live.street_contribution(Seat::Opponent2)
+        );
+        assert_eq!(revived.total_pot(), live.total_pot());
+        assert_eq!(revived.current_bet(), live.current_bet());
+        assert_eq!(revived.to_act(), live.to_act());
+        assert_eq!(
+            revived.folded(Seat::Opponent2),
+            live.folded(Seat::Opponent2)
+        );
+        assert_eq!(revived.all_in(Seat::Hero), live.all_in(Seat::Hero));
+        assert_eq!(revived.hero_cards(), live.hero_cards());
+        assert_eq!(
+            revived.hole_cards(Seat::Opponent1),
+            live.hole_cards(Seat::Opponent1)
+        );
+        assert_eq!(restored.hand_no(), session.hand_no());
+        assert_eq!(restored.action_no(), session.action_no());
+        assert_eq!(restored.log(), session.log());
+        assert_eq!(
+            restored.to_snapshot().deck,
+            before.deck,
+            "deck order survives"
+        );
+        assert_eq!(
+            restored.to_snapshot().opponents,
+            before.opponents,
+            "the HUD counters survive"
+        );
+        // The revived legal set is identical: the exact bet sizes resume.
+        assert_eq!(
+            revived.legal_actions().min_bet,
+            live.legal_actions().min_bet
+        );
+        assert_eq!(
+            revived.legal_actions().max_bet,
+            live.legal_actions().max_bet
+        );
+    }
+
+    /// A snapshot taken while the win ribbon shows resumes the same finished
+    /// hand (with its award), and the next deal continues normally.
+    #[test]
+    fn snapshot_of_a_paused_hand_keeps_the_win_ribbon() {
+        let state = river_facing_bet();
+        let mut session = TableSession::resume(
+            state,
+            Deck::default(),
+            3,
+            63,
+            probe_config(),
+            survival(),
+            never_intercepts(),
+        );
+        session.submit(Action::Fold).unwrap();
+        assert!(session.state().is_hand_over());
+        let awards = session
+            .state()
+            .hand_result()
+            .expect("the hand result is live")
+            .awards
+            .clone();
+
+        let snapshot = session.to_snapshot();
+        let mut resumed = TableSession::from_snapshot(
+            &snapshot,
+            1000,
+            probe_config(),
+            survival(),
+            never_intercepts(),
+        )
+        .unwrap();
+        assert!(
+            resumed.state().is_hand_over(),
+            "the paused hand stays finished"
+        );
+        assert_eq!(
+            resumed.state().hand_result().unwrap().awards,
+            awards,
+            "the win ribbon amounts survive"
+        );
+        assert_eq!(resumed.hand_no(), 3);
+
+        resumed.advance_after_result().unwrap();
+        assert_eq!(resumed.hand_no(), 4);
+        assert!(resumed.state().to_act() != Seat::Hero || !resumed.state().is_hand_over());
+    }
+
+    /// A resuming table counts the persisted decisions into the blunder
+    /// tracker, so the interception threshold keeps its exact history.
+    #[test]
+    fn hydrate_blunder_rebuilds_the_rolling_history() {
+        let state = river_facing_bet();
+        let mut session = TableSession::resume(
+            state,
+            Deck::default(),
+            2,
+            64,
+            probe_config(),
+            survival(),
+            never_intercepts(),
+        );
+        session.hydrate_blunder(&[(1, 0.0), (1, 3.0), (2, 1.5)]);
+        assert_eq!(session.blunder_tracker.recorded_actions(), 3);
+    }
+
+    /// A corrupted snapshot (bad card code, oversized deck) is rejected with
+    /// a game error instead of silently inventing a table.
+    #[test]
+    fn corrupted_snapshots_are_rejected() {
+        let state = river_facing_bet();
+        let session = TableSession::resume(
+            state,
+            Deck::default(),
+            1,
+            65,
+            probe_config(),
+            survival(),
+            never_intercepts(),
+        );
+        let mut snapshot = session.to_snapshot();
+        snapshot.deck = vec!["Xx".to_string()];
+        assert!(matches!(
+            TableSession::from_snapshot(
+                &snapshot,
+                1,
+                probe_config(),
+                survival(),
+                never_intercepts()
+            ),
+            Err(Error::Game(_))
+        ));
+
+        let mut snapshot = session.to_snapshot();
+        snapshot.deck = (0..53).map(|_| "2c".to_string()).collect();
+        assert!(matches!(
+            TableSession::from_snapshot(
+                &snapshot,
+                1,
+                probe_config(),
+                survival(),
+                never_intercepts()
+            ),
+            Err(Error::Game(_))
+        ));
+
+        let mut snapshot = session.to_snapshot();
+        snapshot.state.board = vec!["Xz".to_string()];
+        assert!(matches!(
+            TableSession::from_snapshot(
+                &snapshot,
+                1,
+                probe_config(),
+                survival(),
+                never_intercepts()
+            ),
+            Err(Error::Game(_))
+        ));
+
+        let mut snapshot = session.to_snapshot();
+        snapshot.state.hole_cards.pop();
+        assert!(matches!(
+            TableSession::from_snapshot(
+                &snapshot,
+                1,
+                probe_config(),
+                survival(),
+                never_intercepts()
+            ),
+            Err(Error::Game(_))
+        ));
     }
 }

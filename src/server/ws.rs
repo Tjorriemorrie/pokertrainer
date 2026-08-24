@@ -8,7 +8,7 @@ use sqlx::PgPool;
 use tokio::sync::mpsc;
 
 use crate::analytics::{self, PendingHandResult};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::game::{Action, GameState, Seat};
 use crate::mcts::MctsConfig;
 use crate::mcts::searcher::{
@@ -21,7 +21,11 @@ use crate::server::protocol::{self, ClientMessage, SearchPhase, ServerMessage};
 use crate::server::session::{TableEvent, TableSession, TournamentResult};
 use crate::server::views;
 
-/// Where the client is sent once it finishes the table.
+/// Where the client is sent once it finishes the table: the dashboard.
+pub const DASHBOARD_URL: &str = "/";
+
+/// Where the client is sent once it finishes the table or is rejected
+/// because the table is open elsewhere — see [`DASHBOARD_URL`].
 pub const TOURNAMENTS_URL: &str = "/tournaments";
 
 /// The outcome of handling one client frame: the frames to send back, how
@@ -35,44 +39,204 @@ pub struct FrameOutcome {
     pub finish_table: bool,
 }
 
-/// Upgrades `/ws` connections; each connection owns an isolated table session
-/// seeded from OS entropy and, when the database is available, an analytics
-/// session that stores every hero decision.
+/// Upgrades `/ws` connections. Each connection claims the single active
+/// tournament: with a database it resumes the stored snapshot when one
+/// exists (otherwise it starts a brand-new tournament), and without one it
+/// plays a fresh, in-memory table as before.
 pub async fn handler(State(app): State<Arc<AppState>>, ws: WebSocketUpgrade) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_socket(socket, app))
 }
 
-async fn handle_socket(socket: WebSocket, app: Arc<AppState>) {
-    let session_id = open_session(app.pool.as_ref()).await;
-    let mut session = TableSession::new(rand::random::<u64>(), app.mcts, app.survival, app.blunder);
-    if let Err(error) = bootstrap(&mut session) {
-        tracing::warn!(%error, "table session bootstrap failed; closing connection");
-        close_session(app.pool.as_ref(), session_id).await;
-        return;
+/// Claims the single active table for a connection. A live connection
+/// elsewhere, or any store failure, is a claim error.
+async fn claim_table(
+    pool: Option<&PgPool>,
+) -> Result<(Option<i32>, Option<crate::snapshot::TournamentSnapshot>)> {
+    let Some(pool) = pool else {
+        return Ok((None, None));
+    };
+    match crate::live::claim_or_resume(pool).await? {
+        crate::live::ClaimOutcome::Fresh(session_id) => Ok((Some(session_id), None)),
+        crate::live::ClaimOutcome::Resumed {
+            session_id,
+            snapshot,
+        } => Ok((Some(session_id), *snapshot)),
+        crate::live::ClaimOutcome::Taken => Err(Error::Decision(
+            "the table is already open in another window".into(),
+        )),
     }
-    tracing::info!(session_id = ?session_id, "table session started");
+}
 
+/// Points a rejected connection back at the dashboard and hangs up.
+async fn reject_socket(mut socket: WebSocket, reason: &str) {
+    tracing::warn!(reason, "connection rejected");
+    let socket = &mut socket;
+    if let Some(frame) = session_finished_message()
+        && socket.send(Message::Text(frame.into())).await.is_err()
+    {
+        // The client is already gone; nothing more to do.
+    }
+    let _ = socket.close().await;
+}
+
+async fn handle_socket(socket: WebSocket, app: Arc<AppState>) {
+    let (session_id, snapshot) = match claim_table(app.pool.as_ref()).await {
+        Ok(claim) => claim,
+        Err(error) => {
+            tracing::warn!(%error, "table claim failed; closing connection");
+            reject_socket(socket, "the table is already open in another window").await;
+            return;
+        }
+    };
+
+    let mut session = match snapshot {
+        Some(snapshot) => {
+            match TableSession::from_snapshot(
+                &snapshot,
+                rand::random::<u64>(),
+                app.mcts,
+                app.survival,
+                app.blunder,
+            ) {
+                Ok(mut session) => {
+                    hydrate_blunder(app.pool.as_ref(), session_id, &mut session).await;
+                    tracing::info!(session_id = ?session_id, hand_no = session.hand_no(), "resumed stored tournament");
+                    session
+                }
+                Err(error) => {
+                    tracing::error!(%error, "stored snapshot cannot be restored; refusing to overwrite the tournament");
+                    reject_socket(socket, "the stored table state is corrupted").await;
+                    return;
+                }
+            }
+        }
+        None => {
+            let mut session =
+                TableSession::new(rand::random::<u64>(), app.mcts, app.survival, app.blunder);
+            if let Err(error) = bootstrap(&mut session) {
+                tracing::warn!(%error, "table session bootstrap failed; closing connection");
+                reject_socket(socket, "the table could not be dealt").await;
+                return;
+            }
+            tracing::info!(session_id = ?session_id, "new tournament started");
+            session
+        }
+    };
+
+    let end = play_socket(socket, app.clone(), session_id, &mut session).await;
+
+    match end {
+        // A finished (or given-up) tournament already finalized its session
+        // and released the active row — there is nothing left to persist.
+        ConnectionEnd::Released => {}
+        // A plain disconnect leaves the tournament open for the next visit:
+        // save the final state, then release the claim.
+        ConnectionEnd::Disconnected => {
+            save_table(app.pool.as_ref(), session_id, &session).await;
+            if let Some(pool) = app.pool.as_ref()
+                && let Err(error) = crate::live::mark_disconnected(pool).await
+            {
+                tracing::warn!(%error, "table could not be released");
+            }
+        }
+    }
+}
+
+/// How a table connection ended: by giving up / finishing the tournament
+/// (the row is already released and finalized) or by simply disconnecting
+/// (the tournament stays open for a resume).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConnectionEnd {
+    Released,
+    Disconnected,
+}
+
+/// Rebuilds the blunder tracker from the session's stored decisions so the
+/// intervention threshold resumes exactly where it stopped.
+async fn hydrate_blunder(
+    pool: Option<&PgPool>,
+    session_id: Option<i32>,
+    session: &mut TableSession,
+) {
+    let (Some(pool), Some(session_id)) = (pool, session_id) else {
+        return;
+    };
+    match analytics::load_session_losses(pool, session_id).await {
+        Ok(history) => {
+            session.hydrate_blunder(&history);
+            tracing::info!(actions = history.len(), "blunder history restored");
+        }
+        Err(error) => {
+            tracing::warn!(%error, "blunder history unavailable — resuming with a fresh tracker")
+        }
+    }
+}
+
+/// Sends a batch of text frames; `false` once the socket is gone.
+async fn send_all<S>(sender: &mut S, frames: Vec<String>) -> bool
+where
+    S: futures_util::SinkExt<Message> + Unpin,
+{
+    for frame in frames {
+        if sender.send(Message::Text(frame.into())).await.is_err() {
+            return false;
+        }
+    }
+    true
+}
+
+/// Persists the current table snapshot for a later resume.
+async fn save_table(pool: Option<&PgPool>, session_id: Option<i32>, session: &TableSession) {
+    let (Some(pool), Some(session_id)) = (pool, session_id) else {
+        return;
+    };
+    if let Err(error) = crate::live::save_snapshot(pool, session_id, &session.to_snapshot()).await {
+        tracing::warn!(%error, session_id, "table snapshot could not be persisted");
+    }
+}
+
+/// Runs the table until the connection ends: the lobby-to-solver lifecycle,
+/// with the tournament snapshot persisted after every applied change. Returns
+/// how the connection ended — giving up or finishing releases the active row
+/// inside the loop; a plain disconnect leaves the tournament open for a
+/// resume.
+async fn play_socket(
+    socket: WebSocket,
+    app: Arc<AppState>,
+    session_id: Option<i32>,
+    session: &mut TableSession,
+) -> ConnectionEnd {
     let (mut sender, mut receiver) = socket.split();
 
     // The table — deal, blinds, opponents — renders before any solver work
     // starts; the background search is spawned only after this initial state
     // has left for the client.
-    let mut initial =
-        vec![state_message(&mut session).unwrap_or_else(|error| error_message(&error.to_string()))];
+    let state_frame =
+        state_message(session).unwrap_or_else(|error| error_message(&error.to_string()));
+    let mut initial = vec![state_frame];
     if let Some(snapshot) = snapshot_frame(app.pool.as_ref()).await {
         initial.push(snapshot);
     }
-    for frame in &initial {
-        if sender
-            .send(Message::Text(frame.clone().into()))
-            .await
-            .is_err()
-        {
-            close_session(app.pool.as_ref(), session_id).await;
-            return;
-        }
+    if !send_all(&mut sender, initial).await {
+        return ConnectionEnd::Disconnected;
     }
     session.take_pump_actions();
+
+    // A resumed table can park on the winner ribbon (or, once the hero is
+    // out, on a hand the opponents are still playing): honor the result
+    // pause and deal on before the solver starts — unless the tournament
+    // already ended there.
+    let resume =
+        post_resume_frames(session, app.pool.as_ref(), session_id, app.result_pause_ms).await;
+    let tournament_over = session.tournament_result().is_some();
+    if !send_all(&mut sender, resume).await {
+        return ConnectionEnd::Disconnected;
+    }
+    if tournament_over {
+        return ConnectionEnd::Released;
+    }
+    session.take_pump_actions();
+    save_table(app.pool.as_ref(), session_id, session).await;
 
     let (command_tx, command_rx) = mpsc::unbounded_channel::<SearchCommand>();
     let (update_tx, mut update_rx) = mpsc::unbounded_channel::<SearcherStatus>();
@@ -93,26 +257,26 @@ async fn handle_socket(socket: WebSocket, app: Arc<AppState>) {
     let mut solver_alive = true;
     let mut ticks_since_snapshot = 0usize;
 
-    loop {
+    let end = loop {
         tokio::select! {
             maybe = receiver.next() => {
-                let Some(message) = maybe else { break };
+                let Some(message) = maybe else { break ConnectionEnd::Disconnected };
                 let text = match message {
                     Ok(Message::Text(text)) => text,
-                    Ok(Message::Close(_)) | Err(_) => break,
+                    Ok(Message::Close(_)) | Err(_) => break ConnectionEnd::Disconnected,
                     Ok(_) => continue,
                 };
 
-                let outcome = handle_client_message(&mut session, text.as_str(), latest_snapshot.as_ref());
+                let outcome = handle_client_message(&mut *session, text.as_str(), latest_snapshot.as_ref());
                 ticks_since_snapshot += outcome.chart_ticks;
-                persist_records(app.pool.as_ref(), session_id, &mut session).await;
+                persist_records(app.pool.as_ref(), session_id, session).await;
+                // Save before the frames leave, so a disconnect triggered by
+                // the rendered state resumes exactly that state.
+                save_table(app.pool.as_ref(), session_id, session).await;
 
-                for frame in &outcome.messages {
-                    if sender.send(Message::Text(frame.clone().into())).await.is_err() {
-                        let _ = command_tx.send(SearchCommand::Stop);
-                        close_session(app.pool.as_ref(), session_id).await;
-                        return;
-                    }
+                if !send_all(&mut sender, outcome.messages).await {
+                    let _ = command_tx.send(SearchCommand::Stop);
+                    break ConnectionEnd::Disconnected;
                 }
 
                 // A tournament ends the moment only one seat is left standing:
@@ -120,24 +284,24 @@ async fn handle_socket(socket: WebSocket, app: Arc<AppState>) {
                 // outcome, and hand the client a winner/loser modal instead of
                 // dealing another hand.
                 if let Some(frame) =
-                    tournament_over_frame(&mut session, app.pool.as_ref(), session_id).await
+                    tournament_over_frame(session, app.pool.as_ref(), session_id).await
                 {
                     let _ = command_tx.send(SearchCommand::Stop);
                     if sender.send(Message::Text(frame.into())).await.is_err() {
-                        return;
+                        break ConnectionEnd::Disconnected;
                     }
-                    return;
+                    break ConnectionEnd::Released;
                 }
 
                 if outcome.finish_table {
                     let _ = command_tx.send(SearchCommand::Stop);
-                    close_session(app.pool.as_ref(), session_id).await;
+                    finish_table(app.pool.as_ref(), session_id, session).await;
                     if let Some(frame) = session_finished_message()
                         && sender.send(Message::Text(frame.into())).await.is_err()
                     {
-                        return;
+                        break ConnectionEnd::Disconnected;
                     }
-                    return;
+                    break ConnectionEnd::Released;
                 }
 
                 // Reshape the solver's trees onto the played branch so the
@@ -160,14 +324,12 @@ async fn handle_socket(socket: WebSocket, app: Arc<AppState>) {
 
                 if session.state().is_hand_over() {
                     tokio::time::sleep(std::time::Duration::from_millis(app.result_pause_ms)).await;
-                    for frame in advance_frames(&mut session) {
-                        if sender.send(Message::Text(frame.into())).await.is_err() {
-                            let _ = command_tx.send(SearchCommand::Stop);
-                            close_session(app.pool.as_ref(), session_id).await;
-                            return;
-                        }
+                    if !send_all(&mut sender, advance_frames(&mut *session)).await {
+                        let _ = command_tx.send(SearchCommand::Stop);
+                        break ConnectionEnd::Disconnected;
                     }
                     session.take_pump_actions();
+                    save_table(app.pool.as_ref(), session_id, session).await;
                     let _ = command_tx.send(SearchCommand::Reshape {
                         state: Box::new(observable_clone(session.state())),
                         path: None,
@@ -179,13 +341,13 @@ async fn handle_socket(socket: WebSocket, app: Arc<AppState>) {
                     // tournament may end here too — stop and show the modal
                     // instead of dealing on.
                     if let Some(frame) =
-                        tournament_over_frame(&mut session, app.pool.as_ref(), session_id).await
+                        tournament_over_frame(session, app.pool.as_ref(), session_id).await
                     {
                         let _ = command_tx.send(SearchCommand::Stop);
                         if sender.send(Message::Text(frame.into())).await.is_err() {
-                            return;
+                            break ConnectionEnd::Disconnected;
                         }
-                        return;
+                        break ConnectionEnd::Released;
                     }
                 }
 
@@ -195,8 +357,7 @@ async fn handle_socket(socket: WebSocket, app: Arc<AppState>) {
                         && sender.send(Message::Text(frame.into())).await.is_err()
                     {
                         let _ = command_tx.send(SearchCommand::Stop);
-                        close_session(app.pool.as_ref(), session_id).await;
-                        return;
+                        break ConnectionEnd::Disconnected;
                     }
                 }
             }
@@ -207,8 +368,7 @@ async fn handle_socket(socket: WebSocket, app: Arc<AppState>) {
                         let frame = search_status_message(&status);
                         if sender.send(Message::Text(frame.into())).await.is_err() {
                             let _ = command_tx.send(SearchCommand::Stop);
-                            close_session(app.pool.as_ref(), session_id).await;
-                            return;
+                            break ConnectionEnd::Disconnected;
                         }
                     }
                     None => {
@@ -221,10 +381,10 @@ async fn handle_socket(socket: WebSocket, app: Arc<AppState>) {
                 }
             }
         }
-    }
+    };
     let _ = command_tx.send(SearchCommand::Stop);
     solver.abort();
-    close_session(app.pool.as_ref(), session_id).await;
+    end
 }
 
 /// The background MCTS worker: owns the persistent solver, consumes reshape
@@ -379,21 +539,9 @@ fn search_status_message(status: &SearcherStatus) -> String {
     }
 }
 
-/// Opens the analytics session backing this connection; persistence is
-/// best-effort — the table keeps playing without it.
-async fn open_session(pool: Option<&PgPool>) -> Option<i32> {
-    let pool = pool?;
-    match analytics::start_session(pool).await {
-        Ok(session_id) => Some(session_id),
-        Err(error) => {
-            tracing::warn!(%error, "analytics session could not be opened — playing without persistence");
-            None
-        }
-    }
-}
-
-/// Finalizes the analytics session when the table ends (disconnect or an
-/// explicit finish).
+/// Finalizes the analytics session when the tournament ends (a natural
+/// winner or an explicit give-up). Disconnects leave the session open so the
+/// table can be resumed.
 async fn close_session(pool: Option<&PgPool>, session_id: Option<i32>) {
     let (Some(pool), Some(session_id)) = (pool, session_id) else {
         return;
@@ -454,12 +602,28 @@ async fn snapshot_frame(pool: Option<&PgPool>) -> Option<String> {
 
 fn session_finished_message() -> Option<String> {
     match (ServerMessage::SessionFinished {
-        url: TOURNAMENTS_URL.to_string(),
+        url: DASHBOARD_URL.to_string(),
     })
     .to_json()
     {
         Ok(json) => Some(json),
         Err(error) => Some(error_message(&error.to_string())),
+    }
+}
+
+/// Finish table = give up: the tournament is recorded as a LOSS with the
+/// hero's current stack and the active row is released, so the dashboard can
+/// offer a brand-new tournament.
+async fn finish_table(pool: Option<&PgPool>, session_id: Option<i32>, session: &TableSession) {
+    let (Some(pool), Some(session_id)) = (pool, session_id) else {
+        return;
+    };
+    let final_stack = session.state().stack(Seat::Hero) as i32;
+    if let Err(error) = analytics::finalize_session(pool, session_id, "LOSS", final_stack).await {
+        tracing::warn!(%error, session_id, "gave-up tournament could not be finalized as a loss");
+    }
+    if let Err(error) = crate::live::clear_active(pool).await {
+        tracing::warn!(%error, session_id, "finished table could not release the active row");
     }
 }
 
@@ -506,8 +670,8 @@ async fn finalize_tournament(
 }
 
 /// When the tournament just ended, finalizes the session (persisting the
-/// queued hand results and outcome) and returns the winner/loser modal frame;
-/// `None` while it is still running.
+/// queued hand results and outcome), releases the active-tournament row, and
+/// returns the winner/loser modal frame; `None` while it is still running.
 async fn tournament_over_frame(
     session: &mut TableSession,
     pool: Option<&PgPool>,
@@ -517,6 +681,11 @@ async fn tournament_over_frame(
     let hand_results = session.take_hand_results();
     let frame = finalize_tournament(pool, session_id, &result, hand_results).await;
     close_session(pool, session_id).await;
+    if let Some(pool) = pool
+        && let Err(error) = crate::live::clear_active(pool).await
+    {
+        tracing::warn!(%error, session_id, "finished tournament could not release the active row");
+    }
     Some(frame)
 }
 
@@ -551,6 +720,26 @@ fn advance_frames(session: &mut TableSession) -> Vec<String> {
         Ok(frame) => vec![frame],
         Err(error) => vec![error_message(&error.to_string())],
     }
+}
+
+/// The frames to send right after the connect-time state frame: none while a
+/// decision is live, the result-pause next deal when the resumed table was
+/// parked on a finished hand, or the winner/loser modal when the tournament
+/// ended on that exact hand.
+async fn post_resume_frames(
+    session: &mut TableSession,
+    pool: Option<&PgPool>,
+    session_id: Option<i32>,
+    pause_ms: u64,
+) -> Vec<String> {
+    if !session.state().is_hand_over() {
+        return Vec::new();
+    }
+    if let Some(frame) = tournament_over_frame(session, pool, session_id).await {
+        return vec![frame];
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(pause_ms)).await;
+    advance_frames(session)
 }
 
 /// Handles one client text frame; never fails the connection — problems are
@@ -995,8 +1184,8 @@ mod tests {
             .connect_lazy("postgres://user:pass@127.0.0.1:1/nope")
             .expect("a lazy pool builds without touching the network");
         assert!(
-            open_session(Some(&pool)).await.is_none(),
-            "an unreachable database yields no analytics session"
+            claim_table(Some(&pool)).await.is_err(),
+            "an unreachable database rejects the claim"
         );
         close_session(Some(&pool), Some(17)).await;
         let mut session = make_session();
@@ -1136,6 +1325,74 @@ mod tests {
         assert!(!session.state().is_hand_over());
     }
 
+    #[tokio::test]
+    async fn post_resume_frames_leave_live_decisions_untouched() {
+        let mut session = make_session();
+        assert_eq!(session.state().to_act(), Seat::Hero);
+        let frames = post_resume_frames(&mut session, None, Some(7), 0).await;
+        assert!(
+            frames.is_empty(),
+            "a live decision needs no extra connect frames"
+        );
+    }
+
+    /// A table parked on the winner ribbon resumes with the result pause's
+    /// next deal, delivered as the frame right after the state frame.
+    #[tokio::test]
+    async fn post_resume_frames_deal_the_next_hand_after_a_parked_result() {
+        let mut session = make_session();
+        session.stage_pending_interception(Action::Fold, sample_analysis());
+        let _ = handle_client_message(&mut session, r#"{"type":"REVIEW_DONE"}"#, None);
+        assert!(session.state().is_hand_over(), "the fold ended the hand");
+        assert_eq!(session.hand_no(), 1);
+
+        let frames = post_resume_frames(&mut session, None, Some(7), 0).await;
+        assert_eq!(frames.len(), 1, "the paused result deals the next hand");
+        let next = parse(&frames[0]);
+        assert_eq!(next["type"], "TABLE_STATE_UPDATE");
+        assert!(
+            next["fragment"].as_str().unwrap().contains("Hand #2"),
+            "the resumed table moves on to the next hand"
+        );
+    }
+
+    /// When the tournament ended on the hand the table was parked on, the
+    /// connect frames hand the client the winner/loser modal instead of
+    /// dealing another hand.
+    #[tokio::test]
+    async fn post_resume_frames_modal_for_a_tournament_ended_on_the_parked_hand() {
+        let mut state = hero_decision_state();
+        state.set_stack(Seat::Opponent1, 0);
+        state.set_stack(Seat::Opponent2, 0);
+        state.set_eliminated(Seat::Opponent1, true);
+        state.set_eliminated(Seat::Opponent2, true);
+        let mut session = TableSession::resume(
+            state,
+            crate::card::Deck::default(),
+            9,
+            99,
+            MctsConfig::test(),
+            SurvivalConfig::default(),
+            BlunderConfig::default(),
+        );
+        session.stage_pending_interception(Action::Fold, sample_analysis());
+        let _ = handle_client_message(&mut session, r#"{"type":"REVIEW_DONE"}"#, None);
+        assert!(session.state().is_hand_over());
+
+        let frames = post_resume_frames(&mut session, None, Some(9), 0).await;
+        assert_eq!(frames.len(), 1);
+        assert_eq!(parse(&frames[0])["type"], "TOURNAMENT_FINISHED");
+    }
+
+    #[tokio::test]
+    async fn claim_table_without_a_database_is_a_fresh_memory_table() {
+        assert_eq!(
+            claim_table(None).await.unwrap(),
+            (None, None),
+            "no persistence means no session id and no snapshot"
+        );
+    }
+
     fn sample_analysis() -> AnalyzedDecision {
         let fold = Analysis {
             action: Action::Fold,
@@ -1178,7 +1435,7 @@ mod tests {
         let message = session_finished_message().unwrap();
         assert_eq!(
             parse(&message),
-            json!({"type": "SESSION_FINISHED", "url": TOURNAMENTS_URL})
+            json!({"type": "SESSION_FINISHED", "url": DASHBOARD_URL})
         );
     }
 
@@ -1626,7 +1883,7 @@ mod tests {
         };
         assert_eq!(
             frame,
-            json!({"type": "SESSION_FINISHED", "url": TOURNAMENTS_URL})
+            json!({"type": "SESSION_FINISHED", "url": DASHBOARD_URL})
         );
         drop(stream);
     }
@@ -1710,6 +1967,11 @@ mod tests {
         let pool = crate::db::connect(&database_url).await.unwrap();
         let sessions_before: Option<i32> = sqlx::query_scalar("SELECT max(id) FROM hero_sessions")
             .fetch_one(&pool)
+            .await
+            .unwrap();
+        // Free any pre-existing active row so the claim starts fresh.
+        sqlx::query("DELETE FROM active_tournament WHERE single = TRUE")
+            .execute(&pool)
             .await
             .unwrap();
 
@@ -1799,20 +2061,292 @@ mod tests {
         assert!((0..=3).contains(&street), "street index 0..=3");
         assert!(ev_loss >= 0.0);
 
-        let finalized: Option<String> = sqlx::query_scalar(
-            "SELECT session_end::text FROM hero_sessions WHERE id = $1 AND session_end IS NOT NULL",
-        )
-        .bind(recorded_session)
-        .fetch_optional(&pool)
-        .await
-        .unwrap();
+        let (finalized, result, active_rows): (Option<String>, Option<String>, i64) =
+            sqlx::query_as(
+                "SELECT (SELECT session_end::text FROM hero_sessions WHERE id = $1 AND session_end IS NOT NULL),
+                        (SELECT s.result FROM hero_sessions s WHERE id = $1),
+                        (SELECT count(*) FROM active_tournament)",
+            )
+            .bind(recorded_session)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert!(
             finalized.is_some(),
             "finishing the table finalizes the analytics session"
         );
+        assert_eq!(
+            result.as_deref(),
+            Some("LOSS"),
+            "finishing the table gives up: the tournament is recorded as a loss"
+        );
+        assert_eq!(
+            active_rows, 0,
+            "finishing releases the active row so a new tournament can start"
+        );
 
         sqlx::query("DELETE FROM hero_sessions WHERE id = $1")
             .bind(recorded_session)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    /// Closing the tab leaves the tournament open; reconnecting resumes the
+    /// very same hand/decision it paused on.
+    #[tokio::test]
+    async fn reconnect_resumes_the_tournament_where_it_left_off() {
+        let _guard = crate::analytics::DB_TEST_LOCK.lock().await;
+        dotenvy::dotenv().ok();
+        let database_url = match std::env::var("DATABASE_URL") {
+            Ok(url) if !url.is_empty() => url,
+            _ => panic!(
+                "DATABASE_URL is required for database integration tests; start PostgreSQL via pg.ps1"
+            ),
+        };
+        let pool = crate::db::connect(&database_url).await.unwrap();
+        sqlx::query("DELETE FROM active_tournament WHERE single = TRUE")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let (address, _server) = spawn_server_with(Some(pool.clone()), 100, 0).await;
+
+        // First visit: a fresh table, hand #1, hero to act.
+        let (mut stream, _) = connect_async(format!("ws://{address}/ws")).await.unwrap();
+        let initial = parse(&next_text(&mut stream).await);
+        assert_eq!(initial["type"], "TABLE_STATE_UPDATE");
+        assert!(initial["fragment"].as_str().unwrap().contains("Hand #1"));
+
+        // Play one action and wait until the hero must decide again.
+        stream
+            .send(TMessage::Text(
+                r#"{"type":"ACTION_SUBMIT","action":{"kind":"call"}}"#.into(),
+            ))
+            .await
+            .unwrap();
+        let decision = loop {
+            let frame = parse(&next_text(&mut stream).await);
+            match frame["type"].as_str().unwrap() {
+                "TRIGGER_TACTICAL_OVERLAY" => {
+                    stream
+                        .send(TMessage::Text(r#"{"type":"REVIEW_DONE"}"#.into()))
+                        .await
+                        .unwrap();
+                }
+                "TABLE_STATE_UPDATE" => {
+                    let fragment = frame["fragment"].as_str().unwrap();
+                    let Some(datadecision) = fragment
+                        .split(r#"class="pt-action-block" data-decision=""#)
+                        .nth(1)
+                        .and_then(|rest| rest.split('"').next())
+                    else {
+                        if fragment.contains("Hand #1") {
+                            continue; // the hand is still running
+                        }
+                        panic!("no decision on the refreshed table: {fragment}");
+                    };
+                    break datadecision.to_string();
+                }
+                "CHART_TICK" | "SEARCH_STATUS" | "CHART_SNAPSHOT" => {}
+                other => panic!("unexpected frame type {other}"),
+            }
+        };
+        assert!(
+            decision.starts_with("h1-a1-"),
+            "second decision of hand #1: {decision}"
+        );
+        stream.close(None).await.unwrap();
+
+        // Wait for the server to release the table, then reconnect.
+        let mut attempts = 0;
+        loop {
+            let connected: bool = sqlx::query_scalar("SELECT connected FROM active_tournament")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            if !connected {
+                break;
+            }
+            attempts += 1;
+            assert!(attempts < 100, "the table was never released");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let (mut stream, _) = connect_async(format!("ws://{address}/ws")).await.unwrap();
+
+        let resumed_frame = parse(&next_text(&mut stream).await);
+        assert_eq!(resumed_frame["type"], "TABLE_STATE_UPDATE");
+        let fragment = resumed_frame["fragment"].as_str().unwrap();
+        assert!(
+            fragment.contains("Hand #1"),
+            "the resume lands on the saved hand, not a fresh deal: {fragment}"
+        );
+        let resumed_decision = fragment
+            .split(r#"class="pt-action-block" data-decision=""#)
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .expect("the resumed hero decision renders the action dock");
+        assert_eq!(
+            resumed_decision, decision,
+            "the pause resumes the same decision token"
+        );
+
+        // Give up so the row and session are cleaned up.
+        stream
+            .send(TMessage::Text(r#"{"type":"FINISH_TABLE"}"#.into()))
+            .await
+            .unwrap();
+        let finished = loop {
+            let frame = parse(&next_text(&mut stream).await);
+            match frame["type"].as_str().unwrap() {
+                "SESSION_FINISHED" => break frame,
+                "TABLE_STATE_UPDATE" | "SEARCH_STATUS" | "CHART_SNAPSHOT" => continue,
+                other => panic!("unexpected frame type {other} while finishing"),
+            }
+        };
+        assert_eq!(finished["type"], "SESSION_FINISHED");
+        drop(stream);
+
+        let session_id: Option<i32> =
+            sqlx::query_scalar("SELECT max(id) FROM hero_sessions WHERE result = 'LOSS'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let Some(session_id) = session_id else {
+            panic!("the gave-up tournament was not recorded");
+        };
+        sqlx::query("DELETE FROM hero_sessions WHERE id = $1")
+            .bind(session_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM active_tournament WHERE single = TRUE")
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    /// Two tabs cannot drive the same table: the second connection is
+    /// pointed back at the dashboard while the first keeps playing.
+    #[tokio::test]
+    async fn a_second_connection_is_sent_back_to_the_dashboard() {
+        let _guard = crate::analytics::DB_TEST_LOCK.lock().await;
+        dotenvy::dotenv().ok();
+        let database_url = match std::env::var("DATABASE_URL") {
+            Ok(url) if !url.is_empty() => url,
+            _ => panic!(
+                "DATABASE_URL is required for database integration tests; start PostgreSQL via pg.ps1"
+            ),
+        };
+        let pool = crate::db::connect(&database_url).await.unwrap();
+        sqlx::query("DELETE FROM active_tournament WHERE single = TRUE")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let sessions_before: Option<i32> = sqlx::query_scalar("SELECT max(id) FROM hero_sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        let (address, _server) = spawn_server_with(Some(pool.clone()), 100, 0).await;
+
+        let (mut first, _) = connect_async(format!("ws://{address}/ws")).await.unwrap();
+        let initial = parse(&next_text(&mut first).await);
+        assert_eq!(initial["type"], "TABLE_STATE_UPDATE");
+
+        // The table is claimed: a second window is rejected.
+        let (mut second, _) = connect_async(format!("ws://{address}/ws")).await.unwrap();
+        let frame = parse(&next_text(&mut second).await);
+        assert_eq!(
+            frame,
+            json!({"type": "SESSION_FINISHED", "url": DASHBOARD_URL})
+        );
+        drop(second);
+
+        // The first connection keeps working: finish to clean up.
+        first
+            .send(TMessage::Text(r#"{"type":"FINISH_TABLE"}"#.into()))
+            .await
+            .unwrap();
+        let finished = loop {
+            let frame = parse(&next_text(&mut first).await);
+            match frame["type"].as_str().unwrap() {
+                "SESSION_FINISHED" => break frame,
+                "TABLE_STATE_UPDATE" | "SEARCH_STATUS" | "CHART_SNAPSHOT" => continue,
+                other => panic!("unexpected frame type {other} while finishing"),
+            }
+        };
+        assert_eq!(finished["type"], "SESSION_FINISHED");
+        drop(first);
+
+        sqlx::query("DELETE FROM hero_sessions WHERE id > $1")
+            .bind(sessions_before.unwrap_or(0))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM active_tournament WHERE single = TRUE")
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    /// A stored snapshot that no longer parses must never be overwritten by
+    /// a fresh table: the connection is rejected and the data stays put.
+    #[tokio::test]
+    async fn corrupted_snapshots_reject_the_connection() {
+        let _guard = crate::analytics::DB_TEST_LOCK.lock().await;
+        dotenvy::dotenv().ok();
+        let database_url = match std::env::var("DATABASE_URL") {
+            Ok(url) if !url.is_empty() => url,
+            _ => panic!(
+                "DATABASE_URL is required for database integration tests; start PostgreSQL via pg.ps1"
+            ),
+        };
+        let pool = crate::db::connect(&database_url).await.unwrap();
+        sqlx::query("DELETE FROM active_tournament WHERE single = TRUE")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let session_id = match crate::live::claim_or_resume(&pool).await.unwrap() {
+            crate::live::ClaimOutcome::Fresh(id) => id,
+            other => panic!("expected a fresh claim, got {other:?}"),
+        };
+        sqlx::query("UPDATE active_tournament SET snapshot = $1::jsonb WHERE single = TRUE")
+            .bind(r#"{"state": {"stacks": "corrupt"}}"#)
+            .execute(&pool)
+            .await
+            .unwrap();
+        crate::live::mark_disconnected(&pool).await.unwrap();
+
+        let (address, _server) = spawn_server_with(Some(pool.clone()), 100, 0).await;
+        let (mut stream, _) = connect_async(format!("ws://{address}/ws")).await.unwrap();
+        let frame = parse(&next_text(&mut stream).await);
+        assert_eq!(
+            frame,
+            json!({"type": "SESSION_FINISHED", "url": DASHBOARD_URL})
+        );
+        drop(stream);
+
+        // The stored snapshot is untouched — a resume stays possible once
+        // it is repaired.
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT snapshot::text FROM active_tournament")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            stored.as_deref(),
+            Some(r#"{"state": {"stacks": "corrupt"}}"#),
+            "the corrupted snapshot is left for inspection"
+        );
+
+        sqlx::query("DELETE FROM hero_sessions WHERE id = $1")
+            .bind(session_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM active_tournament WHERE single = TRUE")
             .execute(&pool)
             .await
             .unwrap();

@@ -5,22 +5,95 @@ use crate::game::{Action, GameState, Seat, Street};
 use crate::opponent::OpponentSnapshot;
 use crate::range::BetSize;
 use crate::server::session::Sound;
+use crate::snapshot::ActiveSummary;
 
-/// The full app shell page: GGPoker-dark skin, top-bar lifetime EV chart, the
+/// The dashboard landing page: either the resume card for the one active
+/// tournament or a fresh **Start tournament** button. A new tournament can
+/// only start once the previous one is finished (won, lost, or given up via
+/// **Finish table**).
+pub fn dashboard_page(active: Option<&ActiveSummary>) -> String {
+    let mut html = String::from(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Poker Trainer</title>
+<link rel="stylesheet" href="/assets/style.css?v=12">
+</head>
+<body class="pt-body">
+<header class="pt-topwrap">
+  <div class="pt-brand">Poker Trainer</div>
+  <a href="/tournaments" class="pt-link">Tournament history</a>
+</header>
+<main class="pt-main pt-dashboard">
+"#,
+    );
+
+    match active {
+        Some(summary) => {
+            html.push_str(&format!(
+                r##"<section class="pt-dash-card">
+  <h1 class="pt-dash-title">Tournament in progress</h1>
+  <p class="pt-dash-meta">Started {}</p>
+  <div class="pt-stat-grid">
+    <div class="pt-stat-card"><span>Hand</span><b>#{}</b></div>
+    <div class="pt-stat-card"><span>Street</span><b>{}</b></div>
+    <div class="pt-stat-card"><span>Blinds</span><b>{}/{}</b></div>
+    <div class="pt-stat-card"><span>Your stack</span><b>{}</b></div>
+    <div class="pt-stat-card"><span>Opponents left</span><b>{}</b></div>
+    <div class="pt-stat-card"><span>Actions played</span><b>{}</b></div>
+  </div>
+  <p class="pt-dash-note">Resume continues the exact hand — street, bets, board, and stacks are all restored.</p>
+  <a class="action-btn pt-confirm pt-dash-action" href="/play">Resume tournament</a>
+  <p class="pt-dash-note">A new tournament becomes available once this one ends — win it, lose it, or
+  finish the table (which counts as giving up).</p>
+</section>"##,
+                escape(&summary.started),
+                summary.hand_no,
+                escape(&summary.street.to_string()),
+                summary.blind_small,
+                summary.blind_big,
+                summary.hero_stack,
+                summary.active_opponents,
+                summary.actions,
+            ));
+        }
+        None => {
+            html.push_str(
+                r#"<section class="pt-dash-card">
+  <h1 class="pt-dash-title">Spin &amp; Gold — 3-Max</h1>
+  <p class="pt-dash-meta">One table at a time: play it to the end or finish the table to give up.</p>
+  <a class="action-btn pt-confirm pt-dash-action" href="/play">Start tournament</a>
+</section>"#,
+            );
+        }
+    }
+    html.push_str(
+        r#"</main>
+</body>
+</html>
+"#,
+    );
+    html
+}
+
+/// The full table shell page: GGPoker-dark skin, top-bar lifetime EV chart, the
 /// table controls (finish, tournament history, sound toggle), the table
 /// column docked top-left, and the coach-feedback panel beside it (never
 /// covering the table).
-pub fn index_page() -> String {
+pub fn play_page() -> String {
     r#"<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Poker Trainer</title>
-<link rel="stylesheet" href="/assets/style.css?v=11">
+<link rel="stylesheet" href="/assets/style.css?v=12">
 </head>
 <body class="pt-body">
   <header class="pt-topwrap">
+    <a href="/" class="pt-link">Dashboard</a>
     <div class="pt-brand">Poker Trainer</div>
     <canvas id="ev-chart" width="1200" height="48" class="ev-chart"></canvas>
     <div id="ws-status" class="status-wait">connecting…</div>
@@ -51,7 +124,7 @@ pub fn index_page() -> String {
       <button id="tournament-modal-continue" class="action-btn pt-confirm" type="button">Continue</button>
     </div>
   </div>
-  <script src="/assets/app.js?v=6"></script>
+  <script src="/assets/app.js?v=7"></script>
 </body>
 </html>"#
         .to_string()
@@ -73,12 +146,12 @@ pub fn tournaments_page(
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Poker Trainer — Tournaments</title>
-<link rel="stylesheet" href="/assets/style.css?v=11">
+<link rel="stylesheet" href="/assets/style.css?v=12">
 </head>
 <body class="pt-body">
 <header class="pt-topwrap">
   <h1 class="pt-page-title">Tournaments</h1>
-  <a href="/" class="pt-link">Back to the table</a>
+  <a href="/" class="pt-link">Dashboard</a>
 </header>
 <main class="pt-main">
 "#,
@@ -203,13 +276,13 @@ pub fn tournament_detail_page(detail: &TournamentDetail) -> String {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Poker Trainer — Tournament #{}</title>
-<link rel="stylesheet" href="/assets/style.css?v=11">
+<link rel="stylesheet" href="/assets/style.css?v=12">
 </head>
 <body class="pt-body">
 <header class="pt-topwrap">
   <h1 class="pt-page-title">Tournament #{}</h1>
   <a href="/tournaments" class="pt-link">All tournaments</a>
-  <a href="/" class="pt-link">Back to the table</a>
+  <a href="/" class="pt-link">Dashboard</a>
 </header>
 <main class="pt-main">
   <section class="pt-detail">
@@ -1005,8 +1078,8 @@ mod tests {
     }
 
     #[test]
-    fn index_page_shell_points_at_the_ws_client() {
-        let page = index_page();
+    fn play_page_shell_points_at_the_ws_client() {
+        let page = play_page();
         assert!(page.contains("<title>Poker Trainer</title>"));
         assert!(page.contains(r#"<div id="table"></div>"#));
         assert!(page.contains(r#"<div id="feedback">"#));
@@ -1028,13 +1101,75 @@ mod tests {
             "the solver depth badge lives in the action dock, not the header shell"
         );
         assert!(
-            page.contains(r#"/assets/style.css?v=11"#),
+            page.contains(r#"/assets/style.css?v=12"#),
             "the stylesheet link is versioned so browsers drop stale cached CSS"
         );
         assert!(
             !page.contains("cdn.tailwindcss.com"),
             "the skin ships its own CSS and works offline"
         );
+    }
+
+    fn active_summary(with_tournament: bool) -> Option<ActiveSummary> {
+        with_tournament.then(|| ActiveSummary {
+            session_id: 9,
+            hand_no: 12,
+            street: Street::Flop,
+            blind_small: 10,
+            blind_big: 20,
+            hero_stack: 460,
+            active_opponents: 2,
+            actions: 41,
+            started: "2026-08-24T10:00:00Z".to_string(),
+        })
+    }
+
+    #[test]
+    fn dashboard_without_an_active_tournament_offers_a_start() {
+        let page = dashboard_page(None);
+        assert!(page.contains("<title>Poker Trainer</title>"));
+        assert!(
+            page.contains(r#"href="/play">Start tournament</a>"#),
+            "the start button opens the table: {page}"
+        );
+        assert!(
+            !page.contains("Resume tournament"),
+            "no resume offer without an active tournament"
+        );
+        assert!(
+            page.contains(r#"href="/tournaments""#),
+            "the dashboard links to the history"
+        );
+    }
+
+    #[test]
+    fn dashboard_with_an_active_tournament_offers_only_a_resume() {
+        let page = dashboard_page(active_summary(true).as_ref());
+        assert!(page.contains("Tournament in progress"));
+        assert!(
+            page.contains(r#"href="/play">Resume tournament</a>"#),
+            "resume points at the table: {page}"
+        );
+        assert!(
+            !page.contains("Start tournament"),
+            "a new tournament cannot start while one is active"
+        );
+        assert!(page.contains("Hand</span><b>#12</b>"));
+        assert!(page.contains("Street</span><b>Flop</b>"));
+        assert!(page.contains("Blinds</span><b>10/20</b>"));
+        assert!(page.contains("Your stack</span><b>460</b>"));
+        assert!(page.contains("Opponents left</span><b>2</b>"));
+        assert!(page.contains("Actions played</span><b>41</b>"));
+        assert!(page.contains("2026-08-24T10:00:00Z"));
+    }
+
+    #[test]
+    fn dashboard_escapes_stored_strings() {
+        let mut summary = active_summary(true).unwrap();
+        summary.started = r#"<script>"evil"</script>"#.to_string();
+        let page = dashboard_page(Some(&summary));
+        assert!(!page.contains(r#"<script>"evil""#));
+        assert!(page.contains("&lt;script&gt;"));
     }
 
     fn summary(

@@ -5,6 +5,22 @@ interface and coaches decision-making with a range-based solver.
 
 ## Features
 
+- **Dashboard & live-tournament persistence:** the app starts on a dashboard.
+  When no tournament is open it offers **Start tournament**; while one is open
+  it shows a **Resume tournament** card (hand number, street, blinds, your
+  stack, opponents left, actions played) and hides the start button — exactly
+  one tournament is live at a time, and a new one can only begin once the
+  previous one ends. A tournament ends by winning or losing it, or by
+  pressing **Finish table**, which counts as giving up and is recorded as a
+  LOSS. Closing the tab (or restarting the app) does *not* end the
+  tournament: the active table's full state — street, turn, exact bet sizes,
+  stacks, board, hole cards, the undealt deck order, the action log, opponent
+  HUD counters, and the hand/action counters — is snapshotted into the
+  database after every change, so reconnecting resumes the very same hand
+  where you left it. The blunder-intervention history is rebuilt from the
+  stored decisions, so the coach's interception threshold also picks up where
+  it stopped. A second browser tab cannot claim the same table; it is sent
+  back to the dashboard while the first one plays.
 - **Project scaffolding:** configuration loading (`.env`), structured
   logging, and a typed error convention.
 - **Database layer:** PostgreSQL schema (opponent profiles, stats,
@@ -125,7 +141,8 @@ interface and coaches decision-making with a range-based solver.
   history: on connect the server sends a decimated `CHART_SNAPSHOT` (100
   points mapping the last 1,000 actions across every table) and keeps it
   refreshed while you play. When you finish a table — press **Finish table**
-  in the top bar or just close the tab — the session is finalized, and the
+  in the top bar, which gives up and records a LOSS — or the tournament ends
+  naturally, the session is finalized, and the
   **Tournament history** link (or `/tournaments`) shows one such graph per
   finished tournament with its hands/actions and average EV loss in BB.
   The listing is **paginated** (25 per page, newest first) with
@@ -224,8 +241,12 @@ followed by `pokertrainer table server listening`.
 ### 4. Play
 
 Open <http://127.0.0.1:8744> in a browser (change `SERVER_ADDR` in `.env` to
-serve elsewhere). The table deals automatically — you'll hear the cards land
-and the chips move (mute with 🔊 if you prefer silence). When the action dock
+serve elsewhere). You land on the **dashboard**: press **Start tournament**
+to play (when one is already open you get a **Resume tournament** card
+instead, and starting a new one is impossible until the current one ends —
+win it, lose it, or give up with **Finish table**). Both buttons open the
+table. The table deals automatically — you'll hear the cards land and the
+chips move (mute with 🔊 if you prefer silence). When the action dock
 appears it starts locked while the background solver simulates; the controls
 unlock the moment the depth badge turns green (about five seconds per
 decision). Then either click a sizing chip and the red **Bet/Raise** button,
@@ -234,7 +255,9 @@ outright — every amount is in chips. Every decision is charted in the top bar;
 pause the table and render the played-vs-optimal breakdown in the **coach
 feedback** panel to the right of the felt — press **Continue** and the coach
 plays the best-EV action for you. Invalid clicks and reconnects are handled
-gracefully — the table keeps dealing.
+gracefully: closing or refreshing the tab mid-hand saves the table, and the
+next connection resumes that exact hand, street, and bet sizes from the
+dashboard.
 
 ### Table events in the logs
 
@@ -249,9 +272,12 @@ blunder interceptions (with the EV loss and threshold), review confirmations
 misbehaves, send the relevant lines from `data/app.log` and the bug report
 will land with full context.
 
-When you're done with a table, click **Finish table** in the top bar (or just
-close the tab): your session is stored, and the **Tournament history** link
-in the top bar takes you to <http://127.0.0.1:8744/tournaments>, where every
+When you're done with a table, click **Finish table** in the top bar — that
+gives up: the tournament is stored as a LOSS at your current stack, you are
+sent back to the dashboard, and a brand-new tournament becomes available.
+(Closing the tab instead leaves the tournament open, ready to resume from the
+dashboard.) The **Tournament history** link in the dashboard or top bar takes
+you to <http://127.0.0.1:8744/tournaments>, where every
 finished tournament shows the same action-EV graph as the live top bar in a
 paginated list — 25 per page, newest first, with **← Newer** / **Older →**
 navigation. Click

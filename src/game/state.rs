@@ -546,6 +546,130 @@ impl GameState {
         state
     }
 
+    /// Serializes the complete live state (cards, stacks, betting, ordering)
+    /// for tournament persistence.
+    pub fn to_snapshot(&self) -> crate::snapshot::StateSnapshot {
+        use crate::snapshot::{HandResultSnapshot, StateSnapshot};
+        let hole_cards = self
+            .hole_cards
+            .iter()
+            .map(|cards| [cards[0].to_code(), cards[1].to_code()])
+            .collect();
+        let hand_result = self.hand_result.as_ref().map(|result| {
+            let reason = match result.reason {
+                HandEndReason::Fold(_) => "fold",
+                HandEndReason::Showdown => "showdown",
+            }
+            .to_string();
+            let awards = result
+                .awards
+                .iter()
+                .map(|award| (award.seat.index() as u8, award.amount))
+                .collect();
+            HandResultSnapshot { reason, awards }
+        });
+        StateSnapshot {
+            stacks: self.stacks,
+            button: self.button.index() as u8,
+            blind_small: self.blind_level.small_blind,
+            blind_big: self.blind_level.big_blind,
+            street: match self.street {
+                Street::Preflop => 0,
+                Street::Flop => 1,
+                Street::Turn => 2,
+                Street::River => 3,
+            },
+            board: self.board.iter().map(|card| card.to_code()).collect(),
+            hole_cards,
+            revealed: self.revealed,
+            street_contrib: self.street_contrib,
+            total_contrib: self.total_contrib,
+            current_bet: self.current_bet,
+            min_raise: self.min_raise,
+            last_full_raise: self.last_full_raise.map(|seat| seat.index() as u8),
+            acted: self.acted,
+            folded: self.folded,
+            all_in: self.all_in,
+            eliminated: self.eliminated,
+            to_act: self.to_act.index() as u8,
+            hand_over: self.hand_over,
+            hand_result,
+        }
+    }
+
+    /// Rebuilds a live state from its persisted snapshot. Opponents' hidden
+    /// card codes are restored as dealt cards, and a paused end-of-hand state
+    /// keeps its win ribbon.
+    pub fn from_snapshot(snapshot: &crate::snapshot::StateSnapshot) -> Result<GameState> {
+        fn seat(index: u8) -> Result<Seat> {
+            match index {
+                0 => Ok(Seat::Hero),
+                1 => Ok(Seat::Opponent1),
+                2 => Ok(Seat::Opponent2),
+                other => Err(Error::Game(format!("invalid seat index {other}"))),
+            }
+        }
+        fn street(index: u8) -> Result<Street> {
+            match index {
+                0 => Ok(Street::Preflop),
+                1 => Ok(Street::Flop),
+                2 => Ok(Street::Turn),
+                3 => Ok(Street::River),
+                other => Err(Error::Game(format!("invalid street index {other}"))),
+            }
+        }
+        fn code_to_card(code: &str) -> Result<Card> {
+            Card::from_code(code).ok_or_else(|| Error::Game(format!("invalid card code {code:?}")))
+        }
+
+        let button = seat(snapshot.button)?;
+        let to_act = seat(snapshot.to_act)?;
+        let street = street(snapshot.street)?;
+        let mut hole_cards = [[Card::new(Rank::Two, Suit::Clubs); 2]; NUM_PLAYERS];
+        if snapshot.hole_cards.len() != NUM_PLAYERS {
+            return Err(Error::Game(format!(
+                "expected {} hole-card pairs, found {}",
+                NUM_PLAYERS,
+                snapshot.hole_cards.len()
+            )));
+        }
+        for (seat_index, codes) in snapshot.hole_cards.iter().enumerate() {
+            hole_cards[seat_index] = [code_to_card(&codes[0])?, code_to_card(&codes[1])?];
+        }
+        let board = snapshot
+            .board
+            .iter()
+            .map(|code| code_to_card(code))
+            .collect::<Result<Vec<_>>>()?;
+        let last_full_raise = snapshot.last_full_raise.map(seat).transpose()?;
+
+        let mut state = GameState {
+            stacks: snapshot.stacks,
+            button,
+            blind_level: BlindLevel::new(snapshot.blind_small, snapshot.blind_big),
+            street,
+            board,
+            hole_cards,
+            revealed: snapshot.revealed,
+            street_contrib: snapshot.street_contrib,
+            total_contrib: snapshot.total_contrib,
+            current_bet: snapshot.current_bet,
+            min_raise: snapshot.min_raise,
+            last_full_raise,
+            acted: snapshot.acted,
+            folded: snapshot.folded,
+            all_in: snapshot.all_in,
+            eliminated: snapshot.eliminated,
+            to_act,
+            hand_over: snapshot.hand_over,
+            hand_result: None,
+        };
+        if let Some(result) = &snapshot.hand_result {
+            state.hand_result = Some(crate::snapshot::reconstruct_hand_result(&state, result)?);
+        }
+        Ok(state)
+    }
+
     fn clone_without_result(&self) -> GameState {
         GameState {
             stacks: self.stacks,
@@ -1297,5 +1421,141 @@ mod tests {
             state.start_hand(&mut deck(15)),
             Err(Error::Game(_))
         ));
+    }
+
+    /// The full live state survives a snapshot round trip, including betting
+    /// mid-hand details that no accessor must silently drop.
+    #[test]
+    fn snapshot_round_trip_preserves_the_complete_state() {
+        let mut state = GameState::new(Seat::Hero, level());
+        state.start_hand(&mut deck(30)).unwrap();
+        state.apply_action(Action::Call).unwrap();
+        state.apply_action(Action::Raise(80)).unwrap();
+        state.apply_action(Action::Call).unwrap();
+        state.apply_action(Action::Call).unwrap();
+        state.advance_street(&mut deck(30)).unwrap();
+        state.apply_action(Action::Bet(50)).unwrap();
+        state.apply_action(Action::Raise(150)).unwrap();
+        assert_eq!(state.to_act(), Seat::Hero);
+
+        let revived = GameState::from_snapshot(&state.to_snapshot()).unwrap();
+        assert_eq!(revived.to_snapshot(), state.to_snapshot());
+        assert_eq!(revived.stacks(), state.stacks());
+        assert_eq!(revived.button(), state.button());
+        assert_eq!(revived.blind_level(), state.blind_level());
+        assert_eq!(revived.street(), state.street());
+        assert_eq!(revived.board(), state.board());
+        assert_eq!(revived.current_bet(), state.current_bet());
+        assert_eq!(revived.total_pot(), state.total_pot());
+        assert_eq!(revived.to_act(), state.to_act());
+        assert_eq!(revived.hero_cards(), state.hero_cards());
+        assert_eq!(
+            revived.hole_cards(Seat::Opponent1),
+            state.hole_cards(Seat::Opponent1)
+        );
+        assert_eq!(
+            revived.hole_cards(Seat::Opponent2),
+            state.hole_cards(Seat::Opponent2)
+        );
+        assert_eq!(
+            revived.legal_actions(),
+            state.legal_actions(),
+            "the resumed legal set (bet sizes, raise bounds) is identical"
+        );
+
+        // The revived state continues to play legally.
+        let action = match revived.legal_actions() {
+            legal if legal.can_check => Action::Check,
+            legal if legal.can_call => Action::Call,
+            _ => Action::Fold,
+        };
+        assert!(revived.legal_actions().allows(action));
+    }
+
+    #[test]
+    fn snapshot_restores_a_finished_hand_with_its_award() {
+        let mut state = GameState::new(Seat::Hero, level());
+        state.hole_cards = [
+            [card("As"), card("Ad")],
+            [card("Kh"), card("Kd")],
+            [card("Qh"), card("Qd")],
+        ];
+        state.board = vec![card("2c"), card("7c"), card("9c"), card("Jc"), card("3s")];
+        state.total_contrib = [100, 100, 100];
+        state.folded = [false, false, false];
+        state.stacks = [400, 400, 400];
+        state.showdown(&mut Deck::new()).unwrap();
+        assert!(state.is_hand_over());
+
+        let revived = GameState::from_snapshot(&state.to_snapshot()).unwrap();
+        assert!(revived.is_hand_over());
+        assert_eq!(
+            revived.hand_result().unwrap().awards,
+            state.hand_result().unwrap().awards
+        );
+    }
+
+    #[test]
+    fn malformed_state_snapshots_are_rejected() {
+        let mut state = GameState::new(Seat::Hero, level());
+        state.start_hand(&mut deck(31)).unwrap();
+        let snapshot = state.to_snapshot();
+
+        let mut bad = snapshot.clone();
+        bad.button = 7;
+        assert!(matches!(
+            GameState::from_snapshot(&bad),
+            Err(Error::Game(_))
+        ));
+
+        let mut bad = snapshot.clone();
+        bad.street = 9;
+        assert!(matches!(
+            GameState::from_snapshot(&bad),
+            Err(Error::Game(_))
+        ));
+
+        let mut bad = snapshot.clone();
+        bad.to_act = 3;
+        assert!(matches!(
+            GameState::from_snapshot(&bad),
+            Err(Error::Game(_))
+        ));
+
+        let mut bad = snapshot.clone();
+        bad.board = vec!["Zz".to_string()];
+        assert!(matches!(
+            GameState::from_snapshot(&bad),
+            Err(Error::Game(_))
+        ));
+
+        let mut bad = snapshot.clone();
+        bad.hole_cards = vec![["As".to_string(), "Kd".to_string()]];
+        assert!(matches!(
+            GameState::from_snapshot(&bad),
+            Err(Error::Game(_))
+        ));
+    }
+
+    /// The snapshot of an all-in hand keeps the stack-zero state, so an
+    /// all-in shove paused mid-hand never gains chips back on resume.
+    #[test]
+    fn snapshot_of_an_all_in_keeps_the_zero_stack() {
+        // Button on Opponent 1 makes Opponent 2 the big blind, so the hero
+        // (left of the big blind) is first to act preflop — shoving empties
+        // the hero's stack at once.
+        let mut state = GameState::new(Seat::Opponent1, level());
+        state.start_hand(&mut deck(32)).unwrap();
+        assert_eq!(state.to_act(), Seat::Hero);
+        state.apply_action(Action::AllIn).unwrap();
+        assert_eq!(state.stack(Seat::Hero), 0);
+        assert!(state.all_in(Seat::Hero));
+
+        let revived = GameState::from_snapshot(&state.to_snapshot()).unwrap();
+        assert_eq!(revived.stacks(), state.stacks());
+        assert!(revived.all_in(Seat::Hero));
+        assert_eq!(revived.to_act(), state.to_act());
+        assert_eq!(revived.current_bet(), state.current_bet());
+        assert_eq!(revived.legal_actions(), state.legal_actions());
     }
 }

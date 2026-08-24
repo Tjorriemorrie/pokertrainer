@@ -41,7 +41,7 @@ pub struct OpponentSnapshot {
 /// counts when it is not a call-for-less, i.e. when no bet was faced.
 /// Fold-to-bet counts folds across all streets whenever a bet or raise had
 /// to be answered. Aggression is the postflop bets-plus-raises-per-call.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct OpponentTracker {
     hands: [usize; NUM_OPPONENTS],
     vpip: [usize; NUM_OPPONENTS],
@@ -55,6 +55,36 @@ pub struct OpponentTracker {
 }
 
 impl OpponentTracker {
+    /// Serializes the counters for tournament persistence across reconnects.
+    pub fn to_snapshot(&self) -> crate::snapshot::OpponentCountersSnapshot {
+        crate::snapshot::OpponentCountersSnapshot {
+            hands: self.hands,
+            vpip: self.vpip,
+            pfr: self.pfr,
+            faced_bet: self.faced_bet,
+            folded_to_bet: self.folded_to_bet,
+            postflop_bets: self.postflop_bets,
+            postflop_calls: self.postflop_calls,
+            vpip_seen: self.vpip_seen,
+            pfr_seen: self.pfr_seen,
+        }
+    }
+
+    /// Restores the counters saved by [`Self::to_snapshot`].
+    pub fn from_snapshot(snapshot: &crate::snapshot::OpponentCountersSnapshot) -> Self {
+        Self {
+            hands: snapshot.hands,
+            vpip: snapshot.vpip,
+            pfr: snapshot.pfr,
+            faced_bet: snapshot.faced_bet,
+            folded_to_bet: snapshot.folded_to_bet,
+            postflop_bets: snapshot.postflop_bets,
+            postflop_calls: snapshot.postflop_calls,
+            vpip_seen: snapshot.vpip_seen,
+            pfr_seen: snapshot.pfr_seen,
+        }
+    }
+
     /// A new hand was dealt: every seated opponent gets another hand, and the
     /// per-hand VPIP/PFR flags reset.
     pub fn begin_hand(&mut self) {

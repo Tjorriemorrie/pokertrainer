@@ -41,6 +41,10 @@ async fn main() -> Result<()> {
     db::run_migrations(&pool).await?;
     tracing::info!("database ready, migrations up to date");
 
+    // A process that died mid-connection leaves its active table marked as
+    // connected; clear stale flags so the next connection can claim it.
+    pokertrainer::live::mark_disconnected(&pool).await?;
+
     let server_config = ServerConfig {
         bind: config.bind_addr,
         ..ServerConfig::live()

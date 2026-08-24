@@ -174,6 +174,20 @@ pub async fn record_decision(
     insert_decision(pool, session_id, decision).await
 }
 
+/// One session's recorded decisions in play order: the hand number and the
+/// EV lost (big blinds). Fed into the blunder tracker on a table resume so
+/// the intervention threshold continues exactly where it stopped.
+pub async fn load_session_losses(pool: &PgPool, session_id: i32) -> Result<Vec<(i64, f64)>> {
+    let rows: Vec<(i64, f64)> = sqlx::query_as(
+        "SELECT hand_number::bigint, ev_loss FROM hero_decisions
+         WHERE session_id = $1 ORDER BY id",
+    )
+    .bind(session_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
 /// Writes a batch of decisions atomically; returns the persisted count.
 pub async fn persist_records(
     pool: &PgPool,
@@ -576,6 +590,12 @@ mod tests {
             load_session(&pool, session_id, CHART_WINDOW).await.unwrap(),
             vec![(1, 0.0), (2, 30.0), (3, 10.0)],
             "session points are ordinals within the session"
+        );
+
+        assert_eq!(
+            load_session_losses(&pool, session_id).await.unwrap(),
+            vec![(1, 0.0), (1, 30.0), (2, 10.0)],
+            "hand losses replay in play order for blunder hydration"
         );
 
         let recent = load_recent(&pool, CHART_WINDOW).await.unwrap();

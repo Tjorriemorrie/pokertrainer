@@ -1108,3 +1108,51 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
 }
 
 .pt-modal-card .action-btn { width: 100%; }
+
+/* --------------------------------------------------------- dashboard */
+
+.pt-dashboard {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 2.5rem 1rem;
+}
+
+.pt-dash-card {
+  background: #0a0f16;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 2rem 2.25rem;
+  max-width: 560px;
+  width: 100%;
+  text-align: center;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.5);
+}
+
+.pt-dash-title {
+  font-size: 1.4rem;
+  font-weight: 900;
+  color: var(--gold-light);
+  margin: 0 0 0.4rem;
+}
+
+.pt-dash-meta {
+  color: #9ca3af;
+  font-size: 0.9rem;
+  margin: 0 0 1.2rem;
+}
+
+.pt-dash-note {
+  color: #9ca3af;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  margin: 0.9rem 0 0;
+}
+
+.pt-dash-action {
+  display: inline-block;
+  text-decoration: none;
+  font-size: 1.05rem;
+  padding: 0.85rem 2rem;
+  margin: 1.2rem 0;
+}

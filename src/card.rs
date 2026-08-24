@@ -109,6 +109,39 @@ impl Card {
             SUIT_CHARS[self.suit_index()] as char
         )
     }
+
+    /// Parses a two-character card code (`"As"`, `"Th"`, `"2c"`). Rejects
+    /// anything else — the inverse of [`Card::to_code`].
+    pub fn from_code(code: &str) -> Option<Card> {
+        let bytes = code.as_bytes();
+        if bytes.len() != 2 {
+            return None;
+        }
+        let rank = match bytes[0] {
+            b'2' => Rank::Two,
+            b'3' => Rank::Three,
+            b'4' => Rank::Four,
+            b'5' => Rank::Five,
+            b'6' => Rank::Six,
+            b'7' => Rank::Seven,
+            b'8' => Rank::Eight,
+            b'9' => Rank::Nine,
+            b'T' => Rank::Ten,
+            b'J' => Rank::Jack,
+            b'Q' => Rank::Queen,
+            b'K' => Rank::King,
+            b'A' => Rank::Ace,
+            _ => return None,
+        };
+        let suit = match bytes[1] {
+            b'c' => Suit::Clubs,
+            b'd' => Suit::Diamonds,
+            b'h' => Suit::Hearts,
+            b's' => Suit::Spades,
+            _ => return None,
+        };
+        Some(Card::new(rank, suit))
+    }
 }
 
 impl fmt::Display for Card {
@@ -169,6 +202,13 @@ impl Deck {
         Some(card)
     }
 
+    /// The cards not yet dealt, in dealing order — enough to persist the
+    /// exact future runout of a live table so a resumed hand cannot invent a
+    /// card that was already dealt or contradict the ones still to come.
+    pub fn remaining_in_order(&self) -> Vec<Card> {
+        self.cards[self.top..].to_vec()
+    }
+
     /// Builds a deck whose top contains the given cards in order (used by the
     /// solver to deal only the cards still unknown at a decision point).
     /// Returns `None` when more than 52 cards are supplied.
@@ -207,6 +247,19 @@ mod tests {
         assert_eq!(Card::new(Rank::Ten, Suit::Hearts).to_code(), "Th");
         assert_eq!(Card::new(Rank::Two, Suit::Clubs).to_code(), "2c");
         assert_eq!(format!("{}", Card::new(Rank::King, Suit::Diamonds)), "Kd");
+    }
+
+    #[test]
+    fn card_codes_parse_back() {
+        for suit in Suit::ALL {
+            for rank in Rank::ALL {
+                let card = Card::new(rank, suit);
+                assert_eq!(Card::from_code(&card.to_code()), Some(card));
+            }
+        }
+        for bad in ["", "A", "Asd", "Xx", "1c", "Az", "as", "A ", " a"] {
+            assert_eq!(Card::from_code(bad), None, "code {bad:?} must be rejected");
+        }
     }
 
     #[test]
@@ -293,5 +346,25 @@ mod tests {
     fn deck_from_remaining_rejects_oversized_input() {
         let oversize = vec![Card::new(Rank::Two, Suit::Clubs); 53];
         assert!(Deck::try_from_remaining(oversize).is_none());
+    }
+
+    #[test]
+    fn remaining_in_order_is_the_undealt_tail() {
+        let mut deck = Deck::new();
+        assert_eq!(deck.remaining_in_order().len(), 52);
+        let mut expected = Vec::new();
+        while let Some(card) = deck.deal() {
+            expected.push(card);
+            if deck.remaining() == 40 {
+                break;
+            }
+        }
+        let tail = deck.remaining_in_order();
+        assert_eq!(tail.len(), 40);
+        let mut rebuilt = Deck::try_from_remaining(tail.clone()).unwrap();
+        for card in tail {
+            assert_eq!(rebuilt.deal(), Some(card), "the tail deals in order");
+        }
+        assert!(rebuilt.is_empty());
     }
 }

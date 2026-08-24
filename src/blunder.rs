@@ -131,6 +131,20 @@ impl Tracker {
         self.current_hand_actions = self.current_hand_actions.saturating_add(1);
     }
 
+    /// Replays a session's stored decisions (hand number, EV loss — in play
+    /// order) to rebuild the rolling history after a table resume, so the
+    /// intervention threshold picks up exactly where it stopped.
+    pub fn hydrate(&mut self, history: &[(i64, f64)]) {
+        let mut previous_hand: Option<i64> = None;
+        for &(hand, loss) in history {
+            if previous_hand.is_some_and(|previous| previous != hand) {
+                self.end_hand();
+            }
+            previous_hand = Some(hand);
+            self.record_action(loss);
+        }
+    }
+
     /// Closes the current hand and starts counting actions for the next one.
     pub fn end_hand(&mut self) {
         while self.hand_actions.len() >= self.config.history_hands {
@@ -326,6 +340,33 @@ mod tests {
             vec![1, 3, 0, 4],
             "hand window caps at 4 hands"
         );
+    }
+
+    /// Replaying stored decisions rebuilds the same tracker as recording
+    /// them live — the key to an uninterrupted intervention threshold after
+    /// a table resume.
+    #[test]
+    fn hydration_matches_live_recording() {
+        let history = [(1, 0.5), (1, 3.0), (2, 1.0), (2, 0.0), (2, 12.0)];
+
+        let mut live = Tracker::new(config());
+        let mut previous_hand: Option<i64> = None;
+        for &(hand, loss) in &history {
+            if previous_hand.is_some_and(|previous| previous != hand) {
+                live.end_hand();
+            }
+            previous_hand = Some(hand);
+            live.record_action(loss);
+        }
+
+        let mut hydrated = Tracker::new(config());
+        hydrated.hydrate(&history);
+
+        assert_eq!(hydrated.losses, live.losses);
+        assert_eq!(hydrated.hand_actions, live.hand_actions);
+        assert_eq!(hydrated.current_hand_actions, live.current_hand_actions);
+        assert_eq!(hydrated.actions_per_hand(), live.actions_per_hand());
+        assert_eq!(hydrated.threshold(), live.threshold());
     }
 
     #[test]

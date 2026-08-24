@@ -38,11 +38,12 @@ pub fn default_assets() -> ServeDir {
     ServeDir::new(concat!(env!("CARGO_MANIFEST_DIR"), "/assets"))
 }
 
-/// Assembles the application router: the shell page, a health probe, static
-/// assets, and the WebSocket upgrade endpoint.
+/// Assembles the application router: the dashboard, the playing table, a
+/// health probe, static assets, and the WebSocket upgrade endpoint.
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
-        .route("/", get(index))
+        .route("/", get(dashboard))
+        .route("/play", get(play))
         .route("/health", get(health))
         .route("/tournaments", get(tournaments))
         .route("/tournaments/{id}", get(tournament_detail))
@@ -82,8 +83,26 @@ impl ServeListener {
     }
 }
 
-async fn index() -> Html<String> {
-    Html(views::index_page())
+/// The dashboard landing page: the resume card for the active tournament (if
+/// any) or a start button. Without a database the dashboard has nothing to
+/// read, so it always offers a fresh start.
+async fn dashboard(State(app): State<Arc<AppState>>) -> Response {
+    let active = match app.pool.as_ref() {
+        Some(pool) => match crate::live::load_dashboard(pool).await {
+            Ok(Some(active)) => Some(active.summary),
+            Ok(None) => None,
+            Err(error) => {
+                tracing::warn!(%error, "dashboard could not read the active tournament");
+                None
+            }
+        },
+        None => None,
+    };
+    Html(views::dashboard_page(active.as_ref())).into_response()
+}
+
+async fn play() -> Html<String> {
+    Html(views::play_page())
 }
 
 async fn health() -> impl IntoResponse {
@@ -224,8 +243,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn index_serves_the_shell_page() {
+    async fn dashboard_serves_a_start_when_nothing_is_active() {
         let (status, body) = get("/").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("<title>Poker Trainer</title>"));
+        assert!(
+            body.contains(r#"href="/play">Start tournament</a>"#),
+            "the dashboard offers a start without a database: {body}"
+        );
+        assert!(!body.contains(r#"id="table""#), "the table lives on /play");
+    }
+
+    #[tokio::test]
+    async fn play_serves_the_table_shell() {
+        let (status, body) = get("/play").await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("<title>Poker Trainer</title>"));
         assert!(body.contains(r#"id="table""#));
@@ -243,6 +274,115 @@ mod tests {
     async fn unknown_routes_return_404() {
         let (status, _) = get("/nope").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn dashboard_shows_the_active_tournament_resume_card() {
+        use crate::snapshot::{OpponentCountersSnapshot, StateSnapshot, TournamentSnapshot};
+
+        let _guard = crate::analytics::DB_TEST_LOCK.lock().await;
+        dotenvy::dotenv().ok();
+        let database_url = match std::env::var("DATABASE_URL") {
+            Ok(url) if !url.is_empty() => url,
+            _ => panic!(
+                "DATABASE_URL is required for database integration tests; start PostgreSQL via pg.ps1"
+            ),
+        };
+        let pool = crate::db::connect(&database_url).await.unwrap();
+
+        // Free any pre-existing active row so the dashboard state is known.
+        sqlx::query("DELETE FROM active_tournament WHERE single = TRUE")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let state = Arc::new(AppState {
+            assets: default_assets(),
+            mcts: MctsConfig::test(),
+            survival: SurvivalConfig::default(),
+            blunder: BlunderConfig::default(),
+            pool: Some(pool.clone()),
+            snapshot_interval: 100,
+            result_pause_ms: 0,
+        });
+
+        let (status, body) = get_with(state.clone(), "/").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains("Start tournament"),
+            "a dashboard without an active row offers a start: {body}"
+        );
+
+        let session_id = match crate::live::claim_or_resume(&pool).await.unwrap() {
+            crate::live::ClaimOutcome::Fresh(id) => id,
+            other => panic!("expected a fresh claim, got {other:?}"),
+        };
+        crate::live::save_snapshot(
+            &pool,
+            session_id,
+            &TournamentSnapshot {
+                state: StateSnapshot {
+                    stacks: [460, 480, 460],
+                    button: 0,
+                    blind_small: 10,
+                    blind_big: 20,
+                    street: 1,
+                    board: vec!["2c".into(), "7h".into(), "Kd".into()],
+                    hole_cards: vec![
+                        ["As".into(), "Kd".into()],
+                        ["2c".into(), "2h".into()],
+                        ["7s".into(), "8s".into()],
+                    ],
+                    revealed: [true, false, false],
+                    street_contrib: [0, 0, 0],
+                    total_contrib: [10, 10, 10],
+                    current_bet: 0,
+                    min_raise: 20,
+                    last_full_raise: None,
+                    acted: [false, false, false],
+                    folded: [false, false, false],
+                    all_in: [false, false, false],
+                    eliminated: [false, false, false],
+                    to_act: 0,
+                    hand_over: false,
+                    hand_result: None,
+                },
+                deck: Vec::new(),
+                hand_no: 6,
+                action_no: 13,
+                log: Vec::new(),
+                opponents: OpponentCountersSnapshot {
+                    hands: [6, 6],
+                    vpip: [1, 2],
+                    pfr: [0, 1],
+                    faced_bet: [2, 1],
+                    folded_to_bet: [1, 0],
+                    postflop_bets: [1, 0],
+                    postflop_calls: [0, 2],
+                    vpip_seen: [false, false],
+                    pfr_seen: [false, false],
+                },
+            },
+        )
+        .await
+        .unwrap();
+        crate::live::mark_disconnected(&pool).await.unwrap();
+
+        let (status, body) = get_with(state, "/").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains(r#"href="/play">Resume tournament</a>"#),
+            "an active tournament renders the resume card: {body}"
+        );
+        assert!(body.contains("Hand</span><b>#6</b>"));
+        assert!(body.contains("Your stack</span><b>460</b>"));
+
+        crate::live::clear_active(&pool).await.unwrap();
+        sqlx::query("DELETE FROM hero_sessions WHERE id = $1")
+            .bind(session_id)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
