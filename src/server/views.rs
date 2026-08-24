@@ -363,7 +363,13 @@ fn stack_text(stack: u32, big_blind: u32) -> String {
 /// an always-visible action log docked to the left of the oval, exactly
 /// as tall as the table. `sounds` carries the WebAudio cues the client
 /// synthesizes for this update.
-pub fn table_fragment(state: &GameState, hand_no: u64, log: &[String], sounds: &[Sound]) -> String {
+pub fn table_fragment(
+    state: &GameState,
+    hand_no: u64,
+    action_no: u64,
+    log: &[String],
+    sounds: &[Sound],
+) -> String {
     let level = state.blind_level();
     let mut html = String::new();
 
@@ -411,7 +417,13 @@ pub fn table_fragment(state: &GameState, hand_no: u64, log: &[String], sounds: &
     html.push_str("</div>");
 
     if !state.is_hand_over() && state.to_act() == Seat::Hero {
-        html.push_str(r#"<div class="pt-action-block">"#);
+        let decision = format!(
+            "h{hand_no}-a{action_no}-{}",
+            state.street().to_string().to_lowercase()
+        );
+        html.push_str(&format!(
+            r#"<div class="pt-action-block" data-decision="{decision}">"#
+        ));
         html.push_str(r#"<div id="mcts-status" class="mcts-status status-bad">solver idle</div>"#);
         html.push_str(&action_panel(state));
         html.push_str("</div>");
@@ -530,6 +542,9 @@ fn action_panel(state: &GameState) -> String {
     let legal = state.legal_actions();
     let level = state.blind_level();
     let mut html = String::from(r#"<div id="action-panel" class="pt-action-dock">"#);
+    html.push_str(
+        r#"<div class="pt-dock-wait">Simulating — actions unlock when the depth badge turns green.</div>"#,
+    );
 
     let betting = legal.can_bet;
     let raising = legal.can_raise;
@@ -1202,7 +1217,7 @@ mod tests {
             .start_hand(&mut Deck::shuffled(&mut seeded_rng(37)))
             .unwrap();
         state.set_eliminated(Seat::Opponent1, true);
-        let fragment = table_fragment(&state, 1, &[], &[]);
+        let fragment = table_fragment(&state, 1, 0, &[], &[]);
         assert!(
             fragment.contains(r#"class="pt-flag bust">OUT</span>"#),
             "an eliminated seat is flagged OUT: {fragment}"
@@ -1223,7 +1238,7 @@ mod tests {
         state.apply_action(Action::Call).unwrap();
         assert_eq!(state.to_act(), Seat::Hero);
 
-        let fragment = table_fragment(&state, 3, &["You check".to_string()], &[]);
+        let fragment = table_fragment(&state, 3, 0, &["You check".to_string()], &[]);
         assert!(fragment.contains(r#"id="table-state""#));
         assert!(fragment.contains("Hand #3"));
         assert!(fragment.contains("Blinds 10/20 · Preflop"));
@@ -1233,11 +1248,15 @@ mod tests {
         );
         assert!(fragment.contains(r#"data-kind="fold"#));
         assert!(
-            fragment.contains(r#"class="pt-action-block">"#)
+            fragment.contains(r#"class="pt-action-block" data-decision="h3-a0-preflop">"#)
                 && fragment.contains(
                     r#"id="mcts-status" class="mcts-status status-bad">solver idle</div>"#
                 ),
-            "the solver depth badge sits in the action dock while the hero acts: {fragment}"
+            "the solver depth badge sits in the action dock, tagged with the decision token, while the hero acts: {fragment}"
+        );
+        assert!(
+            fragment.contains(r#"<div class="pt-dock-wait">"#),
+            "the dock carries a wait hint shown until the depth badge turns green: {fragment}"
         );
         assert!(fragment.contains("You check"), "log lines are shown");
         let hero_cards = state.hero_cards();
@@ -1268,7 +1287,7 @@ mod tests {
             .start_hand(&mut Deck::shuffled(&mut seeded_rng(32)))
             .unwrap();
         state.apply_action(Action::Fold).unwrap();
-        let fragment = table_fragment(&state, 1, &[], &[]);
+        let fragment = table_fragment(&state, 1, 0, &[], &[]);
         assert!(
             fragment.contains(r#"class="pt-seat pt-active" data-seat="Hero""#)
                 || fragment.contains(r#"class="pt-seat" data-seat="Opponent 2""#),
@@ -1291,7 +1310,7 @@ mod tests {
             .start_hand(&mut Deck::shuffled(&mut seeded_rng(33)))
             .unwrap();
         state.apply_action(Action::Call).unwrap();
-        let fragment = table_fragment(&state, 1, &[], &[]);
+        let fragment = table_fragment(&state, 1, 0, &[], &[]);
         assert!(
             !fragment.contains(">3BB<")
                 && !fragment.contains(">4BB<")
@@ -1318,7 +1337,7 @@ mod tests {
         state.apply_action(Action::Raise(500)).unwrap();
         assert_eq!(state.to_act(), Seat::Hero);
 
-        let fragment = table_fragment(&state, 1, &[], &[]);
+        let fragment = table_fragment(&state, 1, 0, &[], &[]);
         assert!(
             fragment.contains(r#"data-kind="all_in""#),
             "a hero who can only call for the whole stack still gets an all-in button: {fragment}"
@@ -1338,6 +1357,7 @@ mod tests {
         let fragment = table_fragment(
             &state,
             1,
+            0,
             &[],
             &[Sound::Deal, Sound::Chip, Sound::Fold, Sound::Win],
         );
@@ -1354,13 +1374,13 @@ mod tests {
             .start_hand(&mut Deck::shuffled(&mut seeded_rng(35)))
             .unwrap();
         assert_ne!(state.to_act(), Seat::Hero);
-        let waiting = table_fragment(&state, 1, &[], &[]);
+        let waiting = table_fragment(&state, 1, 0, &[], &[]);
         assert!(waiting.contains("Waiting for"));
 
         state.apply_action(Action::Fold).unwrap();
         state.apply_action(Action::Fold).unwrap();
         assert!(state.is_hand_over());
-        let finished = table_fragment(&state, 1, &[], &[]);
+        let finished = table_fragment(&state, 1, 0, &[], &[]);
         assert!(
             finished.contains(r#"class="pt-win"><b>WIN</b><span>+30</span>"#),
             "the win is shown next to the winner, not in the centre: {finished}"
@@ -1378,6 +1398,41 @@ mod tests {
         assert!(
             !finished.contains(r#"class="pt-wait""#),
             "no waiting pill once the hand is over: {finished}"
+        );
+    }
+
+    #[test]
+    fn the_decision_token_rides_only_on_hero_turn_fragments() {
+        let mut state = GameState::new(Seat::Hero, level());
+        state
+            .start_hand(&mut Deck::shuffled(&mut seeded_rng(35)))
+            .unwrap();
+        assert_ne!(state.to_act(), Seat::Hero);
+        let waiting = table_fragment(&state, 1, 0, &[], &[]);
+        assert!(
+            !waiting.contains("data-decision"),
+            "no decision token while an opponent acts: {waiting}"
+        );
+
+        let mut hero_state = GameState::new(Seat::Hero, level());
+        hero_state
+            .start_hand(&mut Deck::shuffled(&mut seeded_rng(31)))
+            .unwrap();
+        hero_state.apply_action(Action::Call).unwrap();
+        assert_eq!(hero_state.to_act(), Seat::Hero);
+        let hero_turn = table_fragment(&hero_state, 1, 2, &[], &[]);
+        assert!(
+            hero_turn.contains(r#"data-decision="h1-a2-preflop""#),
+            "the decision token names hand, action count, and street: {hero_turn}",
+        );
+
+        state.apply_action(Action::Fold).unwrap();
+        state.apply_action(Action::Fold).unwrap();
+        assert!(state.is_hand_over());
+        let finished = table_fragment(&state, 1, 2, &[], &[]);
+        assert!(
+            !finished.contains("data-decision"),
+            "no decision token once the hand is over: {finished}"
         );
     }
 
@@ -1406,7 +1461,7 @@ mod tests {
         state.apply_action(Action::Call).unwrap();
         assert_eq!(state.to_act(), Seat::Hero);
 
-        let fragment = table_fragment(&state, 2, &[], &[]);
+        let fragment = table_fragment(&state, 2, 0, &[], &[]);
         let oval_marker = fragment.find(r#"<div class="pt-oval""#).unwrap();
         let dock = fragment.find(r#"id="action-panel""#).unwrap();
         assert!(
@@ -1414,7 +1469,7 @@ mod tests {
             "the action panel renders in its own block below the oval: {fragment}"
         );
         assert!(
-            fragment.contains(r#"<div class="pt-action-block"><div id="mcts-status""#)
+            fragment.contains(r#"<div class="pt-action-block" data-decision="h2-a0-preflop"><div id="mcts-status""#)
                 && dock > fragment.find(r#"id="mcts-status""#).unwrap(),
             "the depth badge leads the action block and the panel stays under the oval: {fragment}"
         );
@@ -1427,7 +1482,7 @@ mod tests {
             .start_hand(&mut Deck::shuffled(&mut seeded_rng(39)))
             .unwrap();
         state.apply_action(Action::Call).unwrap();
-        let fragment = table_fragment(&state, 4, &[], &[]);
+        let fragment = table_fragment(&state, 4, 0, &[], &[]);
         assert!(
             !fragment.contains(r#"class="pt-avatar""#),
             "no round avatar icons for any seat: {fragment}"
@@ -1452,7 +1507,7 @@ mod tests {
             "You raise to 60".to_string(),
         ];
 
-        let fragment = table_fragment(&state, 1, &log, &[]);
+        let fragment = table_fragment(&state, 1, 0, &log, &[]);
         let panel = fragment.find(r#"class="pt-hlog""#).unwrap();
         let oval = fragment.find(r#"<div class="pt-oval""#).unwrap();
         assert!(
@@ -1483,7 +1538,7 @@ mod tests {
         state.start_hand(&mut deck).unwrap();
 
         // Blinds count as street bets: the button (hero) posted 10, the BB 20.
-        let fragment = table_fragment(&state, 5, &[], &[]);
+        let fragment = table_fragment(&state, 5, 0, &[], &[]);
         assert!(
             fragment.contains(r#"class="pt-bet">10</div>"#),
             "the small blind shows in front of the hero: {fragment}"
@@ -1495,7 +1550,7 @@ mod tests {
 
         // Opponent 2 raises to 60: their street bet badge reads 60.
         state.apply_action(Action::Raise(60)).unwrap();
-        let raised = table_fragment(&state, 5, &[], &[]);
+        let raised = table_fragment(&state, 5, 0, &[], &[]);
         assert!(
             raised.contains(r#"class="pt-bet">60</div>"#),
             "the raise amount shows in front of the raiser: {raised}"
@@ -1505,7 +1560,7 @@ mod tests {
         state.apply_action(Action::Call).unwrap();
         state.apply_action(Action::Call).unwrap();
         state.advance_street(&mut deck).unwrap();
-        let settled = table_fragment(&state, 5, &[], &[]);
+        let settled = table_fragment(&state, 5, 0, &[], &[]);
         assert!(
             !settled.contains("pt-bet"),
             "street bets are gone once the round closes: {settled}"
@@ -1864,7 +1919,7 @@ mod tests {
         state.showdown(&mut deck).unwrap();
         assert!(state.is_hand_over());
 
-        let fragment = table_fragment(&state, 1, &[], &[]);
+        let fragment = table_fragment(&state, 1, 0, &[], &[]);
         assert!(
             fragment.contains(r#"class="pt-win"><b>WIN</b>"#),
             "winners carry a WIN badge at their seat: {fragment}"

@@ -33,6 +33,7 @@ pub const LIVE_MCTS: MctsConfig = MctsConfig {
     uct_c: 60.0,
     max_depth: 5,
     min_duration: Duration::from_secs(5),
+    max_duration: Duration::from_secs(20),
 };
 
 /// Everything the server needs to run: the bind address, the solver

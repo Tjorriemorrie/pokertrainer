@@ -548,6 +548,26 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
   max-width: 100%;
 }
 
+.pt-dock-wait {
+  display: none;
+  color: var(--muted);
+  font-size: 0.85rem;
+  padding: 0.4rem 0.9rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(10, 16, 22, 0.85);
+}
+
+.pt-action-dock.locked .pt-bet-row,
+.pt-action-dock.locked .pt-slider-row,
+.pt-action-dock.locked .pt-action-row {
+  display: none;
+}
+
+.pt-action-dock.locked .pt-dock-wait {
+  display: block;
+}
+
 .pt-bet-row {
   display: flex;
   gap: 7px;

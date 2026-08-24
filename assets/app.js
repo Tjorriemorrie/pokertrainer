@@ -9,6 +9,7 @@
   let ws = null;
   let retryTimer = null;
   let finished = false;
+  let currentDecision = null;
 
   /* ------------------------------------------------------------- audio */
 
@@ -200,10 +201,17 @@ function setStatus(text, cls) {
   }
 
   function resetSolverStatus() {
+    currentDecision = null;
+    setDockLocked(true);
     const mctsEl = document.getElementById("mcts-status");
     if (!mctsEl) return;
     mctsEl.textContent = "solver idle";
     mctsEl.className = "mcts-status status-bad";
+  }
+
+  function setDockLocked(locked) {
+    const dock = document.getElementById("action-panel");
+    if (dock) dock.classList.toggle("locked", locked);
   }
 
   function sendAction(kind, extra) {
@@ -378,6 +386,9 @@ function setStatus(text, cls) {
       case "TABLE_STATE_UPDATE":
         swap(table, msg.fragment);
         bindDock();
+        const block = document.querySelector("#table-state .pt-action-block");
+        currentDecision = block ? (block.dataset.decision || null) : null;
+        setDockLocked(true);
         const shell = document.getElementById("table-state");
         if (shell && shell.dataset.sounds) {
           try {
@@ -403,7 +414,13 @@ case "CHART_SNAPSHOT":
         drawChart();
         break;
       case "SEARCH_STATUS":
+        if (!currentDecision || msg.decision !== currentDecision) {
+          break;
+        }
         setSolverStatus(msg);
+        if (msg.phase === "READY") {
+          setDockLocked(false);
+        }
         break;
       case "TOURNAMENT_FINISHED":
         finished = true;

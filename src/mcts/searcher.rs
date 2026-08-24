@@ -50,8 +50,9 @@ pub enum SearcherPhase {
     /// The iteration budget is reached but the minimum think time has not
     /// elapsed yet — the search keeps deepening.
     DepthReached,
-    /// Both the budget and the minimum think time are met: the search idles
-    /// until the next decision.
+    /// Both the budget and the minimum think time are met; the search keeps
+    /// deepening until the wall budget ([`MctsConfig::max_duration`]) has
+    /// elapsed and then idles until the next decision.
     Ready,
 }
 
@@ -67,23 +68,28 @@ impl SearcherPhase {
 
 /// The latest combined snapshot plus the progress the client renders in the
 /// action dock's solver-depth badge. Published after every work chunk.
+/// `decision` names the hero decision this status belongs to, so the client
+/// can ignore stale updates queued behind a reshaped search.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SearcherStatus {
     pub result: SolveResult,
     pub iterations_done: u64,
     pub target_iterations: u64,
     pub phase: SearcherPhase,
+    pub decision: String,
 }
 
 /// Commands fed to the background solver task over its channel.
 pub enum SearchCommand {
     /// Re-root the search at the given decision point; `path` carries the
     /// played hero action and the opponents' replies when the decision
-    /// follows a submission.
+    /// follows a submission. `decision` is the decision token echoed back in
+    /// every status published for this root.
     Reshape {
         state: Box<GameState>,
         path: Option<PursuedPath>,
         hand_no: u64,
+        decision: String,
     },
     /// Shut the worker down.
     Stop,
@@ -98,7 +104,9 @@ pub const CHUNK_WALL: Duration = Duration::from_millis(45);
 /// action reshapes the existing trees instead of discarding them. Worlds are
 /// sampled per street-advance/hand (they must stay consistent with the
 /// board); within one betting round the arenas themselves just follow the
-/// played path.
+/// played path. Every decision keeps searching until its wall budget
+/// ([`MctsConfig::max_duration`]) has elapsed — the iteration target marks
+/// the [`SearcherPhase::Ready`] transition, not the end of the work.
 pub struct Searcher {
     worlds: Vec<World>,
     searches: Vec<WorldSearch>,
@@ -107,6 +115,7 @@ pub struct Searcher {
     config: MctsConfig,
     budget: MctsConfig,
     hand_no: u64,
+    decision: String,
     epoch: u64,
     sweeps: u64,
     target: u64,
@@ -116,11 +125,14 @@ pub struct Searcher {
 impl Searcher {
     /// Builds a searcher rooted at `state` (the hero's decision point), with
     /// worlds sampled from the opponent ranges for the current street.
+    /// `decision` names the decision so progress statuses can be matched to
+    /// the on-screen state.
     pub fn build(
         state: &GameState,
         ranges: [Range; 2],
         config: MctsConfig,
         hand_no: u64,
+        decision: &str,
         rng: &mut SeededRng,
     ) -> Result<Self> {
         let budget = config.for_street(state.street());
@@ -133,6 +145,7 @@ impl Searcher {
             config,
             budget,
             hand_no,
+            decision: decision.to_string(),
             epoch: 0,
             sweeps: 0,
             target: budget.iterations as u64,
@@ -147,11 +160,11 @@ impl Searcher {
         self.hand_no
     }
 
-    /// Whether work remains before the current decision's budget is met: the
-    /// iteration target must be reached and the minimum think time must have
-    /// elapsed.
+    /// Whether the current decision's wall budget has not elapsed yet: work
+    /// continues while it is true, regardless of the iteration target (the
+    /// target only decides when the badge turns green).
     pub fn needs_work(&self) -> bool {
-        self.sweeps < self.target || self.started.elapsed() < self.config.min_duration
+        self.started.elapsed() < self.config.max_duration
     }
 
     /// Re-roots the search at `state`, the hero's next decision point. With a
@@ -160,15 +173,24 @@ impl Searcher {
     /// represent the path (an unexpanded edge) keep their world but rebuild
     /// their tree; when the board itself changed (a street was dealt), the
     /// worlds are resampled so opponent holdings never clash with the felt.
-    /// A new hand resamples everything.
+    /// A new hand resamples everything. `decision` names the new decision.
     pub fn reshape(
         &mut self,
         state: &GameState,
         path: Option<&PursuedPath>,
         hand_no: u64,
+        decision: &str,
     ) -> Result<ReshapeReport> {
+        self.decision = decision.to_string();
         if hand_no != self.hand_no || path.is_none() || self.worlds.is_empty() {
-            let mut rebuilt = Self::build(state, self.ranges, self.config, hand_no, &mut self.rng)?;
+            let mut rebuilt = Self::build(
+                state,
+                self.ranges,
+                self.config,
+                hand_no,
+                decision,
+                &mut self.rng,
+            )?;
             rebuilt.epoch = self.epoch + 1;
             *self = rebuilt;
             return Ok(ReshapeReport {
@@ -269,9 +291,10 @@ impl Searcher {
     }
 
     /// Runs one bounded chunk of work: full arena sweeps (one root visit per
-    /// world) until the wall budget or the iteration target is reached.
-    /// Returns the status worth publishing, or `None` when there was nothing
-    /// to do.
+    /// world) until the chunk's wall deadline is reached. Returns the status
+    /// worth publishing, or `None` once the decision's wall budget
+    /// ([`MctsConfig::max_duration`]) has elapsed and there is nothing left to
+    /// do.
     pub fn run_chunk(&mut self, wall: Duration) -> Result<Option<SearcherStatus>> {
         if !self.needs_work() {
             return Ok(None);
@@ -343,11 +366,14 @@ impl Searcher {
             iterations_done: self.sweeps,
             target_iterations: self.target,
             phase: self.phase(),
+            decision: self.decision.clone(),
         })
     }
 
     /// The lifecycle phase of the current decision: still searching, depth
-    /// reached but the minimum think time not yet elapsed, or fully done.
+    /// reached but the minimum think time not yet elapsed, or fully ready
+    /// (the badge turns green while the search keeps deepening until its
+    /// wall budget).
     fn phase(&self) -> SearcherPhase {
         let depth_reached = self.sweeps >= self.target;
         let time_met = self.started.elapsed() >= self.config.min_duration;
@@ -408,6 +434,21 @@ mod tests {
         [[1.0 / HAND_COUNT as f32; HAND_COUNT]; 2]
     }
 
+    /// The decision token shared by preflop decision tests.
+    const TOKEN: &str = "h1-a0-preflop";
+
+    /// The token of the reshaped decision in tests that follow a played path.
+    const NEXT_TOKEN: &str = "h1-a1-preflop";
+
+    /// A fast preset whose tiny iteration target is reached well inside the
+    /// wall budget even on slow, instrumented test runs.
+    fn quick_config() -> MctsConfig {
+        MctsConfig {
+            iterations: 4,
+            ..MctsConfig::test()
+        }
+    }
+
     /// Hero posts the small blind on Opponent 1's button; Opponent 2 calls so
     /// the hero is first to face the big blind.
     fn preflop_decision() -> GameState {
@@ -449,8 +490,15 @@ mod tests {
     fn build_ships_a_valid_snapshot_covering_every_candidate() {
         let state = preflop_decision();
         let mut rng = seeded_rng(102);
-        let searcher =
-            Searcher::build(&state, uniform_ranges(), MctsConfig::test(), 1, &mut rng).unwrap();
+        let searcher = Searcher::build(
+            &state,
+            uniform_ranges(),
+            MctsConfig::test(),
+            1,
+            TOKEN,
+            &mut rng,
+        )
+        .unwrap();
         let status = searcher.status().unwrap();
         let result = &status.result;
         assert_eq!(
@@ -469,36 +517,71 @@ mod tests {
         }
         assert_eq!(status.iterations_done, 0);
         assert_eq!(status.phase, SearcherPhase::Searching);
+        assert_eq!(status.decision, TOKEN, "the decision token is echoed");
     }
 
     #[test]
-    fn chunks_advance_progress_monotonically_to_ready() {
+    fn chunks_advance_progress_monotonically_until_the_wall_budget() {
         let state = preflop_decision();
         let mut rng = seeded_rng(103);
         let mut searcher =
-            Searcher::build(&state, uniform_ranges(), MctsConfig::test(), 1, &mut rng).unwrap();
+            Searcher::build(&state, uniform_ranges(), quick_config(), 1, TOKEN, &mut rng).unwrap();
         let mut previous = 0u64;
         let mut progressed = false;
+        let mut saw_ready = false;
         while let Some(status) = searcher.run_chunk(Duration::from_millis(5)).unwrap() {
+            assert_eq!(status.decision, TOKEN, "every status names its decision");
             assert!(status.iterations_done > previous);
+            if previous >= searcher.target {
+                assert_eq!(
+                    status.phase,
+                    SearcherPhase::Ready,
+                    "past the target the badge stays green while work continues"
+                );
+                saw_ready = true;
+            }
             previous = status.iterations_done;
             progressed = true;
-            if previous >= searcher.target {
-                assert_eq!(status.phase, SearcherPhase::Ready);
-                break;
-            }
         }
         assert!(progressed, "at least one chunk ran");
-        assert!(
-            matches!(searcher.status().unwrap().phase, SearcherPhase::Ready),
-            "the search reaches its target"
-        );
+        assert!(saw_ready, "the search reached its iteration target");
         assert!(
             searcher
                 .run_chunk(Duration::from_millis(5))
                 .unwrap()
                 .is_none(),
-            "a ready search has nothing left to do"
+            "once the wall budget has elapsed the search idles"
+        );
+    }
+
+    #[test]
+    fn a_ready_search_keeps_refining_past_the_target() {
+        let state = preflop_decision();
+        let mut rng = seeded_rng(107);
+        let mut searcher =
+            Searcher::build(&state, uniform_ranges(), quick_config(), 1, TOKEN, &mut rng).unwrap();
+        let mut status = None;
+        for _ in 0..500 {
+            let chunk = searcher.run_chunk(Duration::from_millis(5)).unwrap();
+            let Some(chunk) = chunk else {
+                break;
+            };
+            if chunk.phase == SearcherPhase::Ready {
+                status = Some(chunk);
+                break;
+            }
+        }
+        let status = status.expect("the search turns green before the wall budget");
+        let ready_sweeps = status.iterations_done;
+        assert!(ready_sweeps >= searcher.target);
+        let later = searcher
+            .run_chunk(Duration::from_millis(5))
+            .unwrap()
+            .expect("the wall budget has not elapsed yet");
+        assert_eq!(later.phase, SearcherPhase::Ready);
+        assert!(
+            later.iterations_done > ready_sweeps,
+            "a ready search keeps deepening beyond the target"
         );
     }
 
@@ -511,7 +594,8 @@ mod tests {
             min_duration: Duration::from_secs(3600),
             ..MctsConfig::test()
         };
-        let mut searcher = Searcher::build(&state, uniform_ranges(), config, 1, &mut rng).unwrap();
+        let mut searcher =
+            Searcher::build(&state, uniform_ranges(), config, 1, TOKEN, &mut rng).unwrap();
         let status = searcher
             .run_chunk(Duration::from_millis(5))
             .unwrap()
@@ -523,8 +607,14 @@ mod tests {
         );
         assert!(
             searcher.needs_work(),
-            "the minimum think time keeps the search working"
+            "the wall budget keeps the search working after the target"
         );
+        let deeper = searcher
+            .run_chunk(Duration::from_millis(5))
+            .unwrap()
+            .expect("more chunks arrive while the wall budget lasts");
+        assert_eq!(deeper.phase, SearcherPhase::DepthReached);
+        assert!(deeper.iterations_done > status.iterations_done);
     }
 
     #[test]
@@ -532,11 +622,11 @@ mod tests {
         let state = preflop_decision();
         let mut rng = seeded_rng(104);
         let mut searcher =
-            Searcher::build(&state, uniform_ranges(), MctsConfig::test(), 1, &mut rng).unwrap();
+            Searcher::build(&state, uniform_ranges(), quick_config(), 1, TOKEN, &mut rng).unwrap();
         // Spend a few sweeps so the arenas have history worth keeping.
         let _ = searcher.run_chunk(Duration::from_millis(20)).unwrap();
         let (next, path) = raised_decision();
-        let report = searcher.reshape(&next, Some(&path), 1).unwrap();
+        let report = searcher.reshape(&next, Some(&path), 1, NEXT_TOKEN).unwrap();
         assert_eq!(
             report,
             ReshapeReport {
@@ -546,6 +636,11 @@ mod tests {
             "the whole played path lives inside the expanded trees"
         );
         assert_eq!(searcher.hand_no(), 1);
+        assert_eq!(
+            searcher.status().unwrap().decision,
+            NEXT_TOKEN,
+            "statuses follow the reshaped decision token"
+        );
         assert_eq!(
             searcher.status().unwrap().iterations_done,
             0,
@@ -560,7 +655,10 @@ mod tests {
         }
         // Keep searching from the promoted root: it still converges.
         let mut previous = 0u64;
-        while let Some(status) = searcher.run_chunk(Duration::from_millis(5)).unwrap() {
+        for _ in 0..500 {
+            let Some(status) = searcher.run_chunk(Duration::from_millis(5)).unwrap() else {
+                break;
+            };
             assert!(status.iterations_done >= previous);
             previous = status.iterations_done;
             if previous >= searcher.target {
@@ -578,27 +676,43 @@ mod tests {
     fn a_mismatched_state_rebuilds_arenas_but_keeps_the_worlds() {
         let state = preflop_decision();
         let mut rng = seeded_rng(105);
-        let mut searcher =
-            Searcher::build(&state, uniform_ranges(), MctsConfig::test(), 1, &mut rng).unwrap();
+        let mut searcher = Searcher::build(
+            &state,
+            uniform_ranges(),
+            MctsConfig::test(),
+            1,
+            TOKEN,
+            &mut rng,
+        )
+        .unwrap();
         let (mut next, path) = raised_decision();
         next.set_stack(Seat::Hero, next.stack(Seat::Hero) - 10);
         let worlds = searcher.worlds.len();
-        let report = searcher.reshape(&next, Some(&path), 1).unwrap();
+        let report = searcher.reshape(&next, Some(&path), 1, NEXT_TOKEN).unwrap();
         assert_eq!(report.followed, 0, "stack mismatch cannot follow");
         assert_eq!(report.rebuilt, worlds);
+        assert_eq!(searcher.status().unwrap().decision, NEXT_TOKEN);
     }
 
     #[test]
     fn a_new_hand_resamples_everything() {
         let state = preflop_decision();
         let mut rng = seeded_rng(106);
-        let mut searcher =
-            Searcher::build(&state, uniform_ranges(), MctsConfig::test(), 1, &mut rng).unwrap();
+        let mut searcher = Searcher::build(
+            &state,
+            uniform_ranges(),
+            MctsConfig::test(),
+            1,
+            TOKEN,
+            &mut rng,
+        )
+        .unwrap();
         let hand2 = preflop_decision();
-        let report = searcher.reshape(&hand2, None, 2).unwrap();
+        let report = searcher.reshape(&hand2, None, 2, "h2-a0-preflop").unwrap();
         assert_eq!(report.followed, 0);
         assert!(report.rebuilt >= 1);
         assert_eq!(searcher.hand_no(), 2);
+        assert_eq!(searcher.status().unwrap().decision, "h2-a0-preflop");
         let result = searcher.status().unwrap().result;
         for candidate in candidates(&hand2) {
             assert!(result.actions.iter().any(|v| v.action == candidate.0));
@@ -614,8 +728,15 @@ mod tests {
         state.apply_action(Action::Call).unwrap();
         assert_eq!(state.to_act(), Seat::Hero);
         let mut rng = seeded_rng(991);
-        let mut searcher =
-            Searcher::build(&state, uniform_ranges(), MctsConfig::test(), 1, &mut rng).unwrap();
+        let mut searcher = Searcher::build(
+            &state,
+            uniform_ranges(),
+            MctsConfig::test(),
+            1,
+            TOKEN,
+            &mut rng,
+        )
+        .unwrap();
         let _ = searcher.run_chunk(Duration::from_millis(20)).unwrap();
         // Hero calls, Opponent 1 (BB) checks; the flop is dealt and reached
         // by the opponent pump with the hero last to act.
@@ -650,6 +771,7 @@ mod tests {
                     opponent_actions,
                 }),
                 1,
+                "h1-a1-flop",
             )
             .unwrap();
         assert_eq!(
@@ -657,7 +779,10 @@ mod tests {
             searcher.worlds.len(),
             "street change rebuilds"
         );
-        while searcher.needs_work() {
+        for _ in 0..50 {
+            if !searcher.needs_work() {
+                break;
+            }
             searcher.run_chunk(Duration::from_millis(5)).unwrap();
         }
         let status = searcher.status().unwrap();

@@ -25,6 +25,10 @@ pub struct MctsConfig {
     /// Minimum wall-clock time a decision keeps searching, even after the
     /// iteration budget is reached, so the tree has time to grow deeper.
     pub min_duration: Duration,
+    /// Maximum wall-clock time one decision keeps searching before the worker
+    /// idles; the tree keeps deepening beyond the iteration budget until this
+    /// budget elapses (or the player acts).
+    pub max_duration: Duration,
 }
 
 impl Default for MctsConfig {
@@ -35,6 +39,7 @@ impl Default for MctsConfig {
             uct_c: 60.0,
             max_depth: 6,
             min_duration: Duration::from_secs(5),
+            max_duration: Duration::from_secs(20),
         }
     }
 }
@@ -48,6 +53,7 @@ impl MctsConfig {
             uct_c: 40.0,
             max_depth: 3,
             min_duration: Duration::ZERO,
+            max_duration: Duration::from_secs(1),
         }
     }
 
@@ -65,6 +71,11 @@ impl MctsConfig {
         if !self.uct_c.is_finite() || self.uct_c <= 0.0 {
             return Err(Error::InvalidConfig(
                 "mcts: `uct_c` must be positive and finite".into(),
+            ));
+        }
+        if self.max_duration < self.min_duration {
+            return Err(Error::InvalidConfig(
+                "mcts: `max_duration` must not be shorter than `min_duration`".into(),
             ));
         }
         Ok(())
@@ -116,6 +127,11 @@ mod tests {
             Duration::from_secs(5),
             "live searches keep thinking for at least five seconds"
         );
+        assert_eq!(
+            MctsConfig::default().max_duration,
+            Duration::from_secs(20),
+            "live searches keep deepening for at most twenty seconds"
+        );
     }
 
     #[test]
@@ -128,6 +144,10 @@ mod tests {
             config.min_duration,
             Duration::ZERO,
             "tests skip the minimum-duration wait"
+        );
+        assert!(
+            config.max_duration >= config.min_duration,
+            "the test wall budget covers the minimum think time"
         );
     }
 
@@ -161,6 +181,20 @@ mod tests {
     }
 
     #[test]
+    fn a_wall_budget_shorter_than_the_minimum_think_time_is_rejected() {
+        let config = MctsConfig {
+            max_duration: Duration::from_secs(1),
+            ..MctsConfig::default()
+        };
+        assert!(matches!(config.validate(), Err(Error::InvalidConfig(_))));
+        let ok = MctsConfig {
+            max_duration: MctsConfig::default().min_duration,
+            ..MctsConfig::default()
+        };
+        assert!(ok.validate().is_ok(), "an equal wall budget is accepted");
+    }
+
+    #[test]
     fn street_budgets_scale_effort_where_the_branching_is() {
         let base = MctsConfig {
             worlds: 10,
@@ -168,6 +202,7 @@ mod tests {
             uct_c: 60.0,
             max_depth: 3,
             min_duration: Duration::ZERO,
+            max_duration: Duration::from_secs(20),
         };
 
         let preflop = base.for_street(crate::game::Street::Preflop);

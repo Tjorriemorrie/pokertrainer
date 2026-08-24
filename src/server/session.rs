@@ -195,6 +195,29 @@ impl TableSession {
         self.hand_no
     }
 
+    /// The number of hero submissions applied (or intercepted) so far this
+    /// session — part of the decision token.
+    pub fn action_no(&self) -> u64 {
+        self.action_no
+    }
+
+    /// The identity of the decision currently on screen: hand, hero actions
+    /// applied, and street. It is `Some` only when the hero is the one to act
+    /// in a live hand — exactly the states that render the action dock — and
+    /// changes whenever the decision does, so the client can tell fresh
+    /// solver statuses apart from stale ones queued behind a reshaped search.
+    pub fn decision_token(&self) -> Option<String> {
+        if self.state.is_hand_over() || self.state.to_act() != Seat::Hero {
+            return None;
+        }
+        Some(format!(
+            "h{}-a{}-{}",
+            self.hand_no,
+            self.action_no,
+            self.state.street().to_string().to_lowercase()
+        ))
+    }
+
     pub fn log(&self) -> &[String] {
         &self.log
     }
@@ -1027,6 +1050,41 @@ mod tests {
         assert!(!session.pump().unwrap());
         assert_eq!(session.state().to_act(), Seat::Hero);
         assert_eq!(session.hand_no(), 3);
+    }
+
+    #[test]
+    fn decision_token_tracks_the_on_screen_decision() {
+        let state = river_facing_bet();
+        let mut session = TableSession::resume(
+            state,
+            Deck::default(),
+            3,
+            47,
+            probe_config(),
+            survival(),
+            never_intercepts(),
+        );
+        assert_eq!(session.action_no(), 0);
+        assert_eq!(
+            session.decision_token().as_deref(),
+            Some("h3-a0-river"),
+            "hand, action count, and street name the current decision"
+        );
+
+        session.submit(Action::Call).unwrap();
+        assert_eq!(
+            session.decision_token(),
+            None,
+            "no decision token while the hand result shows"
+        );
+        assert_eq!(session.action_no(), 1);
+
+        session.advance_after_result().unwrap();
+        assert_eq!(
+            session.decision_token().as_deref(),
+            Some("h4-a1-preflop"),
+            "the next hand starts a fresh preflop decision"
+        );
     }
 
     #[test]

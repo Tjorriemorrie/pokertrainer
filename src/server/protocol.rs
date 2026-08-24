@@ -60,7 +60,9 @@ pub enum ServerMessage {
     /// The background solver's live progress for the current hero decision:
     /// how many of the street-scaled iterations are done and how deep the
     /// tree has grown, so the action dock can show a depth badge that turns
-    /// green as the search approaches its budget.
+    /// green as the search approaches its budget. `decision` names the hero
+    /// decision the numbers belong to, so the client can ignore statuses
+    /// queued behind an earlier decision.
     SearchStatus {
         iterations_done: u64,
         target_iterations: u64,
@@ -68,6 +70,7 @@ pub enum ServerMessage {
         max_depth: usize,
         nodes: u64,
         phase: SearchPhase,
+        decision: String,
     },
     /// The table was finished (`FINISH_TABLE`); the client navigates to the
     /// given page.
@@ -89,8 +92,8 @@ pub enum SearchPhase {
     /// The iteration budget is reached but the minimum think time has not
     /// elapsed yet — the search keeps deepening.
     DepthReached,
-    /// Both the budget and the minimum think time are met; the search idles
-    /// until the next decision.
+    /// Both the budget and the minimum think time are met; the search keeps
+    /// deepening until the wall budget has elapsed and then idles.
     Ready,
 }
 
@@ -462,10 +465,11 @@ mod tests {
                 max_depth: 5,
                 nodes: 412,
                 phase: SearchPhase::Searching,
+                decision: "h1-a0-preflop".into(),
             }
             .to_json()
             .unwrap(),
-            r#"{"type":"SEARCH_STATUS","iterations_done":32,"target_iterations":64,"tree_depth":3,"max_depth":5,"nodes":412,"phase":"SEARCHING"}"#
+            r#"{"type":"SEARCH_STATUS","iterations_done":32,"target_iterations":64,"tree_depth":3,"max_depth":5,"nodes":412,"phase":"SEARCHING","decision":"h1-a0-preflop"}"#
         );
         assert_eq!(
             ServerMessage::SearchStatus {
@@ -475,10 +479,11 @@ mod tests {
                 max_depth: 5,
                 nodes: 900,
                 phase: SearchPhase::DepthReached,
+                decision: "h1-a0-preflop".into(),
             }
             .to_json()
             .unwrap(),
-            r#"{"type":"SEARCH_STATUS","iterations_done":64,"target_iterations":64,"tree_depth":5,"max_depth":5,"nodes":900,"phase":"DEPTH_REACHED"}"#
+            r#"{"type":"SEARCH_STATUS","iterations_done":64,"target_iterations":64,"tree_depth":5,"max_depth":5,"nodes":900,"phase":"DEPTH_REACHED","decision":"h1-a0-preflop"}"#
         );
         assert_eq!(
             ServerMessage::SearchStatus {
@@ -488,10 +493,11 @@ mod tests {
                 max_depth: 5,
                 nodes: 900,
                 phase: SearchPhase::Ready,
+                decision: "h1-a1-flop".into(),
             }
             .to_json()
             .unwrap(),
-            r#"{"type":"SEARCH_STATUS","iterations_done":64,"target_iterations":64,"tree_depth":5,"max_depth":5,"nodes":900,"phase":"READY"}"#
+            r#"{"type":"SEARCH_STATUS","iterations_done":64,"target_iterations":64,"tree_depth":5,"max_depth":5,"nodes":900,"phase":"READY","decision":"h1-a1-flop"}"#
         );
         assert_eq!(
             ServerMessage::SessionFinished {

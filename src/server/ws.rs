@@ -86,6 +86,7 @@ async fn handle_socket(socket: WebSocket, app: Arc<AppState>) {
         state: Box::new(observable_clone(session.state())),
         path: None,
         hand_no: session.hand_no(),
+        decision: session.decision_token().unwrap_or_default(),
     });
 
     let mut latest_snapshot: Option<crate::mcts::SolveResult> = None;
@@ -150,6 +151,7 @@ async fn handle_socket(socket: WebSocket, app: Arc<AppState>) {
                                 opponent_actions: session.take_pump_actions(),
                             }),
                             hand_no: session.hand_no(),
+                            decision: session.decision_token().unwrap_or_default(),
                         });
                     } else {
                         session.take_pump_actions();
@@ -170,6 +172,7 @@ async fn handle_socket(socket: WebSocket, app: Arc<AppState>) {
                         state: Box::new(observable_clone(session.state())),
                         path: None,
                         hand_no: session.hand_no(),
+                        decision: session.decision_token().unwrap_or_default(),
                     });
                     // The freshly dealt hand can play itself out entirely when
                     // the hero is out (the opponents keep acting), so the
@@ -234,7 +237,7 @@ async fn run_searcher(
     ranges: [Range; 2],
 ) {
     let mut search: Option<Searcher> = None;
-    let mut pending: Option<(Box<GameState>, Option<PursuedPath>, u64)> = None;
+    let mut pending: Option<(Box<GameState>, Option<PursuedPath>, u64, String)> = None;
 
     loop {
         let mut stop = false;
@@ -245,8 +248,9 @@ async fn run_searcher(
                     state,
                     path,
                     hand_no,
+                    decision,
                 } => {
-                    pending = Some((state, path, hand_no));
+                    pending = Some((state, path, hand_no, decision));
                 }
             }
         }
@@ -255,15 +259,16 @@ async fn run_searcher(
         }
 
         if search.is_none() {
-            let Some((state, _, hand_no)) = pending.take() else {
+            let Some((state, _, hand_no, decision)) = pending.take() else {
                 match commands.recv().await {
                     Some(SearchCommand::Stop) | None => return,
                     Some(SearchCommand::Reshape {
                         state,
                         path,
                         hand_no,
+                        decision,
                     }) => {
-                        pending = Some((state, path, hand_no));
+                        pending = Some((state, path, hand_no, decision));
                     }
                 }
                 continue;
@@ -274,6 +279,7 @@ async fn run_searcher(
                     ranges,
                     config,
                     hand_no,
+                    &decision,
                     &mut crate::rng::seeded_rng(rand::random::<u64>()),
                 )
             })
@@ -307,8 +313,9 @@ async fn run_searcher(
                     state,
                     path,
                     hand_no,
+                    decision,
                 }) => {
-                    pending = Some((state, path, hand_no));
+                    pending = Some((state, path, hand_no, decision));
                 }
             }
         }
@@ -318,8 +325,8 @@ async fn run_searcher(
         let updates = updates.clone();
         let outcome = tokio::task::spawn_blocking(move || -> Result<Searcher> {
             let mut active = active;
-            if let Some((state, path, hand_no)) = reshape {
-                active.reshape(&state, path.as_ref(), hand_no)?;
+            if let Some((state, path, hand_no, decision)) = reshape {
+                active.reshape(&state, path.as_ref(), hand_no, &decision)?;
             }
             if active.needs_work() {
                 let _ = active.run_chunk(CHUNK_WALL)?;
@@ -363,6 +370,7 @@ fn search_status_message(status: &SearcherStatus) -> String {
         max_depth: status.result.max_depth,
         nodes: status.result.nodes as u64,
         phase,
+        decision: status.decision.clone(),
     })
     .to_json()
     {
@@ -522,7 +530,13 @@ fn bootstrap(session: &mut TableSession) -> Result<()> {
 fn state_message(session: &mut TableSession) -> Result<String> {
     let sounds = session.take_sounds();
     ServerMessage::TableStateUpdate {
-        fragment: views::table_fragment(session.state(), session.hand_no(), session.log(), &sounds),
+        fragment: views::table_fragment(
+            session.state(),
+            session.hand_no(),
+            session.action_no(),
+            session.log(),
+            &sounds,
+        ),
     }
     .to_json()
 }
@@ -675,6 +689,7 @@ fn events_to_messages(session: &mut TableSession, events: Vec<TableEvent>) -> Ve
                     fragment: views::table_fragment(
                         session.state(),
                         session.hand_no(),
+                        session.action_no(),
                         session.log(),
                         &sounds,
                     ),
@@ -815,6 +830,7 @@ mod tests {
                 state: Box::new(observable_clone(&state)),
                 path: None,
                 hand_no: 1,
+                decision: "h1-a0-preflop".into(),
             })
             .unwrap();
         let task = tokio::spawn(run_searcher(
@@ -848,6 +864,7 @@ mod tests {
                 state: Box::new(observable_clone(&state)),
                 path: None,
                 hand_no: 1,
+                decision: "h1-a0-preflop".into(),
             })
             .unwrap();
         let task = tokio::spawn(run_searcher(
@@ -864,6 +881,7 @@ mod tests {
                 state: Box::new(observable_clone(&state)),
                 path: None,
                 hand_no: 2,
+                decision: "h2-a0-preflop".into(),
             })
             .unwrap();
         let status = tokio::time::timeout(Duration::from_secs(5), update_rx.recv())
@@ -887,6 +905,7 @@ mod tests {
                 state: Box::new(observable_clone(&state)),
                 path: None,
                 hand_no: 1,
+                decision: "h1-a0-preflop".into(),
             })
             .unwrap();
         run_searcher(command_rx, update_tx, MctsConfig::test(), dead_ranges).await;
@@ -909,6 +928,7 @@ mod tests {
                 state: Box::new(observable_clone(&state)),
                 path: None,
                 hand_no: 1,
+                decision: "h1-a0-preflop".into(),
             })
             .unwrap();
         let status = tokio::time::timeout(Duration::from_secs(5), update_rx.recv())
@@ -930,6 +950,7 @@ mod tests {
                 state: Box::new(observable_clone(&state)),
                 path: None,
                 hand_no: 1,
+                decision: "h1-a0-preflop".into(),
             })
             .unwrap();
         let task = tokio::spawn(run_searcher(
@@ -954,6 +975,7 @@ mod tests {
                 state: Box::new(observable_clone(&state)),
                 path: None,
                 hand_no: 2,
+                decision: "h2-a0-preflop".into(),
             })
             .unwrap();
         let status = tokio::time::timeout(Duration::from_secs(5), update_rx.recv())
@@ -1426,12 +1448,14 @@ mod tests {
                 iterations_done: 1,
                 target_iterations: 1,
                 phase,
+                decision: "h1-a0-preflop".into(),
             };
             let json = parse(&search_status_message(&status));
             assert_eq!(json["phase"], tag);
             assert_eq!(json["iterations_done"], 1);
             assert_eq!(json["tree_depth"], 1);
             assert_eq!(json["max_depth"], 1);
+            assert_eq!(json["decision"], "h1-a0-preflop");
         }
     }
 

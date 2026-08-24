@@ -46,8 +46,14 @@ interface and coaches decision-making with a range-based solver.
   iterations run (in thousands). It turns **red** while the search is still
   working toward its depth budget, **orange** once the depth is reached but
   the minimum think time (five seconds) has not elapsed yet, and **green**
-  when both are met. The solver keeps deepening for at least five seconds
-  per decision, so the tree has time to grow past a shallow early budget.
+  when both are met. The solver does not stop at green: it keeps deepening
+  the tree until the decision's wall budget (20 seconds) has elapsed or the
+  player acts, whichever comes first. Until the badge is green the action
+  dock is **locked** — its buttons are hidden behind a "simulating" hint so
+  you can never click an action the search has not finished evaluating.
+  Every status frame carries the decision it belongs to (hand, action count,
+  street), so stale updates queued behind a reshaped tree can never paint
+  the wrong badge or unlock the dock early.
 - **Decision layer:** validates player-submitted actions (including
   off-bucket bet-slider amounts) and evaluates them against the optimal
   action. Because only first place pays, "optimal" maximizes a survivability
@@ -74,8 +80,9 @@ interface and coaches decision-making with a range-based solver.
   - Server → Client `CHART_TICK`: one evaluated action appended to the
     top-bar EV curve.
   - Server → Client `SEARCH_STATUS`: the background solver's live progress
-    (iterations done, realized tree depth, nodes, phase) that drives the
-    depth badge in the action dock.
+    (iterations done, realized tree depth, nodes, phase, and the decision
+    token it belongs to) that drives the depth badge and the action-dock
+    lock in the UI.
 
   Each connection owns a live table session that drives the opponents with a
   simple placeholder policy, runs the survivability solver on your
@@ -219,9 +226,11 @@ followed by `pokertrainer table server listening`.
 Open <http://127.0.0.1:8744> in a browser (change `SERVER_ADDR` in `.env` to
 serve elsewhere). The table deals automatically — you'll hear the cards land
 and the chips move (mute with 🔊 if you prefer silence). When the action dock
-appears, either click a sizing chip and the red **Bet/Raise** button, fine-tune
-the slider with the mouse wheel, or press **Fold** / **Call** outright — every
-amount is in chips. Every decision is charted in the top bar; serious blunders
+appears it starts locked while the background solver simulates; the controls
+unlock the moment the depth badge turns green (about five seconds per
+decision). Then either click a sizing chip and the red **Bet/Raise** button,
+fine-tune the slider with the mouse wheel, or press **Fold** / **Call**
+outright — every amount is in chips. Every decision is charted in the top bar; serious blunders
 pause the table and render the played-vs-optimal breakdown in the **coach
 feedback** panel to the right of the felt — press **Continue** and the coach
 plays the best-EV action for you. Invalid clicks and reconnects are handled
