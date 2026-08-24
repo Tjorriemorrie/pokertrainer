@@ -613,7 +613,7 @@ impl TableSession {
         });
         match result.reason {
             HandEndReason::Fold(winner) => {
-                self.log_line(format!("{winner} win {total} — everyone else folded"));
+                self.log_line(format!("{winner} wins {total} — everyone else folded"));
                 tracing::info!(
                     hand_no = self.hand_no,
                     winner = %winner,
@@ -626,12 +626,22 @@ impl TableSession {
                 for (seat, cards, class) in &result.revealed {
                     self.log_line(format!("{seat} shows {} {} ({class})", cards[0], cards[1]));
                 }
-                let winners: Vec<String> = result
-                    .awards
-                    .iter()
-                    .map(|award| format!("{} +{}", award.seat, award.amount))
-                    .collect();
-                self.log_line(format!("Showdown · {}", winners.join(" · ")));
+                if let [award] = result.awards.as_slice() {
+                    let class_text = result
+                        .revealed
+                        .iter()
+                        .find(|(seat, _, _)| *seat == award.seat)
+                        .map(|(_, _, class)| format!(" with {class}"))
+                        .unwrap_or_default();
+                    self.log_line(format!("{} wins {}{class_text}", award.seat, award.amount));
+                } else {
+                    let shares: Vec<String> = result
+                        .awards
+                        .iter()
+                        .map(|award| format!("{} +{}", award.seat, award.amount))
+                        .collect();
+                    self.log_line(format!("Split pot · {}", shares.join(" · ")));
+                }
                 tracing::info!(
                     hand_no = self.hand_no,
                     pot = total,
@@ -1409,8 +1419,9 @@ mod tests {
         assert_eq!(session.log().last().unwrap(), "final");
     }
 
-    /// At showdown every revealed hand is logged, followed by the winner's
-    /// payout, so the action log tells the whole story of the hand.
+    /// At showdown every revealed hand is logged, followed by a line stating
+    /// the winner (with the winning hand class) or the split-pot shares, so
+    /// the action log tells the whole story of the hand.
     #[test]
     fn showdown_logs_revealed_cards_and_winner_amount() {
         let mut session = TableSession::resume(
@@ -1429,8 +1440,35 @@ mod tests {
             "revealed cards are logged at showdown: {log:?}"
         );
         assert!(
-            log.iter().any(|line| line.starts_with("Showdown ·")),
-            "the winner's payout is logged at showdown: {log:?}"
+            log.iter()
+                .any(|line| line.contains(" wins ") || line.starts_with("Split pot")),
+            "who won or how the pot was shared is logged at showdown: {log:?}"
+        );
+    }
+
+    /// A fold-out hand states who won in the log, so every hand ends with an
+    /// explicit winner line.
+    #[test]
+    fn fold_out_logs_the_winner() {
+        let mut state = GameState::new(Seat::Hero, level());
+        state.start_hand(&mut Deck::default()).unwrap();
+        state.apply_action(Action::Fold).unwrap();
+        assert_eq!(state.to_act(), Seat::Hero);
+        let mut session = TableSession::resume(
+            state,
+            Deck::default(),
+            1,
+            50,
+            probe_config(),
+            survival(),
+            never_intercepts(),
+        );
+        session.submit(Action::Fold).unwrap();
+        let log = session.log();
+        assert!(
+            log.iter()
+                .any(|line| { line.contains(" wins ") && line.contains("everyone else folded") }),
+            "the fold-out winner is stated in the log: {log:?}"
         );
     }
 
