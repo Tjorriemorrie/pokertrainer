@@ -31,7 +31,7 @@ pub const LIVE_MCTS: MctsConfig = MctsConfig {
     worlds: 16,
     iterations: 96,
     uct_c: 60.0,
-    max_depth: 3,
+    max_depth: 5,
     min_duration: Duration::from_secs(5),
 };
 

@@ -41,7 +41,7 @@ interface and coaches decision-making with a range-based solver.
   opponent worlds (so holdings never clash with the dealt board), and
   submissions answer instantly from the latest snapshot (an off-bucket
   slider amount falls back to a full inline solve). The action dock's
-  top-left corner shows a live **search-depth badge** — `d4/4 · 71k` — that
+  top-left corner shows a live **search-depth badge** — `d5/5 · 71k` — that
   reads the realized tree depth against the planned cap and the number of
   iterations run (in thousands). It turns **red** while the search is still
   working toward its depth budget, **orange** once the depth is reached but

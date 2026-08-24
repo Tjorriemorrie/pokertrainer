@@ -33,7 +33,7 @@ impl Default for MctsConfig {
             worlds: 32,
             iterations: 128,
             uct_c: 60.0,
-            max_depth: 4,
+            max_depth: 6,
             min_duration: Duration::from_secs(5),
         }
     }

@@ -210,6 +210,7 @@ impl Searcher {
     fn rebuild_arenas(&mut self, state: &GameState) {
         let baseline = state.stack(Seat::Hero);
         let budget = self.budget;
+        self.searches.clear();
         for world in &self.worlds {
             self.searches.push(WorldSearch::new(
                 world.build_state(state),
@@ -602,6 +603,74 @@ mod tests {
         for candidate in candidates(&hand2) {
             assert!(result.actions.iter().any(|v| v.action == candidate.0));
         }
+    }
+
+    #[test]
+    fn reported_depth_never_exceeds_the_street_budget_across_a_pumped_flop() {
+        let mut deck = Deck::shuffled(&mut seeded_rng(992));
+        let mut state = GameState::new(Seat::Hero, level());
+        state.start_hand(&mut deck).unwrap();
+        // Opponent 2 acts first preflop; drive to the hero (BTN).
+        state.apply_action(Action::Call).unwrap();
+        assert_eq!(state.to_act(), Seat::Hero);
+        let mut rng = seeded_rng(991);
+        let mut searcher =
+            Searcher::build(&state, uniform_ranges(), MctsConfig::test(), 1, &mut rng).unwrap();
+        let _ = searcher.run_chunk(Duration::from_millis(20)).unwrap();
+        // Hero calls, Opponent 1 (BB) checks; the flop is dealt and reached
+        // by the opponent pump with the hero last to act.
+        let hero_action = Action::Call;
+        state.apply_action(hero_action).unwrap();
+        let pump = [Action::Check];
+        state.apply_action(pump[0]).unwrap();
+        state.advance_street(&mut deck).unwrap();
+        // Opponents act first on the flop until the hero's turn.
+        let flop_pump: Vec<Action> = {
+            let mut acts = Vec::new();
+            while state.to_act() != Seat::Hero {
+                let legal = state.legal_actions();
+                let action = if legal.call_amount > 0 {
+                    Action::Call
+                } else {
+                    Action::Check
+                };
+                state.apply_action(action).unwrap();
+                acts.push(action);
+            }
+            acts
+        };
+        assert_eq!(state.street(), Street::Flop);
+        let mut opponent_actions = vec![pump[0]];
+        opponent_actions.extend(flop_pump);
+        let report = searcher
+            .reshape(
+                &state,
+                Some(&PursuedPath {
+                    hero_action,
+                    opponent_actions,
+                }),
+                1,
+            )
+            .unwrap();
+        assert_eq!(
+            report.rebuilt,
+            searcher.worlds.len(),
+            "street change rebuilds"
+        );
+        while searcher.needs_work() {
+            searcher.run_chunk(Duration::from_millis(5)).unwrap();
+        }
+        let status = searcher.status().unwrap();
+        assert_eq!(
+            status.result.max_depth,
+            MctsConfig::test().for_street(Street::Flop).max_depth
+        );
+        assert!(
+            status.result.max_tree_depth <= status.result.max_depth,
+            "realized depth {} exceeded the cap {}",
+            status.result.max_tree_depth,
+            status.result.max_depth
+        );
     }
 
     #[test]
