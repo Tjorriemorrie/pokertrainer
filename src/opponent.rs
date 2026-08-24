@@ -499,7 +499,7 @@ mod tests {
         );
         assert!(snapshots[1].is_button && snapshots[1].is_small_blind);
         assert!(!snapshots[1].is_big_blind);
-        assert_eq!(snapshots[0].stack, 500);
+        assert_eq!(snapshots[0].stack, 300);
         assert!(!snapshots[0].folded && !snapshots[0].all_in);
     }
 

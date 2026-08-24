@@ -343,7 +343,7 @@ mod tests {
         let state = hero_facing_bet();
         let shove = SubmittedAction {
             kind: "raise".into(),
-            amount: Some(490),
+            amount: Some(290),
             bucket: None,
         };
         assert_eq!(resolve_action(&shove, &state).unwrap(), Action::AllIn);

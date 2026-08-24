@@ -1293,6 +1293,66 @@ pub async fn load_tournament(
     }))
 }
 
+/// How many recent tournaments a fresh drill's starting stack is sampled
+/// from: the modal starting stack of the hero's newest hand-history imports.
+pub const STARTING_STACK_WINDOW: usize = 11;
+
+/// The most common starting stack among the hero's `window` newest
+/// tournaments. Each tournament's starting stack is the hero stack of its
+/// earliest hand; the modal value wins, with ties broken toward the newest
+/// tournament. `None` when the recent history holds no usable stacks.
+pub async fn modal_starting_stack(pool: &PgPool, window: usize) -> Result<Option<u32>> {
+    let rows: Vec<(String, Option<i32>, String)> = sqlx::query_as(
+        "SELECT h.tournament_id, h.hero_stack, h.played_at
+         FROM gg_hands h
+         JOIN (
+             SELECT id FROM gg_tournaments ORDER BY started_at DESC LIMIT $1
+         ) recent ON recent.id = h.tournament_id
+         ORDER BY h.tournament_id, h.played_at",
+    )
+    .bind(window as i64)
+    .fetch_all(pool)
+    .await?;
+
+    // The rows arrive grouped by tournament and ordered by hand time, so the
+    // first row of every tournament is its earliest hand.
+    let mut candidates: Vec<(Option<i32>, String)> = Vec::new();
+    let mut last: Option<String> = None;
+    for (tournament, stack, played_at) in rows {
+        if last.as_deref() != Some(tournament.as_str()) {
+            last = Some(tournament);
+            candidates.push((stack, played_at));
+        }
+    }
+
+    let usable: Vec<(i32, String)> = candidates
+        .into_iter()
+        .filter_map(|(stack, played_at)| {
+            stack
+                .filter(|stack| *stack >= 1)
+                .map(|stack| (stack, played_at))
+        })
+        .collect();
+    Ok(pick_modal_starting_stack(&usable))
+}
+
+/// Picks the modal starting stack from one candidate per tournament
+/// (`(starting stack, start time)`); ties break toward the newest tournament.
+fn pick_modal_starting_stack(candidates: &[(i32, String)]) -> Option<u32> {
+    let mut counts: HashMap<i32, usize> = HashMap::new();
+    for (stack, _) in candidates {
+        *counts.entry(*stack).or_insert(0) += 1;
+    }
+    let best = counts.values().copied().max()?;
+
+    let mut newest_first: Vec<&(i32, String)> = candidates.iter().collect();
+    newest_first.sort_by(|a, b| b.1.cmp(&a.1));
+    newest_first
+        .into_iter()
+        .find(|(stack, _)| counts.get(stack) == Some(&best))
+        .map(|(stack, _)| *stack as u32)
+}
+
 /// Formats stored cent amounts as dollars, e.g. `75` → `$0.75`, `-125` →
 /// `-$1.25`.
 pub fn money(cents: i64) -> String {
@@ -1843,6 +1903,33 @@ Seat 3: 14c11a2a collected";
     }
 
     #[test]
+    fn modal_starting_stack_picks_the_mode_and_prefers_newest_on_ties() {
+        assert_eq!(pick_modal_starting_stack(&[]), None);
+
+        let single = [(300, "2026-08-21 10:00:00".to_string())];
+        assert_eq!(pick_modal_starting_stack(&single), Some(300));
+
+        let mode = [
+            (300, "2026-08-20 10:00:00".to_string()),
+            (500, "2026-08-21 10:00:00".to_string()),
+            (300, "2026-08-22 10:00:00".to_string()),
+        ];
+        assert_eq!(pick_modal_starting_stack(&mode), Some(300));
+
+        let tie = [
+            (300, "2026-08-20 10:00:00".to_string()),
+            (500, "2026-08-21 10:00:00".to_string()),
+            (300, "2026-08-22 10:00:00".to_string()),
+            (500, "2026-08-23 10:00:00".to_string()),
+        ];
+        assert_eq!(
+            pick_modal_starting_stack(&tie),
+            Some(500),
+            "a tied modal falls to the newest tournament"
+        );
+    }
+
+    #[test]
     fn scanning_an_empty_or_missing_directory_finds_nothing() {
         let run = scan_directory(Path::new("definitely-not-a-real-dir")).unwrap();
         assert_eq!(
@@ -2174,5 +2261,120 @@ Seat 3: 14c11a2a collected";
         };
         let err = import_scan(&pool, &empty).await.unwrap_err();
         assert!(matches!(err, Error::Sqlx(_)));
+    }
+
+    /// Seeds a tournament plus hands directly (skipping the zip import) so
+    /// the modal starting-stack window can be exercised exactly.
+    async fn seed_drill_history(
+        pool: &PgPool,
+        id: &str,
+        started: &str,
+        hands: &[(&str, Option<i32>)],
+    ) {
+        sqlx::query(
+            "INSERT INTO gg_tournaments (id, name, started_at)
+             VALUES ($1, 'Spin&Gold #7', $2)",
+        )
+        .bind(id)
+        .bind(started)
+        .execute(pool)
+        .await
+        .unwrap();
+        for (index, (played_at, stack)) in hands.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO gg_hands
+                     (hand_id, tournament_id, played_at, sb, bb, position,
+                      table_size, hero_stack, all_in, showdown, hero_won,
+                      invested, collected, net, raw)
+                 VALUES ($1, $2, $3, 10, 20, 'BB', 3, $4, false, false,
+                         false, 0, 0, 0, 'raw')",
+            )
+            .bind(format!("{id}_h{index}"))
+            .bind(id)
+            .bind(played_at)
+            .bind(stack)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn modal_starting_stack_samples_the_newest_window() {
+        let _guard = crate::analytics::DB_TEST_LOCK.lock().await;
+        let pool = test_pool().await;
+        let tag = unique_id("M");
+        let a = format!("{tag}A");
+        let b = format!("{tag}B");
+        let c = format!("{tag}C");
+        let d = format!("{tag}D");
+        let e = format!("{tag}E");
+
+        // Five tournaments newest wins: a 300 (later hands ignored), b 500,
+        // c 300, d without a readable first-hand stack, e 300.
+        seed_drill_history(
+            &pool,
+            &a,
+            "2099-02-01 10:00:00",
+            &[
+                ("2099-02-01 10:00:00", Some(300)),
+                ("2099-02-01 10:05:00", Some(800)),
+            ],
+        )
+        .await;
+        seed_drill_history(
+            &pool,
+            &b,
+            "2099-02-02 10:00:00",
+            &[("2099-02-02 10:00:00", Some(500))],
+        )
+        .await;
+        seed_drill_history(
+            &pool,
+            &c,
+            "2099-02-03 10:00:00",
+            &[("2099-02-03 10:00:00", Some(300))],
+        )
+        .await;
+        seed_drill_history(
+            &pool,
+            &d,
+            "2099-02-04 10:00:00",
+            &[
+                ("2099-02-04 10:00:00", None),
+                ("2099-02-04 10:05:00", Some(700)),
+            ],
+        )
+        .await;
+        seed_drill_history(
+            &pool,
+            &e,
+            "2099-02-05 10:00:00",
+            &[("2099-02-05 10:00:00", Some(300))],
+        )
+        .await;
+
+        assert_eq!(
+            modal_starting_stack(&pool, 2).await.unwrap(),
+            Some(300),
+            "the newest two tournaments leave only e's readable 300"
+        );
+        assert_eq!(
+            modal_starting_stack(&pool, 5).await.unwrap(),
+            Some(300),
+            "three 300s beat the lone 500"
+        );
+
+        delete_tournament(&pool, &c).await;
+        delete_tournament(&pool, &e).await;
+        assert_eq!(
+            modal_starting_stack(&pool, 5).await.unwrap(),
+            Some(500),
+            "a 300/500 tie falls to the newer tournament (b over a)"
+        );
+
+        delete_tournament(&pool, &a).await;
+        delete_tournament(&pool, &b).await;
+        delete_tournament(&pool, &d).await;
     }
 }

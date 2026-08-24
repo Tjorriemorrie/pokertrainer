@@ -129,12 +129,32 @@ async fn handle_socket(socket: WebSocket, app: Arc<AppState>) {
                 },
                 None => None,
             };
+            let starting_stack = match app.pool.as_ref() {
+                Some(pool) => {
+                    match crate::hh::modal_starting_stack(pool, crate::hh::STARTING_STACK_WINDOW)
+                        .await
+                    {
+                        Ok(Some(stack)) => stack,
+                        Ok(None) => crate::game::STARTING_STACK,
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                "starting chip modal unavailable — using the engine default"
+                            );
+                            crate::game::STARTING_STACK
+                        }
+                    }
+                }
+                None => crate::game::STARTING_STACK,
+            };
+            tracing::info!(starting_stack, "new tournament starting chips");
             let mut session = TableSession::new(
                 rand::random::<u64>(),
                 app.mcts,
                 app.survival,
                 app.blunder,
                 template,
+                starting_stack,
             );
             if let Err(error) = bootstrap(&mut session) {
                 tracing::warn!(%error, "table session bootstrap failed; closing connection");
@@ -990,6 +1010,7 @@ mod tests {
             SurvivalConfig::default(),
             BlunderConfig::default(),
             None,
+            crate::game::STARTING_STACK,
         );
         bootstrap(&mut session).unwrap();
         session

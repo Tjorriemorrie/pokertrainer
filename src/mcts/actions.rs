@@ -207,7 +207,10 @@ mod tests {
         assert!(actions.contains(&Action::Call));
         assert!(actions.contains(&Action::AllIn));
         assert!(actions.contains(&Action::Raise(180)));
-        assert!(actions.contains(&Action::Raise(300)));
+        assert!(
+            !actions.contains(&Action::Raise(300)),
+            "the pot-sized re-raise exceeds the hero stack and collapses into all-in"
+        );
         assert!(
             cands
                 .iter()
@@ -216,7 +219,8 @@ mod tests {
         assert!(
             cands
                 .iter()
-                .any(|(a, b)| *a == Action::Raise(300) && *b == Some(BetSize::Pot))
+                .all(|(a, _)| !matches!(a, Action::Raise(amount) if *amount > 280)),
+            "every offered raise stays within the hero stack: {cands:?}"
         );
     }
 

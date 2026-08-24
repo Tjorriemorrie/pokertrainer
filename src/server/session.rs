@@ -128,18 +128,25 @@ pub struct TableSession {
 }
 
 impl TableSession {
-    /// A fresh session at the first blind level with a shuffled deck.
+    /// A fresh session at the first blind level with a shuffled deck and the
+    /// given starting stack (the drill's resolved chip count, sampled from
+    /// the hero's tournament history).
     pub fn new(
         seed: u64,
         mcts: MctsConfig,
         survival: SurvivalConfig,
         blunder: BlunderConfig,
         template: Option<OpponentTemplate>,
+        starting_stack: u32,
     ) -> Self {
         let mut rng = crate::rng::seeded_rng(seed);
         let deck = Deck::shuffled(&mut rng);
+        let mut state = GameState::new(Seat::Hero, BLIND_SCHEDULE[0]);
+        for seat in Seat::ALL {
+            state.set_stack(seat, starting_stack);
+        }
         Self {
-            state: GameState::new(Seat::Hero, BLIND_SCHEDULE[0]),
+            state,
             deck,
             mcts,
             survival,
@@ -998,8 +1005,14 @@ mod tests {
 
     #[test]
     fn dealing_and_pumping_reach_the_hero() {
-        let mut session =
-            TableSession::new(41, probe_config(), survival(), never_intercepts(), None);
+        let mut session = TableSession::new(
+            41,
+            probe_config(),
+            survival(),
+            never_intercepts(),
+            None,
+            STARTING_STACK,
+        );
         session.deal_next_hand().unwrap();
         session.pump().unwrap();
         assert_eq!(session.state().to_act(), Seat::Hero);
@@ -1007,12 +1020,33 @@ mod tests {
         assert!(!session.state().is_hand_over());
     }
 
+    /// A fresh drill seats every player with the resolved starting chip
+    /// count, not a stack baked into the engine.
+    #[test]
+    fn new_seats_everyone_with_the_resolved_starting_stack() {
+        let session = TableSession::new(
+            77,
+            probe_config(),
+            survival(),
+            never_intercepts(),
+            None,
+            420,
+        );
+        assert_eq!(session.state().stacks(), [420, 420, 420]);
+    }
+
     /// Each deal names the button and logs both blind posts, so the action
     /// log shows exactly what every seat committed before any action.
     #[test]
     fn deals_log_the_button_and_the_blind_posts() {
-        let mut session =
-            TableSession::new(41, probe_config(), survival(), never_intercepts(), None);
+        let mut session = TableSession::new(
+            41,
+            probe_config(),
+            survival(),
+            never_intercepts(),
+            None,
+            STARTING_STACK,
+        );
         session.deal_next_hand().unwrap();
         let log = session.log();
         assert!(
@@ -1585,7 +1619,7 @@ mod tests {
             let action = placeholder_action(&mut rng, &state);
             apply_settled(&mut state, &mut deck, action).unwrap();
         }
-        assert_eq!(state.stacks().iter().sum::<u32>(), 1500);
+        assert_eq!(state.stacks().iter().sum::<u32>(), STARTING_STACK * 3);
     }
 
     #[test]
@@ -1737,8 +1771,14 @@ mod tests {
 
     #[test]
     fn action_log_is_appended_and_trimmed() {
-        let mut session =
-            TableSession::new(48, probe_config(), survival(), never_intercepts(), None);
+        let mut session = TableSession::new(
+            48,
+            probe_config(),
+            survival(),
+            never_intercepts(),
+            None,
+            STARTING_STACK,
+        );
         session.deal_next_hand().unwrap();
         for _ in 0..40 {
             session.log_line("filler line".to_string());

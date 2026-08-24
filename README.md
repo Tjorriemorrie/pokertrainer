@@ -29,8 +29,10 @@ interface and coaches decision-making with a range-based solver.
 - **Core poker primitives:** card/deck model, a bitboard hand evaluator
   (5- and 7-card), and a deterministic thread-local RNG.
 - **Game state engine:** full 3-max Spin and Gold rules — blinds/button
-  rotation, 500-chip starting stacks, street progression, main/side pot
-  accounting, and the legal-action flow (fold/check/call/bet/raise/all-in).
+  rotation, street progression, main/side pot accounting, and the
+  legal-action flow (fold/check/call/bet/raise/all-in). Each new drill is
+  seated with the most common starting stack of your last 11 imported
+  tournaments (300 chips when no history exists yet).
 - **Range model:** the 169-hand matrix (13×13 grid), GGPoker-style
   bet-sizing buckets (preflop 2bb/3bb/4bb/pot, postflop 1/3/1/2/3/4/pot/
   overbet), Bayesian range filtering, and sequence-node resolution with a

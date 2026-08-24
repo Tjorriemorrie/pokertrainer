@@ -7,7 +7,7 @@ use crate::game::pot::{Pot, compute_pots};
 use crate::game::seat::{Seat, Street, action_order};
 
 /// Starting stack for every player in a Spin and Gold hand.
-pub const STARTING_STACK: u32 = 500;
+pub const STARTING_STACK: u32 = 300;
 /// Number of seats at the table.
 pub const NUM_PLAYERS: usize = 3;
 
@@ -913,7 +913,7 @@ mod tests {
     #[test]
     fn new_initializes_stacks_and_button() {
         let state = GameState::new(Seat::Hero, level());
-        assert_eq!(state.stacks(), [500, 500, 500]);
+        assert_eq!(state.stacks(), [300, 300, 300]);
         assert_eq!(state.button(), Seat::Hero);
         assert_eq!(state.blind_level(), level());
         assert_eq!(state.street(), Street::Preflop);
@@ -926,9 +926,9 @@ mod tests {
         let mut state = GameState::new(Seat::Hero, level());
         state.start_hand(&mut deck(1)).unwrap();
 
-        assert_eq!(state.stack(Seat::Hero), 490);
-        assert_eq!(state.stack(Seat::Opponent1), 480);
-        assert_eq!(state.stack(Seat::Opponent2), 500);
+        assert_eq!(state.stack(Seat::Hero), 290);
+        assert_eq!(state.stack(Seat::Opponent1), 280);
+        assert_eq!(state.stack(Seat::Opponent2), 300);
         assert_eq!(state.current_bet(), 20);
         assert_eq!(state.total_pot(), 30);
         assert_eq!(state.to_act(), Seat::Opponent2);
@@ -983,7 +983,7 @@ mod tests {
         assert!(!legal.can_bet);
         assert!(legal.can_raise);
         assert_eq!(legal.min_raise_to, 40);
-        assert_eq!(legal.max_raise_to, 500);
+        assert_eq!(legal.max_raise_to, 300);
         assert!(legal.can_all_in);
     }
 
@@ -1036,7 +1036,7 @@ mod tests {
             "the posted blind counts toward the bet total"
         );
         assert_eq!(state.current_bet(), 60);
-        assert_eq!(state.stack(Seat::Hero), 440);
+        assert_eq!(state.stack(Seat::Hero), 240);
 
         assert_eq!(
             state.apply_action(Action::Call).unwrap(),
@@ -1062,7 +1062,7 @@ mod tests {
         state.start_hand(&mut deck(5)).unwrap();
 
         assert_eq!(state.to_act(), Seat::Opponent2);
-        state.apply_action(Action::Raise(380)).unwrap();
+        state.apply_action(Action::Raise(180)).unwrap();
 
         assert_eq!(state.to_act(), Seat::Hero);
         state.apply_action(Action::Call).unwrap();
@@ -1159,7 +1159,7 @@ mod tests {
                 amount: 30
             }]
         );
-        assert_eq!(state.stack(Seat::Opponent1), 510);
+        assert_eq!(state.stack(Seat::Opponent1), 310);
         assert!(state.is_hand_over());
     }
 
@@ -1184,7 +1184,7 @@ mod tests {
                 amount: 300
             }]
         );
-        assert_eq!(state.stack(Seat::Hero), 800);
+        assert_eq!(state.stack(Seat::Hero), 600);
     }
 
     #[test]
@@ -1292,7 +1292,7 @@ mod tests {
                 amount: 250
             },]
         );
-        assert_eq!(state.stack(Seat::Hero), 750);
+        assert_eq!(state.stack(Seat::Hero), 550);
     }
 
     #[test]
@@ -1412,7 +1412,10 @@ mod tests {
         assert!(!state.can_continue_betting());
         let result = state.showdown(&mut deck(10)).unwrap();
         assert_eq!(result.reason, HandEndReason::Showdown);
-        assert_eq!(result.awards.iter().map(|a| a.amount).sum::<u32>(), 1500);
+        assert_eq!(
+            result.awards.iter().map(|a| a.amount).sum::<u32>(),
+            STARTING_STACK * 3
+        );
     }
 
     #[test]
@@ -1503,10 +1506,10 @@ mod tests {
             }],
             "the eliminated seat never contests the pot"
         );
-        assert_eq!(state.stack(Seat::Hero), 800);
+        assert_eq!(state.stack(Seat::Hero), 600);
         assert_eq!(
             state.stack(Seat::Opponent1),
-            500,
+            300,
             "the eliminated seat never contests the pot"
         );
         assert!(
@@ -1538,11 +1541,11 @@ mod tests {
 
         // Only two active seats: the button (hero) posts the SB, the next
         // active seat (Opponent 2) posts the BB.
-        assert_eq!(state.stack(Seat::Hero), 490);
-        assert_eq!(state.stack(Seat::Opponent2), 480);
+        assert_eq!(state.stack(Seat::Hero), 290);
+        assert_eq!(state.stack(Seat::Opponent2), 280);
         assert_eq!(
             state.stack(Seat::Opponent1),
-            500,
+            300,
             "eliminated seat is untouched"
         );
         assert_eq!(state.total_pot(), 30);

@@ -2050,7 +2050,7 @@ mod tests {
         );
         assert!(fragment.contains(r#"data-kind="raise""#));
         assert!(
-            fragment.contains(r#"data-bucket="ALLIN" data-size="500""#),
+            fragment.contains(r#"data-bucket="ALLIN" data-size="300""#),
             "the all-in chip is a live preset that drives the slider to the whole stack: {fragment}"
         );
     }
@@ -2061,7 +2061,7 @@ mod tests {
         state
             .start_hand(&mut Deck::shuffled(&mut seeded_rng(36)))
             .unwrap();
-        state.apply_action(Action::Raise(500)).unwrap();
+        state.apply_action(Action::Raise(300)).unwrap();
         assert_eq!(state.to_act(), Seat::Hero);
 
         let fragment = table_fragment(&state, 1, 0, &[], &[]);
