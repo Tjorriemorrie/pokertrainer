@@ -192,8 +192,8 @@ impl GameState {
         let max_bet = self.street_contrib[seat.index()] + stack;
 
         let can_raise = to_call > 0 && stack > to_call && self.last_full_raise != Some(seat);
-        let min_raise_to = self.current_bet + self.min_raise;
         let max_raise_to = self.street_contrib[seat.index()] + stack;
+        let min_raise_to = (self.current_bet + self.min_raise).min(max_raise_to);
 
         let can_all_in = stack > 0 && (to_call == 0 || stack <= to_call || can_raise);
 
@@ -245,16 +245,22 @@ impl GameState {
                     amount.saturating_sub(self.street_contrib[seat.index()]),
                 );
                 self.current_bet = amount;
-                self.min_raise = amount.saturating_sub(previous_bet);
-                self.last_full_raise = Some(seat);
+                let raise_size = amount - previous_bet;
+                if raise_size >= self.min_raise {
+                    self.min_raise = raise_size;
+                    self.last_full_raise = Some(seat);
+                }
                 self.acted[seat.index()] = true;
             }
             Action::Raise(amount) => {
                 let previous_bet = self.current_bet;
                 self.commit(seat, amount - self.street_contrib[seat.index()]);
                 self.current_bet = amount;
-                self.min_raise = amount - previous_bet;
-                self.last_full_raise = Some(seat);
+                let raise_size = amount - previous_bet;
+                if raise_size >= self.min_raise {
+                    self.min_raise = raise_size;
+                    self.last_full_raise = Some(seat);
+                }
                 self.acted[seat.index()] = true;
             }
             Action::AllIn => {
@@ -995,6 +1001,43 @@ mod tests {
         state.advance_street(&mut Deck::default()).unwrap();
         assert_eq!(state.street(), Street::Flop);
         assert_eq!(state.board().len(), 3);
+    }
+
+    #[test]
+    fn short_stack_min_raise_never_exceeds_all_in() {
+        let mut state = GameState::new(Seat::Hero, level());
+        state.start_hand(&mut deck(5)).unwrap();
+
+        assert_eq!(state.to_act(), Seat::Opponent2);
+        state.apply_action(Action::Raise(380)).unwrap();
+
+        assert_eq!(state.to_act(), Seat::Hero);
+        state.apply_action(Action::Call).unwrap();
+        assert_eq!(state.stack(Seat::Hero), 120);
+
+        assert_eq!(state.to_act(), Seat::Opponent1);
+        state.apply_action(Action::Fold).unwrap();
+
+        state.advance_street(&mut deck(5)).unwrap();
+        assert_eq!(state.street(), Street::Flop);
+        assert_eq!(state.to_act(), Seat::Opponent2);
+        state.apply_action(Action::Bet(100)).unwrap();
+        assert_eq!(state.to_act(), Seat::Hero);
+
+        let legal = state.legal_actions();
+        assert!(legal.can_raise);
+        assert!(legal.can_all_in);
+        assert_eq!(legal.min_raise_to, 120);
+        assert_eq!(legal.max_raise_to, 120);
+        assert!(legal.min_raise_to <= legal.max_raise_to);
+        assert!(legal.allows(Action::Raise(120)));
+        assert!(!legal.allows(Action::Raise(121)));
+
+        state.apply_action(Action::Raise(120)).unwrap();
+        assert_eq!(state.current_bet(), 120);
+        assert_eq!(state.stack(Seat::Hero), 0);
+        assert_eq!(state.min_raise, 100);
+        assert_eq!(state.last_full_raise, Some(Seat::Opponent2));
     }
 
     #[test]
