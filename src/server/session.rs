@@ -332,11 +332,30 @@ impl TableSession {
         std::mem::take(&mut self.hand_results)
     }
 
-    /// The tournament outcome once only one seat remains, or `None` while the
-    /// tournament is still running. Aggregates the recorded hand results so
-    /// the winner/loser modal and the detail page can be populated.
+    /// The tournament outcome once the hero busts out or a single seat is
+    /// left standing, or `None` while the tournament is still running. The
+    /// opponents never play on after the hero busts: the moment the hero's
+    /// last chip is gone the tournament ends and the chip-leading opponent is
+    /// recorded as the winner. Aggregates the recorded hand results so the
+    /// winner/loser modal and the detail page can be populated.
     pub fn tournament_result(&self) -> Option<TournamentResult> {
-        let winner = self.state.tournament_winner()?;
+        let winner = match self.state.tournament_winner() {
+            Some(seat) => seat,
+            None => {
+                if !self.state.eliminated(Seat::Hero) {
+                    return None;
+                }
+                let mut leader = Seat::Opponent1;
+                for seat in Seat::ALL {
+                    if !self.state.eliminated(seat)
+                        && self.state.stack(seat) > self.state.stack(leader)
+                    {
+                        leader = seat;
+                    }
+                }
+                leader
+            }
+        };
         let hands_won = self
             .hand_results
             .iter()
@@ -455,6 +474,11 @@ impl TableSession {
     /// until the hero must act. Called by the WebSocket layer once the client
     /// has shown the winner for a beat.
     pub fn advance_after_result(&mut self) -> Result<()> {
+        if self.tournament_result().is_some() {
+            return Err(Error::Game(
+                "the tournament is over — no further hands are dealt".into(),
+            ));
+        }
         tracing::info!(
             hand_won = self.hand_no,
             "result pause over — dealing the next hand"
@@ -1842,6 +1866,77 @@ mod tests {
             never_intercepts(),
         );
         assert_eq!(session.tournament_result(), None);
+    }
+
+    /// Losing the last chip ends the tournament on the spot — even with both
+    /// opponents still in the hand count, the chip leader is recorded as the
+    /// winner and the hero gets the loss.
+    #[test]
+    fn busting_the_hero_ends_the_tournament_with_the_chip_leader() {
+        let mut state = river_facing_bet();
+        state.set_stack(Seat::Hero, 0);
+        state.set_stack(Seat::Opponent1, 420);
+        state.set_stack(Seat::Opponent2, 1080);
+        state.set_eliminated(Seat::Hero, true);
+        let session = TableSession::resume(
+            state,
+            Deck::default(),
+            23,
+            62,
+            probe_config(),
+            survival(),
+            never_intercepts(),
+        );
+        let result = session
+            .tournament_result()
+            .expect("a busted hero ends the tournament");
+        assert!(!result.won, "the hero lost");
+        assert_eq!(result.winner, Seat::Opponent2, "the chip leader wins");
+        assert_eq!(result.final_stacks, [0, 420, 1080]);
+        assert_eq!(result.hands, 23);
+    }
+
+    /// Once the hero is out no further hand is dealt — the opponents never
+    /// play on and the result pause cannot advance the table.
+    #[test]
+    fn the_table_cannot_advance_after_the_hero_busts() {
+        let mut state = river_facing_bet();
+        state.set_stack(Seat::Hero, 0);
+        state.set_eliminated(Seat::Hero, true);
+        let mut session = TableSession::resume(
+            state,
+            Deck::default(),
+            23,
+            63,
+            probe_config(),
+            survival(),
+            never_intercepts(),
+        );
+        assert!(
+            matches!(session.advance_after_result(), Err(Error::Game(_))),
+            "dealing on is refused once the tournament is over"
+        );
+        assert_eq!(session.hand_no(), 23, "no new hand was dealt");
+    }
+
+    /// An opponent busting while the hero still has chips keeps the
+    /// tournament running — only the hero busting (or a sole survivor) ends
+    /// it.
+    #[test]
+    fn an_opponent_busting_does_not_end_the_tournament() {
+        let mut state = river_facing_bet();
+        state.set_stack(Seat::Opponent1, 0);
+        state.set_eliminated(Seat::Opponent1, true);
+        let session = TableSession::resume(
+            state,
+            Deck::default(),
+            4,
+            64,
+            probe_config(),
+            survival(),
+            never_intercepts(),
+        );
+        assert_eq!(session.tournament_result(), None, "the hero is still in");
     }
 
     /// A mid-hand snapshot round-trips every live fact: stacks, street, board,

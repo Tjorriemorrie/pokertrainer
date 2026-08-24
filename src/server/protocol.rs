@@ -75,9 +75,9 @@ pub enum ServerMessage {
     /// The table was finished (`FINISH_TABLE`); the client navigates to the
     /// given page.
     SessionFinished { url: String },
-    /// The tournament ended naturally (one seat left standing); the client
-    /// shows a winner/loser modal whose Continue button navigates to the
-    /// tournament's detail page.
+    /// The tournament ended (the hero busted out, or a single seat was left
+    /// standing); the client shows a winner/loser modal whose Continue
+    /// button navigates to the tournament's detail page.
     TournamentFinished { won: bool, url: String },
     /// A rejected submission; the connection stays open.
     Error { message: String },

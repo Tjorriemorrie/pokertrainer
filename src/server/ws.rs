@@ -222,10 +222,10 @@ async fn play_socket(
     }
     session.take_pump_actions();
 
-    // A resumed table can park on the winner ribbon (or, once the hero is
-    // out, on a hand the opponents are still playing): honor the result
-    // pause and deal on before the solver starts — unless the tournament
-    // already ended there.
+    // A resumed table can park on the winner ribbon: honor the result pause
+    // and deal on before the solver starts — unless the tournament already
+    // ended there (a busted hero gets the loser modal immediately, even
+    // mid-hand).
     let resume =
         post_resume_frames(session, app.pool.as_ref(), session_id, app.result_pause_ms).await;
     let tournament_over = session.tournament_result().is_some();
@@ -279,10 +279,11 @@ async fn play_socket(
                     break ConnectionEnd::Disconnected;
                 }
 
-                // A tournament ends the moment only one seat is left standing:
-                // persist the hand results, finalize the session with the
-                // outcome, and hand the client a winner/loser modal instead of
-                // dealing another hand.
+                // A tournament ends the moment the hero busts out (the
+                // opponents never play on without the hero) or only one seat
+                // is left standing: persist the hand results, finalize the
+                // session with the outcome, and hand the client a winner/loser
+                // modal instead of dealing another hand.
                 if let Some(frame) =
                     tournament_over_frame(session, app.pool.as_ref(), session_id).await
                 {
@@ -330,16 +331,21 @@ async fn play_socket(
                     }
                     session.take_pump_actions();
                     save_table(app.pool.as_ref(), session_id, session).await;
-                    let _ = command_tx.send(SearchCommand::Reshape {
-                        state: Box::new(observable_clone(session.state())),
-                        path: None,
-                        hand_no: session.hand_no(),
-                        decision: session.decision_token().unwrap_or_default(),
-                    });
-                    // The freshly dealt hand can play itself out entirely when
-                    // the hero is out (the opponents keep acting), so the
-                    // tournament may end here too — stop and show the modal
-                    // instead of dealing on.
+                    // Reshape only when the pump left a live hero decision;
+                    // a hand-over state has no decision and the searcher
+                    // refuses to reshape onto a finished hand.
+                    if let Some(decision) = session.decision_token() {
+                        let _ = command_tx.send(SearchCommand::Reshape {
+                            state: Box::new(observable_clone(session.state())),
+                            path: None,
+                            hand_no: session.hand_no(),
+                            decision,
+                        });
+                    }
+                    // The freshly dealt hand can still end the tournament (the
+                    // hero posts an all-in blind and the opponents play it
+                    // out to a showdown), so the tournament may end here too
+                    // — stop and show the modal instead of dealing on.
                     if let Some(frame) =
                         tournament_over_frame(session, app.pool.as_ref(), session_id).await
                     {
@@ -725,18 +731,18 @@ fn advance_frames(session: &mut TableSession) -> Vec<String> {
 /// The frames to send right after the connect-time state frame: none while a
 /// decision is live, the result-pause next deal when the resumed table was
 /// parked on a finished hand, or the winner/loser modal when the tournament
-/// ended on that exact hand.
+/// ended (on that exact hand, or anywhere the hero is already out).
 async fn post_resume_frames(
     session: &mut TableSession,
     pool: Option<&PgPool>,
     session_id: Option<i32>,
     pause_ms: u64,
 ) -> Vec<String> {
-    if !session.state().is_hand_over() {
-        return Vec::new();
-    }
     if let Some(frame) = tournament_over_frame(session, pool, session_id).await {
         return vec![frame];
+    }
+    if !session.state().is_hand_over() {
+        return Vec::new();
     }
     tokio::time::sleep(std::time::Duration::from_millis(pause_ms)).await;
     advance_frames(session)
@@ -1382,6 +1388,38 @@ mod tests {
         let frames = post_resume_frames(&mut session, None, Some(9), 0).await;
         assert_eq!(frames.len(), 1);
         assert_eq!(parse(&frames[0])["type"], "TOURNAMENT_FINISHED");
+    }
+
+    /// A resumed table whose hero is already busted gets the loser modal
+    /// immediately — even mid-hand, the opponents never play on.
+    #[tokio::test]
+    async fn post_resume_frames_modal_when_the_hero_is_busted() {
+        let mut state = hero_decision_state();
+        state.set_stack(Seat::Hero, 0);
+        state.set_stack(Seat::Opponent1, 420);
+        state.set_stack(Seat::Opponent2, 1080);
+        state.set_eliminated(Seat::Hero, true);
+        let mut session = TableSession::resume(
+            state,
+            crate::card::Deck::default(),
+            23,
+            96,
+            MctsConfig::test(),
+            SurvivalConfig::default(),
+            BlunderConfig::default(),
+        );
+        assert!(!session.state().is_hand_over(), "the hero busted mid-hand");
+
+        let frames = post_resume_frames(&mut session, None, Some(7), 0).await;
+        assert_eq!(frames.len(), 1);
+        assert_eq!(
+            parse(&frames[0]),
+            json!({
+                "type": "TOURNAMENT_FINISHED",
+                "won": false,
+                "url": "/tournaments/7"
+            })
+        );
     }
 
     #[tokio::test]
