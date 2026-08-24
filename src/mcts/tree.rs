@@ -1,7 +1,7 @@
 use rand::Rng;
 
 use crate::card::Card;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::game::{Action, GameState, Seat};
 use crate::range::BetSize;
 use crate::rng::{gen_index, weighted_index};
@@ -82,24 +82,33 @@ struct Node {
 }
 
 /// Runs the per-world search: a UCB1 tree for the hero's decisions with
-/// chance nodes for opponent replies, backing up expectimax-style.
-pub(crate) struct WorldSearch<'a> {
+/// chance nodes for opponent replies, backing up expectimax-style. The
+/// runout is owned so the arena can outlive the [`World`](super::world::World)
+/// it was built from — persistent background searches keep their arenas
+/// across requests.
+pub(crate) struct WorldSearch {
     nodes: Vec<Node>,
     root: usize,
-    runout: &'a [Card],
+    runout: Vec<Card>,
     baseline: u32,
     config: MctsConfig,
     root_candidates: Candidates,
+    /// The constant added to `value_sum`-derived means when exporting: the
+    /// difference between the original root's stack baseline and the current
+    /// root's. Payoff sums are stored relative to the build-time baseline, so
+    /// a promoted root reports deltas against its own stack by shifting the
+    /// reported mean. Variances are shift-invariant and stay untouched.
+    rebase: f64,
     /// Deepest node expanded so far (in hero-decision depth).
     max_tree_depth: usize,
     /// Actions simulated in rollouts so far.
     rollout_actions: u64,
 }
 
-impl<'a> WorldSearch<'a> {
+impl WorldSearch {
     pub(crate) fn new(
         root_state: GameState,
-        runout: &'a [Card],
+        runout: &[Card],
         baseline: u32,
         root_candidates: Candidates,
         config: MctsConfig,
@@ -120,10 +129,11 @@ impl<'a> WorldSearch<'a> {
         Self {
             nodes: vec![root],
             root: 0,
-            runout,
+            runout: runout.to_vec(),
             baseline,
             config,
             root_candidates,
+            rebase: 0.0,
             max_tree_depth: 0,
             rollout_actions: 0,
         }
@@ -133,19 +143,91 @@ impl<'a> WorldSearch<'a> {
         &mut self,
         rng: &mut R,
     ) -> Result<(Vec<WorldValue>, SearchStats)> {
-        for _ in 0..self.config.iterations {
-            self.iterate(rng)?;
-        }
+        self.run_sweeps(rng, self.config.iterations)?;
         self.fill_unexpanded_root_candidates(rng)?;
         let values = self.root_values()?;
-        Ok((
-            values,
-            SearchStats {
-                max_tree_depth: self.max_tree_depth,
-                nodes: self.nodes.len(),
-                rollout_actions: self.rollout_actions,
-            },
-        ))
+        Ok((values, self.stats()))
+    }
+
+    /// Runs `sweeps` UCT iterations (each = one root visit) so persistent
+    /// callers can extend an existing search in small increments.
+    pub(crate) fn run_sweeps<R: Rng + ?Sized>(&mut self, rng: &mut R, sweeps: usize) -> Result<()> {
+        for _ in 0..sweeps {
+            self.iterate(rng)?;
+        }
+        Ok(())
+    }
+
+    /// The realized search effort so far.
+    pub(crate) fn stats(&self) -> SearchStats {
+        SearchStats {
+            max_tree_depth: self.max_tree_depth,
+            nodes: self.nodes.len(),
+            rollout_actions: self.rollout_actions,
+        }
+    }
+
+    /// Descends the tree along the given action sequence (one edge per
+    /// action) and returns the node it lands on, or `None` when the path
+    /// does not exist in the expanded tree.
+    pub(crate) fn follow_path(&self, actions: &[Action]) -> Option<usize> {
+        let mut current = self.root;
+        for action in actions {
+            let child = self.nodes[current]
+                .children
+                .iter()
+                .find(|child| child.action == *action)?;
+            current = child.node;
+        }
+        Some(current)
+    }
+
+    /// Whether a node is a hero decision node.
+    pub(crate) fn is_decision(&self, node: usize) -> bool {
+        self.nodes
+            .get(node)
+            .is_some_and(|n| n.kind == Kind::Decision)
+    }
+
+    /// The actor's game state at a node (world-visible hole cards included).
+    pub(crate) fn node_state(&self, node: usize) -> Option<&GameState> {
+        self.nodes.get(node).map(|n| &n.state)
+    }
+
+    /// The game state at the current root.
+    pub(crate) fn root_state(&self) -> Option<&GameState> {
+        self.nodes.get(self.root).map(|n| &n.state)
+    }
+
+    /// The candidate set searched at the current root.
+    pub(crate) fn root_candidates(&self) -> &[(Action, Option<BetSize>)] {
+        &self.root_candidates
+    }
+
+    /// Re-roots the arena at an existing hero decision node, keeping every
+    /// accumulated statistic. Hero depths are renormalized to the new root
+    /// and the value baseline shifts so reported EVs stay deltas from the
+    /// new decision point's stack.
+    pub(crate) fn promote(&mut self, node: usize) -> Result<()> {
+        let Some(target) = self.nodes.get(node) else {
+            return Err(Error::Solver("cannot promote an unknown node".into()));
+        };
+        if target.kind != Kind::Decision {
+            return Err(Error::Solver(
+                "tree promotion requires a hero decision node".into(),
+            ));
+        }
+        let depth_shift = target.hero_depth;
+        let new_baseline = target.state.stack(Seat::Hero);
+        self.rebase += f64::from(self.baseline) - f64::from(new_baseline);
+        self.baseline = new_baseline;
+        for node in &mut self.nodes {
+            node.hero_depth = node.hero_depth.saturating_sub(depth_shift);
+        }
+        self.max_tree_depth = self.nodes.iter().map(|n| n.hero_depth).max().unwrap_or(0);
+        self.root_candidates = self.nodes[node].candidates.clone();
+        self.root = node;
+        Ok(())
     }
 
     fn iterate<R: Rng + ?Sized>(&mut self, rng: &mut R) -> Result<()> {
@@ -200,7 +282,7 @@ impl<'a> WorldSearch<'a> {
 
         let mut next = self.clone_state(index);
         let parent_offset = self.nodes[index].offset;
-        let next_offset = step(&mut next, action, self.runout, parent_offset)?;
+        let next_offset = step(&mut next, action, &self.runout, parent_offset)?;
         let hero_depth = self.nodes[index].hero_depth + 1;
         self.max_tree_depth = self.max_tree_depth.max(hero_depth);
 
@@ -255,7 +337,7 @@ impl<'a> WorldSearch<'a> {
             let list = candidates(&self.nodes[index].state);
             for (position, (action, _bucket)) in list.into_iter().enumerate() {
                 let mut next = self.clone_state(index);
-                let next_offset = step(&mut next, action, self.runout, self.nodes[index].offset)?;
+                let next_offset = step(&mut next, action, &self.runout, self.nodes[index].offset)?;
                 let hero_depth = parent_hero_depth + 1;
                 self.max_tree_depth = self.max_tree_depth.max(hero_depth);
                 let beyond_horizon = hero_depth >= self.config.max_depth;
@@ -369,7 +451,7 @@ impl<'a> WorldSearch<'a> {
             });
         }
         let mut state = node.state.clone_with_hole_cards(self.cards_of(node));
-        let (payoff, actions) = rollout(rng, &mut state, self.runout, node.offset, self.baseline)?;
+        let (payoff, actions) = rollout(rng, &mut state, &self.runout, node.offset, self.baseline)?;
         self.rollout_actions += actions as u64;
         Ok(payoff)
     }
@@ -411,7 +493,10 @@ impl<'a> WorldSearch<'a> {
     /// Guarantees every root candidate got at least one playout, so `solve`
     /// can report an EV for each action even when the iteration budget is
     /// smaller than the candidate count.
-    fn fill_unexpanded_root_candidates<R: Rng + ?Sized>(&mut self, rng: &mut R) -> Result<()> {
+    pub(crate) fn fill_unexpanded_root_candidates<R: Rng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+    ) -> Result<()> {
         loop {
             match self.expand_one_child(self.root, rng)? {
                 Some(child) => {
@@ -423,7 +508,7 @@ impl<'a> WorldSearch<'a> {
         }
     }
 
-    fn root_values(&self) -> Result<Vec<WorldValue>> {
+    pub(crate) fn root_values(&self) -> Result<Vec<WorldValue>> {
         let mut values = Vec::new();
         for (action, bucket) in &self.root_candidates {
             let Some(child) = self.nodes[self.root]
@@ -435,8 +520,9 @@ impl<'a> WorldSearch<'a> {
             };
             let node = &self.nodes[child.node];
             let visits = node.visits.max(1) as f64;
-            let value = node.value_sum / visits;
-            let variance = (node.value_sq_sum / visits - value * value).max(0.0);
+            let stored_mean = node.value_sum / visits;
+            let value = stored_mean + self.rebase;
+            let variance = (node.value_sq_sum / visits - stored_mean * stored_mean).max(0.0);
             let bust_prob = node.bust_sum / visits;
             values.push((*action, *bucket, value, variance, bust_prob, node.visits));
         }
@@ -513,6 +599,26 @@ impl<'a> WorldSearch<'a> {
     }
 }
 
+/// Whether two states represent the same hero decision point from the
+/// hero's perspective: identical street, board, stacks, contributions and
+/// action flow. Hole cards are deliberately ignored — world states carry
+/// sampled opponent holdings where the live session keeps them hidden.
+pub(crate) fn observably_same(a: &GameState, b: &GameState) -> bool {
+    a.street() == b.street()
+        && a.board() == b.board()
+        && a.stacks() == b.stacks()
+        && a.button() == b.button()
+        && a.current_bet() == b.current_bet()
+        && a.folded(Seat::Hero) == b.folded(Seat::Hero)
+        && a.to_act() == b.to_act()
+        && a.total_pot() == b.total_pot()
+        && Seat::ALL.iter().all(|seat| {
+            a.street_contribution(*seat) == b.street_contribution(*seat)
+                && a.folded(*seat) == b.folded(*seat)
+                && a.all_in(*seat) == b.all_in(*seat)
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -549,7 +655,7 @@ mod tests {
         (state, world)
     }
 
-    fn make_search<'a>(state: &GameState, world: &'a World) -> WorldSearch<'a> {
+    fn make_search(state: &GameState, world: &World) -> WorldSearch {
         WorldSearch::new(
             world.build_state(state),
             &world.runout,

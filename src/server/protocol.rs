@@ -57,11 +57,33 @@ pub enum ServerMessage {
     /// connect and periodically, so the client renders the stored history
     /// instantly instead of replaying every tick.
     ChartSnapshot { points: Vec<ChartPoint> },
+    /// The background solver's live progress for the current hero decision:
+    /// how many of the street-scaled iterations are done and how deep the
+    /// tree has grown, so the header can show a depth badge that turns green
+    /// as the search approaches its budget.
+    SearchStatus {
+        iterations_done: u64,
+        target_iterations: u64,
+        tree_depth: usize,
+        max_depth: usize,
+        nodes: u64,
+        phase: SearchPhase,
+    },
     /// The table was finished (`FINISH_TABLE`); the client navigates to the
     /// given page.
     SessionFinished { url: String },
     /// A rejected submission; the connection stays open.
     Error { message: String },
+}
+
+/// The lifecycle of the background search behind the current decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum SearchPhase {
+    /// Still working toward the configured iteration budget.
+    Searching,
+    /// The budget is reached; the search idles until the next decision.
+    Ready,
 }
 
 impl ServerMessage {
@@ -423,6 +445,32 @@ mod tests {
             .to_json()
             .unwrap(),
             r#"{"type":"CHART_SNAPSHOT","points":[[1,0.0],[10,2.5]]}"#
+        );
+        assert_eq!(
+            ServerMessage::SearchStatus {
+                iterations_done: 32,
+                target_iterations: 64,
+                tree_depth: 3,
+                max_depth: 5,
+                nodes: 412,
+                phase: SearchPhase::Searching,
+            }
+            .to_json()
+            .unwrap(),
+            r#"{"type":"SEARCH_STATUS","iterations_done":32,"target_iterations":64,"tree_depth":3,"max_depth":5,"nodes":412,"phase":"SEARCHING"}"#
+        );
+        assert_eq!(
+            ServerMessage::SearchStatus {
+                iterations_done: 64,
+                target_iterations: 64,
+                tree_depth: 5,
+                max_depth: 5,
+                nodes: 900,
+                phase: SearchPhase::Ready,
+            }
+            .to_json()
+            .unwrap(),
+            r#"{"type":"SEARCH_STATUS","iterations_done":64,"target_iterations":64,"tree_depth":5,"max_depth":5,"nodes":900,"phase":"READY"}"#
         );
         assert_eq!(
             ServerMessage::SessionFinished {

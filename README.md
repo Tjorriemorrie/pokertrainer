@@ -30,6 +30,20 @@ interface and coaches decision-making with a range-based solver.
   iterations, realized tree depth, nodes, and rollout actions — and the
   coach panel shows this alongside per-action visit counts so the search
   effort can be audited.
+- **Background solver with tree reuse:** the MCTS no longer runs as a
+  one-shot solve on each click. A persistent background worker starts
+  searching the moment the table is dealt (the table renders first, then the
+  solver spins up) and keeps refining the current decision in small chunks
+  while you think. When you act, the search trees are **reshaped onto the
+  played branch** — the hero's action and the opponents' replies are followed
+  down the existing trees, so visits and value sums survive into the next
+  decision instead of being thrown away. A new street or hand resamples the
+  opponent worlds (so holdings never clash with the dealt board), and
+  submissions answer instantly from the latest snapshot (an off-bucket
+  slider amount falls back to a full inline solve). The header shows a live
+  **search-depth badge** next to the connection status — `search d3/5 · 42%`
+  — that turns red early in the search, amber partway, and green once the
+  street-scaled budget is reached.
 - **Decision layer:** validates player-submitted actions (including
   off-bucket bet-slider amounts) and evaluates them against the optimal
   action. Because only first place pays, "optimal" maximizes a survivability
@@ -50,6 +64,9 @@ interface and coaches decision-making with a range-based solver.
     breakdown, flagged with `intercepted`.
   - Server → Client `CHART_TICK`: one evaluated action appended to the
     top-bar EV curve.
+  - Server → Client `SEARCH_STATUS`: the background solver's live progress
+    (iterations done vs target, realized tree depth, nodes, phase) that
+    drives the header depth badge.
 
   Each connection owns a live table session that drives the opponents with a
   simple placeholder policy, runs the survivability solver on your

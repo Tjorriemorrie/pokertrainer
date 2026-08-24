@@ -17,13 +17,14 @@ pub fn index_page() -> String {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Poker Trainer</title>
-<link rel="stylesheet" href="/assets/style.css?v=8">
+<link rel="stylesheet" href="/assets/style.css?v=9">
 </head>
 <body class="pt-body">
   <header class="pt-topwrap">
     <div class="pt-brand">Poker Trainer</div>
     <canvas id="ev-chart" width="1200" height="48" class="ev-chart"></canvas>
     <div id="ws-status" class="status-wait">connecting…</div>
+    <div id="mcts-status" class="mcts-status status-bad">solver idle</div>
     <button id="sound-toggle" class="pt-icon-btn" type="button" title="Toggle table sounds">🔊</button>
     <a href="/tournaments" class="pt-link">Tournament history</a>
     <button id="finish-table" class="action-btn" type="button">Finish table</button>
@@ -44,7 +45,7 @@ pub fn index_page() -> String {
       </aside>
     </div>
   </main>
-  <script src="/assets/app.js?v=3"></script>
+  <script src="/assets/app.js?v=4"></script>
 </body>
 </html>"#
         .to_string()
@@ -61,7 +62,7 @@ pub fn tournaments_page(sessions: &[(SessionSummary, Vec<ChartPoint>)]) -> Strin
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Poker Trainer — Tournaments</title>
-<link rel="stylesheet" href="/assets/style.css?v=8">
+<link rel="stylesheet" href="/assets/style.css?v=9">
 </head>
 <body class="pt-body">
 <header class="pt-topwrap">
@@ -809,7 +810,11 @@ mod tests {
             "the sound toggle is present"
         );
         assert!(
-            page.contains(r#"/assets/style.css?v=8"#),
+            page.contains(r#"id="mcts-status""#),
+            "the solver depth badge is present"
+        );
+        assert!(
+            page.contains(r#"/assets/style.css?v=9"#),
             "the stylesheet link is versioned so browsers drop stale cached CSS"
         );
         assert!(

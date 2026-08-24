@@ -4,6 +4,7 @@
   const table = document.getElementById("table");
   const feedback = document.getElementById("feedback");
   const statusEl = document.getElementById("ws-status");
+  const mctsEl = document.getElementById("mcts-status");
   const soundBtn = document.getElementById("sound-toggle");
   const chartData = [];
   let ws = null;
@@ -170,9 +171,29 @@
     el.innerHTML = html;
   };
 
-  function setStatus(text, cls) {
+function setStatus(text, cls) {
     statusEl.textContent = text;
     statusEl.className = cls;
+  }
+
+  function setSolverStatus(msg) {
+    if (!mctsEl) return;
+    if (msg.phase === "READY") {
+      mctsEl.textContent = `search d${msg.tree_depth}/${msg.max_depth} · done`;
+      mctsEl.className = "mcts-status status-ok";
+      return;
+    }
+    const target = msg.target_iterations || 1;
+    const pct = Math.round((100 * msg.iterations_done) / target);
+    const cls = pct >= 66 ? "status-ok" : pct >= 33 ? "status-wait" : "status-bad";
+    mctsEl.textContent = `search d${msg.tree_depth}/${msg.max_depth} · ${pct}%`;
+    mctsEl.className = `mcts-status ${cls}`;
+  }
+
+  function resetSolverStatus() {
+    if (!mctsEl) return;
+    mctsEl.textContent = "solver idle";
+    mctsEl.className = "mcts-status status-bad";
   }
 
   function sendAction(kind, extra) {
@@ -351,10 +372,13 @@
         chartData.push(msg.ev_loss);
         drawChart();
         break;
-      case "CHART_SNAPSHOT":
+case "CHART_SNAPSHOT":
         chartData.length = 0;
         (msg.points || []).forEach((point) => chartData.push(point[1]));
         drawChart();
+        break;
+      case "SEARCH_STATUS":
+        setSolverStatus(msg);
         break;
       case "SESSION_FINISHED":
         window.location.href = msg.url;
@@ -373,8 +397,9 @@
     setStatus("connecting…", "status-wait");
     ws.onopen = () => setStatus("connected", "status-ok");
     ws.onmessage = handleMessage;
-    ws.onclose = () => {
+ws.onclose = () => {
       setStatus("disconnected — retrying…", "status-bad");
+      resetSolverStatus();
       clearTimeout(retryTimer);
       retryTimer = setTimeout(connect, 1500);
     };

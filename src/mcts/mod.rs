@@ -17,11 +17,13 @@ use crate::range::hands::Range;
 
 use tree::WorldSearch;
 
+pub mod searcher;
+
 /// Per-world action statistics: action, mean rollout value, payoff variance,
 /// bust probability, and total visits.
-type WorldStats = Vec<(Action, f64, f64, f64, u64)>;
+pub(crate) type WorldStats = Vec<(Action, f64, f64, f64, u64)>;
 /// One world's weight and its action statistics.
-type PerWorld = (f64, WorldStats);
+pub(crate) type PerWorld = (f64, WorldStats);
 
 /// The solver's estimate for one candidate action: its expectimax EV in
 /// chips relative to the hero's stack at the decision point, the
@@ -161,7 +163,7 @@ pub fn solve_with_candidates<R: Rng + ?Sized>(
     })
 }
 
-fn visits_for(action: &Action, per_world: &[PerWorld]) -> u64 {
+pub(crate) fn visits_for(action: &Action, per_world: &[PerWorld]) -> u64 {
     per_world
         .iter()
         .flat_map(|(_, values)| values.iter())
@@ -174,7 +176,7 @@ fn visits_for(action: &Action, per_world: &[PerWorld]) -> u64 {
 /// expectimax step over sampled opponent holdings. Each world must report the
 /// same set of actions in the same order; returns an empty vector for no
 /// worlds. Variances combine as `E[x²] − E[x]²` over the world mixture.
-fn combine_world_values(per_world: &[PerWorld]) -> Result<Vec<(Action, f64, f64, f64)>> {
+pub(crate) fn combine_world_values(per_world: &[PerWorld]) -> Result<Vec<(Action, f64, f64, f64)>> {
     let Some((_, reference)) = per_world.first() else {
         return Ok(Vec::new());
     };

@@ -80,6 +80,16 @@ button { font-family: inherit; }
   white-space: nowrap;
 }
 
+.mcts-status {
+  min-width: 9rem;
+  padding: 0.25rem 0.8rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  text-align: center;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
 .status-ok { background: #064e3b; color: #34d399; }
 .status-wait { background: #78350f; color: #fbbf24; }
 .status-bad { background: #7f1d1d; color: #fca5a5; }

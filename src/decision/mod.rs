@@ -184,6 +184,83 @@ pub fn analyze<R: Rng + ?Sized>(
     })
 }
 
+/// Scores a ready-made solver snapshot exactly like [`analyze`] scores a
+/// fresh solve: no search runs, so submissions answer instantly from the
+/// background searcher's latest result. Errors when the played action is not
+/// covered by the snapshot (e.g. an off-bucket slider amount) — callers fall
+/// back to a full [`analyze`] in that rare case.
+pub fn analyze_snapshot(
+    state: &GameState,
+    snapshot: &crate::mcts::SolveResult,
+    survival_config: &SurvivalConfig,
+    played: Option<Action>,
+) -> Result<AnalyzedDecision> {
+    if state.is_hand_over() {
+        return Err(Error::Decision("cannot analyze a hand that is over".into()));
+    }
+    if state.to_act() != Seat::Hero {
+        return Err(Error::Decision("not the hero's turn to act".into()));
+    }
+    if let Some(action) = played {
+        validate_action(state, action)?;
+    }
+
+    let stack = state.stack(Seat::Hero);
+    let risk = survival_config.derive(stack)?;
+
+    let mut analyses: Vec<Analysis> = snapshot
+        .actions
+        .iter()
+        .map(|value| Analysis {
+            action: value.action,
+            bucket: value.bucket,
+            ev: value.ev,
+            variance: value.variance,
+            bust_prob: value.bust_prob,
+            score: risk.score(value.ev, value.variance, value.bust_prob),
+            visits: value.visits,
+        })
+        .collect();
+    analyses.sort_by(rank_desc);
+
+    let optimal = analyses
+        .first()
+        .copied()
+        .ok_or_else(|| Error::Decision("no candidate actions to rank".into()))?;
+
+    let big_blind = f64::from(state.blind_level().big_blind);
+    let played = played
+        .map(|action| -> Result<PlayedEvaluation> {
+            let analysis = analyses
+                .iter()
+                .find(|candidate| candidate.action == action)
+                .copied()
+                .ok_or_else(|| {
+                    Error::Decision("played action missing from the analysis snapshot".into())
+                })?;
+            Ok(PlayedEvaluation {
+                analysis,
+                ev_loss_bb: ((optimal.ev - analysis.ev).max(0.0)) / big_blind,
+                is_optimal: action == optimal.action,
+            })
+        })
+        .transpose()?;
+
+    Ok(AnalyzedDecision {
+        ranking: analyses,
+        optimal,
+        played,
+        search: SearchReport {
+            worlds: snapshot.worlds,
+            iterations: snapshot.iterations,
+            max_depth: snapshot.max_depth,
+            max_tree_depth: snapshot.max_tree_depth,
+            nodes: snapshot.nodes,
+            rollout_actions: snapshot.rollout_actions,
+        },
+    })
+}
+
 /// Classifies a played bet/raise amount into a size bucket for feedback.
 fn classify_played(state: &GameState, action: Action) -> Option<BetSize> {
     let legal = state.legal_actions();
@@ -509,6 +586,69 @@ mod tests {
         assert!(finished.is_hand_over());
         assert!(matches!(
             analyze(&mut rng, &finished, &ranges, &config, &survival, None),
+            Err(Error::Decision(_))
+        ));
+    }
+
+    #[test]
+    fn analyze_snapshot_scores_identically_to_a_fresh_solve() {
+        let state = river_facing_bet(junk_hand());
+        let ranges = [aces(), aces()];
+        let snapshot =
+            mcts::solve(&mut seeded_rng(12), &state, &ranges, &MctsConfig::test()).unwrap();
+        let from_snapshot = analyze_snapshot(
+            &state,
+            &snapshot,
+            &SurvivalConfig::default(),
+            Some(Action::Call),
+        )
+        .unwrap();
+        let full = analyze(
+            &mut seeded_rng(12),
+            &state,
+            &ranges,
+            &MctsConfig::test(),
+            &SurvivalConfig::default(),
+            Some(Action::Call),
+        )
+        .unwrap();
+        assert_eq!(from_snapshot, full, "snapshot scoring shortcuts the solve");
+    }
+
+    #[test]
+    fn analyze_snapshot_rejects_missing_actions_and_bad_states() {
+        let mut state = river_facing_bet(junk_hand());
+        state.set_stack(Seat::Hero, 400);
+        let snapshot = mcts::solve(
+            &mut seeded_rng(20),
+            &state,
+            &[uniform(), uniform()],
+            &MctsConfig::test(),
+        )
+        .unwrap();
+        let off_bucket = Action::Raise(250);
+        assert!(
+            mcts::candidates(&state)
+                .iter()
+                .all(|(candidate, _)| *candidate != off_bucket),
+            "fixture should use an off-bucket amount"
+        );
+        assert!(matches!(
+            analyze_snapshot(
+                &state,
+                &snapshot,
+                &SurvivalConfig::default(),
+                Some(off_bucket)
+            ),
+            Err(Error::Decision(_))
+        ));
+
+        let mut wrong = GameState::new(Seat::Hero, level());
+        wrong
+            .start_hand(&mut Deck::shuffled(&mut seeded_rng(21)))
+            .unwrap();
+        assert!(matches!(
+            analyze_snapshot(&wrong, &snapshot, &SurvivalConfig::default(), None),
             Err(Error::Decision(_))
         ));
     }

@@ -5,11 +5,19 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
 use sqlx::PgPool;
+use tokio::sync::mpsc;
 
 use crate::analytics;
 use crate::error::Result;
+use crate::game::{Action, GameState, Seat};
+use crate::mcts::MctsConfig;
+use crate::mcts::searcher::{
+    CHUNK_WALL, PursuedPath, SearchCommand, Searcher, SearcherPhase, SearcherStatus,
+    observable_clone,
+};
+use crate::range::hands::Range;
 use crate::server::http::AppState;
-use crate::server::protocol::{self, ClientMessage, ServerMessage};
+use crate::server::protocol::{self, ClientMessage, SearchPhase, ServerMessage};
 use crate::server::session::{TableEvent, TableSession};
 use crate::server::views;
 
@@ -17,11 +25,13 @@ use crate::server::views;
 pub const TOURNAMENTS_URL: &str = "/tournaments";
 
 /// The outcome of handling one client frame: the frames to send back, how
-/// many chart ticks were produced (snapshot refresh pacing), and whether the
+/// many chart ticks were produced (snapshot refresh pacing), the hero action
+/// that was applied (drives the solver's tree reshape), and whether the
 /// player finished the table.
 pub struct FrameOutcome {
     pub messages: Vec<String>,
     pub chart_ticks: usize,
+    pub hero_action: Option<Action>,
     pub finish_table: bool,
 }
 
@@ -43,72 +53,293 @@ async fn handle_socket(socket: WebSocket, app: Arc<AppState>) {
 
     let (mut sender, mut receiver) = socket.split();
 
+    // The table — deal, blinds, opponents — renders before any solver work
+    // starts; the background search is spawned only after this initial state
+    // has left for the client.
     let mut initial =
         vec![state_message(&mut session).unwrap_or_else(|error| error_message(&error.to_string()))];
     if let Some(snapshot) = snapshot_frame(app.pool.as_ref()).await {
         initial.push(snapshot);
     }
-    for frame in initial {
-        if sender.send(Message::Text(frame.into())).await.is_err() {
+    for frame in &initial {
+        if sender
+            .send(Message::Text(frame.clone().into()))
+            .await
+            .is_err()
+        {
             close_session(app.pool.as_ref(), session_id).await;
             return;
         }
     }
+    session.take_pump_actions();
 
+    let (command_tx, command_rx) = mpsc::unbounded_channel::<SearchCommand>();
+    let (update_tx, mut update_rx) = mpsc::unbounded_channel::<SearcherStatus>();
+    let solver = tokio::spawn(run_searcher(
+        command_rx,
+        update_tx,
+        app.mcts,
+        session.ranges(),
+    ));
+    let _ = command_tx.send(SearchCommand::Reshape {
+        state: Box::new(observable_clone(session.state())),
+        path: None,
+        hand_no: session.hand_no(),
+    });
+
+    let mut latest_snapshot: Option<crate::mcts::SolveResult> = None;
+    let mut solver_alive = true;
     let mut ticks_since_snapshot = 0usize;
+
     loop {
-        let message = match receiver.next().await {
-            Some(message) => message,
-            None => break,
-        };
-        let text = match message {
-            Ok(Message::Text(text)) => text,
-            Ok(Message::Close(_)) | Err(_) => break,
-            Ok(_) => continue,
-        };
+        tokio::select! {
+            maybe = receiver.next() => {
+                let Some(message) = maybe else { break };
+                let text = match message {
+                    Ok(Message::Text(text)) => text,
+                    Ok(Message::Close(_)) | Err(_) => break,
+                    Ok(_) => continue,
+                };
 
-        let outcome = handle_client_message(&mut session, text.as_str());
-        ticks_since_snapshot += outcome.chart_ticks;
-        persist_records(app.pool.as_ref(), session_id, &mut session).await;
+                let outcome = handle_client_message(&mut session, text.as_str(), latest_snapshot.as_ref());
+                ticks_since_snapshot += outcome.chart_ticks;
+                persist_records(app.pool.as_ref(), session_id, &mut session).await;
 
-        for frame in outcome.messages {
-            if sender.send(Message::Text(frame.into())).await.is_err() {
-                close_session(app.pool.as_ref(), session_id).await;
-                return;
+                for frame in &outcome.messages {
+                    if sender.send(Message::Text(frame.clone().into())).await.is_err() {
+                        let _ = command_tx.send(SearchCommand::Stop);
+                        close_session(app.pool.as_ref(), session_id).await;
+                        return;
+                    }
+                }
+
+                if outcome.finish_table {
+                    let _ = command_tx.send(SearchCommand::Stop);
+                    close_session(app.pool.as_ref(), session_id).await;
+                    if let Some(frame) = session_finished_message()
+                        && sender.send(Message::Text(frame.into())).await.is_err()
+                    {
+                        return;
+                    }
+                    return;
+                }
+
+                // Reshape the solver's trees onto the played branch so the
+                // analysis keeps accumulation between hero decisions.
+                if let Some(hero_action) = outcome.hero_action {
+                    if !session.state().is_hand_over() && session.state().to_act() == Seat::Hero {
+                        let _ = command_tx.send(SearchCommand::Reshape {
+                            state: Box::new(observable_clone(session.state())),
+                            path: Some(PursuedPath {
+                                hero_action,
+                                opponent_actions: session.take_pump_actions(),
+                            }),
+                            hand_no: session.hand_no(),
+                        });
+                    } else {
+                        session.take_pump_actions();
+                    }
+                }
+
+                if session.state().is_hand_over() {
+                    tokio::time::sleep(std::time::Duration::from_millis(app.result_pause_ms)).await;
+                    for frame in advance_frames(&mut session) {
+                        if sender.send(Message::Text(frame.into())).await.is_err() {
+                            let _ = command_tx.send(SearchCommand::Stop);
+                            close_session(app.pool.as_ref(), session_id).await;
+                            return;
+                        }
+                    }
+                    session.take_pump_actions();
+                    let _ = command_tx.send(SearchCommand::Reshape {
+                        state: Box::new(observable_clone(session.state())),
+                        path: None,
+                        hand_no: session.hand_no(),
+                    });
+                }
+
+                if ticks_since_snapshot >= app.snapshot_interval.max(1) {
+                    ticks_since_snapshot = 0;
+                    if let Some(frame) = snapshot_frame(app.pool.as_ref()).await
+                        && sender.send(Message::Text(frame.into())).await.is_err()
+                    {
+                        let _ = command_tx.send(SearchCommand::Stop);
+                        close_session(app.pool.as_ref(), session_id).await;
+                        return;
+                    }
+                }
+            }
+            status = update_rx.recv(), if solver_alive => {
+                match status {
+                    Some(status) => {
+                        latest_snapshot = Some(status.result.clone());
+                        let frame = search_status_message(&status);
+                        if sender.send(Message::Text(frame.into())).await.is_err() {
+                            let _ = command_tx.send(SearchCommand::Stop);
+                            close_session(app.pool.as_ref(), session_id).await;
+                            return;
+                        }
+                    }
+                    None => {
+                        // The solver task ended: drop the stale snapshot and
+                        // keep playing with inline solves.
+                        tracing::warn!("background solver task ended; falling back to inline solves");
+                        latest_snapshot = None;
+                        solver_alive = false;
+                    }
+                }
             }
         }
+    }
+    let _ = command_tx.send(SearchCommand::Stop);
+    solver.abort();
+    close_session(app.pool.as_ref(), session_id).await;
+}
 
-        if outcome.finish_table {
-            close_session(app.pool.as_ref(), session_id).await;
-            if let Some(frame) = session_finished_message()
-                && sender.send(Message::Text(frame.into())).await.is_err()
-            {
-                return;
+/// The background MCTS worker: owns the persistent solver, consumes reshape
+/// commands, and publishes a progress status after every bounded chunk of
+/// blocking work.
+async fn run_searcher(
+    mut commands: mpsc::UnboundedReceiver<SearchCommand>,
+    updates: mpsc::UnboundedSender<SearcherStatus>,
+    config: MctsConfig,
+    ranges: [Range; 2],
+) {
+    let mut search: Option<Searcher> = None;
+    let mut pending: Option<(Box<GameState>, Option<PursuedPath>, u64)> = None;
+
+    loop {
+        let mut stop = false;
+        while let Ok(command) = commands.try_recv() {
+            match command {
+                SearchCommand::Stop => stop = true,
+                SearchCommand::Reshape {
+                    state,
+                    path,
+                    hand_no,
+                } => {
+                    pending = Some((state, path, hand_no));
+                }
             }
+        }
+        if stop {
             return;
         }
 
-        if session.state().is_hand_over() {
-            tokio::time::sleep(std::time::Duration::from_millis(app.result_pause_ms)).await;
-            for frame in advance_frames(&mut session) {
-                if sender.send(Message::Text(frame.into())).await.is_err() {
-                    close_session(app.pool.as_ref(), session_id).await;
+        if search.is_none() {
+            let Some((state, _, hand_no)) = pending.take() else {
+                match commands.recv().await {
+                    Some(SearchCommand::Stop) | None => return,
+                    Some(SearchCommand::Reshape {
+                        state,
+                        path,
+                        hand_no,
+                    }) => {
+                        pending = Some((state, path, hand_no));
+                    }
+                }
+                continue;
+            };
+            let built = tokio::task::spawn_blocking(move || {
+                Searcher::build(
+                    &state,
+                    ranges,
+                    config,
+                    hand_no,
+                    &mut crate::rng::seeded_rng(rand::random::<u64>()),
+                )
+            })
+            .await;
+            match built {
+                Ok(Ok(built)) => {
+                    match built.status() {
+                        Ok(status) => {
+                            let _ = updates.send(status);
+                        }
+                        Err(error) => tracing::warn!(%error, "solver startup status unavailable"),
+                    }
+                    search = Some(built);
+                }
+                Ok(Err(error)) => {
+                    tracing::error!(%error, "background solver build failed");
                     return;
+                }
+                Err(join) => {
+                    tracing::error!(?join, "background solver worker panicked");
+                    return;
+                }
+            }
+            continue;
+        }
+
+        if pending.is_none() && !search.as_ref().is_some_and(Searcher::needs_work) {
+            match commands.recv().await {
+                Some(SearchCommand::Stop) | None => return,
+                Some(SearchCommand::Reshape {
+                    state,
+                    path,
+                    hand_no,
+                }) => {
+                    pending = Some((state, path, hand_no));
                 }
             }
         }
 
-        if ticks_since_snapshot >= app.snapshot_interval.max(1) {
-            ticks_since_snapshot = 0;
-            if let Some(frame) = snapshot_frame(app.pool.as_ref()).await
-                && sender.send(Message::Text(frame.into())).await.is_err()
-            {
-                close_session(app.pool.as_ref(), session_id).await;
+        let active = search.take().expect("built above");
+        let reshape = pending.take();
+        let updates = updates.clone();
+        let outcome = tokio::task::spawn_blocking(move || -> Result<Searcher> {
+            let mut active = active;
+            if let Some((state, path, hand_no)) = reshape {
+                active.reshape(&state, path.as_ref(), hand_no)?;
+            }
+            if active.needs_work() {
+                let _ = active.run_chunk(CHUNK_WALL)?;
+            }
+            Ok(active)
+        })
+        .await;
+        match outcome {
+            Ok(Ok(active)) => {
+                match active.status() {
+                    Ok(status) => {
+                        let _ = updates.send(status);
+                    }
+                    Err(error) => tracing::warn!(%error, "solver status unavailable"),
+                }
+                search = Some(active);
+            }
+            Ok(Err(error)) => {
+                tracing::error!(%error, "background solver failed; falling back to inline solves");
+                return;
+            }
+            Err(join) => {
+                tracing::error!(?join, "background solver worker panicked");
                 return;
             }
         }
     }
-    close_session(app.pool.as_ref(), session_id).await;
+}
+
+/// Serializes the solver's progress into a client-ready frame.
+fn search_status_message(status: &SearcherStatus) -> String {
+    let phase = match status.phase {
+        SearcherPhase::Searching => SearchPhase::Searching,
+        SearcherPhase::Ready => SearchPhase::Ready,
+    };
+    match (ServerMessage::SearchStatus {
+        iterations_done: status.iterations_done,
+        target_iterations: status.target_iterations,
+        tree_depth: status.result.max_tree_depth,
+        max_depth: status.result.max_depth,
+        nodes: status.result.nodes as u64,
+        phase,
+    })
+    .to_json()
+    {
+        Ok(json) => json,
+        Err(error) => error_message(&error.to_string()),
+    }
 }
 
 /// Opens the analytics session backing this connection; persistence is
@@ -223,14 +454,22 @@ fn advance_frames(session: &mut TableSession) -> Vec<String> {
 }
 
 /// Handles one client text frame; never fails the connection — problems are
-/// reported back as [`ServerMessage::Error`] frames.
-fn handle_client_message(session: &mut TableSession, text: &str) -> FrameOutcome {
+/// reported back as [`ServerMessage::Error`] frames. `snapshot` is the
+/// background solver's latest result: submissions score against it instantly
+/// and fall back to an inline solve when it is unavailable or misses the
+/// played action.
+fn handle_client_message(
+    session: &mut TableSession,
+    text: &str,
+    snapshot: Option<&crate::mcts::SolveResult>,
+) -> FrameOutcome {
     let client_message: ClientMessage = match serde_json::from_str(text) {
         Ok(message) => message,
         Err(error) => {
             return FrameOutcome {
                 messages: vec![error_message(&format!("malformed message: {error}"))],
                 chart_ticks: 0,
+                hero_action: None,
                 finish_table: false,
             };
         }
@@ -239,26 +478,40 @@ fn handle_client_message(session: &mut TableSession, text: &str) -> FrameOutcome
     match client_message {
         ClientMessage::ActionSubmit { action } => {
             match protocol::resolve_action(&action, session.state()) {
-                Ok(resolved) => match session.submit(resolved) {
-                    Ok(events) => outcome(session, events),
-                    Err(error) => error_outcome(&error.to_string()),
-                },
+                Ok(resolved) => {
+                    let submitted = match snapshot {
+                        Some(snapshot) => session.submit_with_snapshot(resolved, snapshot),
+                        None => session.submit(resolved),
+                    };
+                    match submitted {
+                        Ok(events) => outcome(session, events, Some(resolved)),
+                        Err(error) => error_outcome(&error.to_string()),
+                    }
+                }
                 Err(error) => error_outcome(&error.to_string()),
             }
         }
-        ClientMessage::ReviewDone => match session.confirm_review() {
-            Ok(events) => outcome(session, events),
-            Err(error) => error_outcome(&error.to_string()),
-        },
+        ClientMessage::ReviewDone => {
+            let hero_action = session.pending_action();
+            match session.confirm_review() {
+                Ok(events) => outcome(session, events, hero_action),
+                Err(error) => error_outcome(&error.to_string()),
+            }
+        }
         ClientMessage::FinishTable => FrameOutcome {
             messages: Vec::new(),
             chart_ticks: 0,
+            hero_action: None,
             finish_table: true,
         },
     }
 }
 
-fn outcome(session: &mut TableSession, events: Vec<TableEvent>) -> FrameOutcome {
+fn outcome(
+    session: &mut TableSession,
+    events: Vec<TableEvent>,
+    hero_action: Option<Action>,
+) -> FrameOutcome {
     let chart_ticks = events
         .iter()
         .filter(|event| matches!(event, TableEvent::ChartTick { .. }))
@@ -266,6 +519,7 @@ fn outcome(session: &mut TableSession, events: Vec<TableEvent>) -> FrameOutcome 
     FrameOutcome {
         messages: events_to_messages(session, events),
         chart_ticks,
+        hero_action,
         finish_table: false,
     }
 }
@@ -274,6 +528,7 @@ fn error_outcome(message: &str) -> FrameOutcome {
     FrameOutcome {
         messages: vec![error_message(message)],
         chart_ticks: 0,
+        hero_action: None,
         finish_table: false,
     }
 }
@@ -372,6 +627,137 @@ mod tests {
         session
     }
 
+    fn hero_decision_state() -> GameState {
+        use crate::card::Deck;
+        use crate::game::blinds::BlindLevel;
+        use crate::rng::seeded_rng;
+        let mut state = GameState::new(Seat::Opponent1, BlindLevel::new(10, 20));
+        state
+            .start_hand(&mut Deck::shuffled(&mut seeded_rng(90)))
+            .unwrap();
+        assert_eq!(state.to_act(), Seat::Hero);
+        state
+    }
+
+    fn uniform_ranges() -> [Range; 2] {
+        use crate::range::hands::HAND_COUNT;
+        [[1.0 / HAND_COUNT as f32; HAND_COUNT]; 2]
+    }
+
+    #[tokio::test]
+    async fn searcher_task_stops_immediately_without_commands() {
+        let (command_tx, command_rx) = mpsc::unbounded_channel();
+        let (update_tx, mut update_rx) = mpsc::unbounded_channel();
+        command_tx.send(SearchCommand::Stop).unwrap();
+        run_searcher(command_rx, update_tx, MctsConfig::test(), uniform_ranges()).await;
+        assert!(
+            update_rx.recv().await.is_none(),
+            "no status is published for a stopped worker"
+        );
+    }
+
+    #[tokio::test]
+    async fn searcher_task_waits_for_its_first_command() {
+        let (command_tx, command_rx) = mpsc::unbounded_channel();
+        let (update_tx, _update_rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(run_searcher(
+            command_rx,
+            update_tx,
+            MctsConfig::test(),
+            uniform_ranges(),
+        ));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        command_tx.send(SearchCommand::Stop).unwrap();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn searcher_task_builds_reports_and_stops() {
+        let (command_tx, command_rx) = mpsc::unbounded_channel();
+        let (update_tx, mut update_rx) = mpsc::unbounded_channel();
+        let state = hero_decision_state();
+        command_tx
+            .send(SearchCommand::Reshape {
+                state: Box::new(observable_clone(&state)),
+                path: None,
+                hand_no: 1,
+            })
+            .unwrap();
+        let task = tokio::spawn(run_searcher(
+            command_rx,
+            update_tx,
+            MctsConfig::test(),
+            uniform_ranges(),
+        ));
+        let mut status = tokio::time::timeout(Duration::from_secs(5), update_rx.recv())
+            .await
+            .expect("the solver publishes a status")
+            .expect("the solver stays alive");
+        assert!(!status.result.actions.is_empty());
+        while status.phase != SearcherPhase::Ready {
+            status = tokio::time::timeout(Duration::from_secs(5), update_rx.recv())
+                .await
+                .expect("the solver keeps publishing")
+                .expect("the solver stays alive");
+        }
+        command_tx.send(SearchCommand::Stop).unwrap();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn searcher_task_reshapes_on_command() {
+        let (command_tx, command_rx) = mpsc::unbounded_channel();
+        let (update_tx, mut update_rx) = mpsc::unbounded_channel();
+        let state = hero_decision_state();
+        command_tx
+            .send(SearchCommand::Reshape {
+                state: Box::new(observable_clone(&state)),
+                path: None,
+                hand_no: 1,
+            })
+            .unwrap();
+        let task = tokio::spawn(run_searcher(
+            command_rx,
+            update_tx,
+            MctsConfig::test(),
+            uniform_ranges(),
+        ));
+        let _ = tokio::time::timeout(Duration::from_secs(5), update_rx.recv())
+            .await
+            .expect("first status arrives");
+        command_tx
+            .send(SearchCommand::Reshape {
+                state: Box::new(observable_clone(&state)),
+                path: None,
+                hand_no: 2,
+            })
+            .unwrap();
+        let status = tokio::time::timeout(Duration::from_secs(5), update_rx.recv())
+            .await
+            .expect("the reshaped solver publishes again")
+            .expect("the solver stays alive");
+        assert!(!status.result.actions.is_empty());
+        command_tx.send(SearchCommand::Stop).unwrap();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn searcher_task_survives_a_build_failure() {
+        use crate::range::hands::HAND_COUNT;
+        let (command_tx, command_rx) = mpsc::unbounded_channel();
+        let (update_tx, _update_rx) = mpsc::unbounded_channel();
+        let state = hero_decision_state();
+        let dead_ranges = [[0.0f32; HAND_COUNT]; 2];
+        command_tx
+            .send(SearchCommand::Reshape {
+                state: Box::new(observable_clone(&state)),
+                path: None,
+                hand_no: 1,
+            })
+            .unwrap();
+        run_searcher(command_rx, update_tx, MctsConfig::test(), dead_ranges).await;
+    }
+
     fn parse(text: &str) -> Value {
         serde_json::from_str(text).unwrap()
     }
@@ -386,7 +772,7 @@ mod tests {
     #[test]
     fn malformed_json_yields_an_error_frame() {
         let mut session = make_session();
-        let outcome = handle_client_message(&mut session, "{not json");
+        let outcome = handle_client_message(&mut session, "{not json", None);
         assert_eq!(outcome.messages.len(), 1);
         assert!(!outcome.finish_table);
         assert_eq!(outcome.chart_ticks, 0);
@@ -407,6 +793,7 @@ mod tests {
         let outcome = handle_client_message(
             &mut session,
             r#"{"type":"ACTION_SUBMIT","action":{"kind":"zzz"}}"#,
+            None,
         );
         assert_eq!(outcome.messages.len(), 1);
         assert_eq!(parse(&outcome.messages[0])["type"], "ERROR");
@@ -420,6 +807,7 @@ mod tests {
         let outcome = handle_client_message(
             &mut session,
             r#"{"type":"ACTION_SUBMIT","action":{"kind":"check"}}"#,
+            None,
         );
         assert_eq!(outcome.messages.len(), 1);
         let json = parse(&outcome.messages[0]);
@@ -433,6 +821,7 @@ mod tests {
         let outcome = handle_client_message(
             &mut session,
             r#"{"type":"ACTION_SUBMIT","action":{"kind":"call"}}"#,
+            None,
         );
         assert_eq!(outcome.chart_ticks, 1, "each applied action charts a tick");
         assert!(!outcome.messages.is_empty());
@@ -454,7 +843,7 @@ mod tests {
         let mut session = make_session();
         session.stage_pending_interception(Action::Fold, sample_analysis());
 
-        let outcome = handle_client_message(&mut session, r#"{"type":"REVIEW_DONE"}"#);
+        let outcome = handle_client_message(&mut session, r#"{"type":"REVIEW_DONE"}"#, None);
         assert!(
             session.state().is_hand_over(),
             "with the hero folded, opponents play the hand to its end"
@@ -525,7 +914,7 @@ mod tests {
     #[test]
     fn finish_table_yields_the_session_finished_frame() {
         let mut session = make_session();
-        let outcome = handle_client_message(&mut session, r#"{"type":"FINISH_TABLE"}"#);
+        let outcome = handle_client_message(&mut session, r#"{"type":"FINISH_TABLE"}"#, None);
         assert!(
             outcome.finish_table,
             "FINISH_TABLE ends the connection loop"
@@ -542,7 +931,7 @@ mod tests {
     #[test]
     fn review_done_without_a_pending_interception_is_an_error() {
         let mut session = make_session();
-        let outcome = handle_client_message(&mut session, r#"{"type":"REVIEW_DONE"}"#);
+        let outcome = handle_client_message(&mut session, r#"{"type":"REVIEW_DONE"}"#, None);
         assert_eq!(outcome.messages.len(), 1);
         let json = parse(&outcome.messages[0]);
         assert_eq!(json["type"], "ERROR");
@@ -565,7 +954,7 @@ mod tests {
         };
         session.stage_pending_interception(action, sample_analysis());
 
-        let outcome = handle_client_message(&mut session, r#"{"type":"REVIEW_DONE"}"#);
+        let outcome = handle_client_message(&mut session, r#"{"type":"REVIEW_DONE"}"#, None);
         let types: Vec<String> = outcome
             .messages
             .iter()
@@ -712,6 +1101,7 @@ mod tests {
                         .unwrap();
                 }
                 "TABLE_STATE_UPDATE" => break,
+                "SEARCH_STATUS" => {}
                 other => panic!("unexpected frame type {other}"),
             }
         }
@@ -735,7 +1125,7 @@ mod tests {
                     "ERROR" => break frame,
                     // A hand that ended earlier may still ship its delayed
                     // next-deal state before the error frame arrives.
-                    "TABLE_STATE_UPDATE" => continue,
+                    "TABLE_STATE_UPDATE" | "SEARCH_STATUS" => continue,
                     other => panic!("unexpected frame type {other} for payload {payload}"),
                 }
             };
@@ -759,7 +1149,7 @@ mod tests {
             let frame = parse(&next_text(&mut stream).await);
             match frame["type"].as_str().unwrap() {
                 "ERROR" => break frame,
-                "TABLE_STATE_UPDATE" => continue,
+                "TABLE_STATE_UPDATE" | "SEARCH_STATUS" => continue,
                 other => panic!("unexpected frame type {other}"),
             }
         };
@@ -779,7 +1169,14 @@ mod tests {
             .send(TMessage::Text(r#"{"type":"FINISH_TABLE"}"#.into()))
             .await
             .unwrap();
-        let frame = parse(&next_text(&mut stream).await);
+        let frame = loop {
+            let frame = parse(&next_text(&mut stream).await);
+            match frame["type"].as_str().unwrap() {
+                "SESSION_FINISHED" => break frame,
+                "SEARCH_STATUS" => continue,
+                other => panic!("unexpected frame type {other} while finishing"),
+            }
+        };
         assert_eq!(
             frame,
             json!({"type": "SESSION_FINISHED", "url": TOURNAMENTS_URL})
@@ -831,6 +1228,7 @@ mod tests {
                         break;
                     }
                 }
+                "SEARCH_STATUS" => {}
                 other => panic!("unexpected frame type {other}"),
             }
         }
@@ -931,7 +1329,7 @@ mod tests {
                 "SESSION_FINISHED" => break frame,
                 // Delayed post-result deals or snapshot refreshes may arrive
                 // before the navigation frame.
-                "TABLE_STATE_UPDATE" | "CHART_SNAPSHOT" => continue,
+                "TABLE_STATE_UPDATE" | "CHART_SNAPSHOT" | "SEARCH_STATUS" => continue,
                 other => panic!("unexpected frame type {other} while finishing"),
             }
         };

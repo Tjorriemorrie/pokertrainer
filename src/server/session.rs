@@ -100,6 +100,10 @@ pub struct TableSession {
     opponents: OpponentTracker,
     /// Sound cues accumulated since the last rendered state update.
     sounds: Vec<Sound>,
+    /// Opponent actions applied by [`Self::pump`] since the last drain; the
+    /// WebSocket layer uses them to reshape the background solver's tree onto
+    /// the played branch.
+    pump_actions: Vec<Action>,
 }
 
 impl TableSession {
@@ -127,6 +131,7 @@ impl TableSession {
             records: Vec::new(),
             opponents: OpponentTracker::default(),
             sounds: Vec::new(),
+            pump_actions: Vec::new(),
         }
     }
 
@@ -155,6 +160,7 @@ impl TableSession {
             records: Vec::new(),
             opponents: OpponentTracker::default(),
             sounds: Vec::new(),
+            pump_actions: Vec::new(),
         }
     }
 
@@ -168,6 +174,17 @@ impl TableSession {
 
     pub fn log(&self) -> &[String] {
         &self.log
+    }
+
+    /// The opponent range models fed to the solver.
+    pub fn ranges(&self) -> [Range; 2] {
+        self.ranges
+    }
+
+    /// Drains the opponent actions the last [`Self::pump`] applied, in play
+    /// order — the `Reshape` path the background solver follows.
+    pub fn take_pump_actions(&mut self) -> Vec<Action> {
+        std::mem::take(&mut self.pump_actions)
     }
 
     /// The live HUD snapshots for both opponents, rendered inside the coach
@@ -245,6 +262,11 @@ impl TableSession {
         self.pending.is_some()
     }
 
+    /// The hero action parked behind a pending interception, if any.
+    pub fn pending_action(&self) -> Option<Action> {
+        self.pending.as_ref().map(|pending| pending.action)
+    }
+
     /// Deals the next hand, rotating the button and reshuffling an exhausted
     /// deck.
     pub fn deal_next_hand(&mut self) -> crate::error::Result<()> {
@@ -298,6 +320,7 @@ impl TableSession {
             let action = placeholder_action(&mut self.rng, &self.state);
             self.opponents
                 .record(actor, action, self.state.street(), legal.call_amount > 0);
+            self.pump_actions.push(action);
             apply_settled(&mut self.state, &mut self.deck, action)?;
             if let Some(sound) = Self::sound_for(action) {
                 self.push_sound(sound);
@@ -334,7 +357,46 @@ impl TableSession {
             &self.survival,
             Some(action),
         )?;
+        self.finish_submission(action, analyzed)
+    }
 
+    /// Like [`Self::submit`], but scores the decision against the background
+    /// solver's latest snapshot instead of running a solve — the answer is
+    /// instant. Off-bucket actions (a bet-slider amount the searcher never
+    /// searched) fall back to a full synchronous analyze.
+    pub fn submit_with_snapshot(
+        &mut self,
+        action: Action,
+        snapshot: &crate::mcts::SolveResult,
+    ) -> Result<Vec<TableEvent>> {
+        validate_action(&self.state, action)?;
+        if self.pending.is_some() {
+            return Err(Error::Decision(
+                "a blunder interception is pending review — confirm it first".into(),
+            ));
+        }
+
+        let analyzed =
+            match decision::analyze_snapshot(&self.state, snapshot, &self.survival, Some(action)) {
+                Ok(analyzed) => analyzed,
+                Err(_) => decision::analyze(
+                    &mut self.rng,
+                    &self.state,
+                    &self.ranges,
+                    &self.mcts,
+                    &self.survival,
+                    Some(action),
+                )?,
+            };
+        self.finish_submission(action, analyzed)
+    }
+
+    /// The interception-and-apply pipeline shared by both submission paths.
+    fn finish_submission(
+        &mut self,
+        action: Action,
+        analyzed: AnalyzedDecision,
+    ) -> Result<Vec<TableEvent>> {
         self.action_no += 1;
         let ev_loss = analyzed
             .played
@@ -1049,6 +1111,124 @@ mod tests {
         assert_eq!(session.hand_no(), 2);
         assert!(!session.state().is_hand_over());
         assert_eq!(session.state().to_act(), Seat::Hero);
+    }
+
+    #[test]
+    fn submit_with_snapshot_answers_instantly_and_records_like_submit() {
+        let state = river_facing_bet();
+        let snapshot = mcts::solve(
+            &mut seeded_rng(50),
+            &state,
+            &[uniform(), uniform()],
+            &probe_config(),
+        )
+        .unwrap();
+        let mut session = TableSession::resume(
+            state,
+            Deck::default(),
+            1,
+            51,
+            probe_config(),
+            survival(),
+            never_intercepts(),
+        );
+        let events = session
+            .submit_with_snapshot(Action::Fold, &snapshot)
+            .unwrap();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            TableEvent::ChartTick {
+                action_index: 1,
+                ..
+            }
+        )));
+        assert!(events.contains(&TableEvent::State));
+        let records = session.take_records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].played, "Fold");
+    }
+
+    /// An off-bucket slider amount is not in the snapshot: the submission
+    /// falls back to a full inline solve so the played action still gets an
+    /// exact evaluation.
+    #[test]
+    fn submit_with_snapshot_falls_back_for_off_bucket_amounts() {
+        let mut state = river_facing_bet();
+        state.set_stack(Seat::Hero, 400);
+        let snapshot = mcts::solve(
+            &mut seeded_rng(52),
+            &state,
+            &[uniform(), uniform()],
+            &probe_config(),
+        )
+        .unwrap();
+        let played = Action::Raise(250);
+        assert!(
+            !snapshot.actions.iter().any(|value| value.action == played),
+            "fixture should use an off-bucket amount"
+        );
+        let mut session = TableSession::resume(
+            state,
+            Deck::default(),
+            1,
+            53,
+            probe_config(),
+            survival(),
+            never_intercepts(),
+        );
+        let events = session.submit_with_snapshot(played, &snapshot).unwrap();
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                TableEvent::ChartTick {
+                    action_index: 1,
+                    ..
+                }
+            )),
+            "the played slider amount is evaluated and charted: {events:?}"
+        );
+        assert!(events.contains(&TableEvent::State));
+        let records = session.take_records();
+        assert_eq!(records[0].played, views::action_label(played));
+    }
+
+    /// The opponent actions applied between two hero decisions are recorded
+    /// in play order and drained once the WebSocket layer consumes them.
+    #[test]
+    fn pump_actions_accumulate_in_order_and_drain() {
+        let state = river_facing_bet();
+        let mut session = TableSession::resume(
+            state,
+            Deck::default(),
+            1,
+            54,
+            probe_config(),
+            survival(),
+            never_intercepts(),
+        );
+        assert!(session.take_pump_actions().is_empty());
+        session.submit(Action::Fold).unwrap();
+        let actions = session.take_pump_actions();
+        assert!(
+            actions.iter().all(|action| matches!(
+                action,
+                Action::Fold
+                    | Action::Check
+                    | Action::Call
+                    | Action::Bet(_)
+                    | Action::Raise(_)
+                    | Action::AllIn
+            )),
+            "recorded actions are real opponent moves: {actions:?}"
+        );
+        assert!(
+            !actions.is_empty() || session.state().is_hand_over(),
+            "opponents finished the hand after the fold"
+        );
+        assert!(
+            session.take_pump_actions().is_empty(),
+            "draining empties the buffer"
+        );
     }
 
     #[test]
