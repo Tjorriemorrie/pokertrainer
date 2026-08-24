@@ -8,7 +8,8 @@ use crate::error::{Error, Result};
 /// is interrupted: after a warm-up phase the trigger threshold is the
 /// `(1 − p)`-quantile of the hero's own rolling EV-loss history, where
 /// `p = 1 / (target_hands · A_hand)` and `A_hand` is the rolling
-/// actions-per-hand ratio.
+/// actions-per-hand ratio. All EV losses are measured in big blinds so a
+/// river mistake in a large pot does not drown out equally bad preflop play.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BlunderConfig {
     /// Interventions fire on roughly one hand in this many.
@@ -18,9 +19,9 @@ pub struct BlunderConfig {
     /// Rolling window of recent hands used for the actions-per-hand ratio.
     pub history_hands: usize,
     /// Minimum number of recorded actions before the percentile threshold is
-    /// trusted; until then a big-blind-scaled floor applies.
+    /// trusted; until then a big-blind floor applies.
     pub warmup_actions: usize,
-    /// The warm-up threshold in big blinds: `ev_loss >= fallback_bb · BB`
+    /// The warm-up threshold in big blinds: `ev_loss >= fallback_bb`
     /// interrupts the decision.
     pub fallback_bb: f64,
     /// Lower/upper clamps on the trigger ratio `p`.
@@ -96,8 +97,9 @@ impl BlunderConfig {
     }
 }
 
-/// The engine's rolling error-rate history: recent hero EV losses (in chips)
-/// and the actions-per-hand ratio used to derive the dynamic threshold.
+/// The engine's rolling error-rate history: recent hero EV losses (in big
+/// blinds) and the actions-per-hand ratio used to derive the dynamic
+/// threshold.
 #[derive(Clone, Debug)]
 pub struct Tracker {
     config: BlunderConfig,
@@ -173,25 +175,26 @@ impl Tracker {
         ratio.clamp(self.config.min_trigger_ratio, self.config.max_trigger_ratio)
     }
 
-    /// The dynamic threshold in chips: an infinite threshold before any
-    /// history (nothing fires), the big-blind-scaled floor during warm-up,
-    /// then the `(1 − p)`-quantile of recent losses by nearest rank.
-    pub fn threshold(&self, big_blind: u32) -> f64 {
+    /// The dynamic threshold in big blinds: an infinite threshold before any
+    /// history (nothing fires), the floor during warm-up, then the
+    /// `(1 − p)`-quantile of recent losses by nearest rank.
+    pub fn threshold(&self) -> f64 {
         if self.losses.is_empty() {
             return f64::INFINITY;
         }
         if self.losses.len() < self.config.warmup_actions {
-            return self.config.fallback_bb * f64::from(big_blind);
+            return self.config.fallback_bb;
         }
         kth_largest(&self.losses, self.trigger_rank())
     }
 
-    /// Whether the given EV loss interrupts the current decision.
-    pub fn should_intercept(&self, ev_loss: f64, big_blind: u32) -> bool {
+    /// Whether the given EV loss (in big blinds) interrupts the current
+    /// decision.
+    pub fn should_intercept(&self, ev_loss: f64) -> bool {
         if ev_loss <= 0.0 {
             return false;
         }
-        ev_loss >= self.threshold(big_blind)
+        ev_loss >= self.threshold()
     }
 
     /// The rank of the threshold within the action window: the k-th largest
@@ -358,27 +361,35 @@ mod tests {
     fn empty_history_never_intercepts_but_warmup_floor_applies_after_one_action() {
         let empty = Tracker::new(config());
         assert!(
-            !empty.should_intercept(1000.0, 20),
+            !empty.should_intercept(1000.0),
             "nothing fires before any history"
         );
-        assert_eq!(empty.threshold(20), f64::INFINITY);
+        assert_eq!(empty.threshold(), f64::INFINITY);
 
         let mut tracker = Tracker::new(config());
         tracker.record_action(50.0);
-        assert_eq!(tracker.threshold(20), 40.0, "2BB floor at BB=20");
-        assert!(!tracker.should_intercept(39.9, 20));
-        assert!(tracker.should_intercept(40.0, 20));
+        assert_eq!(
+            tracker.threshold(),
+            config().fallback_bb,
+            "warm-up floor in big blinds"
+        );
+        assert!(!tracker.should_intercept(1.9));
+        assert!(tracker.should_intercept(2.0));
     }
 
     #[test]
-    fn warmup_uses_the_big_blind_scaled_floor() {
+    fn warmup_uses_the_big_blind_floor() {
         let mut tracker = Tracker::new(config());
         record_many(&mut tracker, &[1.0, 1.0, 1.0]);
         assert_eq!(tracker.recorded_actions(), 3);
         assert!(tracker.recorded_actions() < tracker.config.warmup_actions);
-        assert_eq!(tracker.threshold(20), 40.0, "2BB floor at BB=20");
-        assert!(!tracker.should_intercept(39.9, 20));
-        assert!(tracker.should_intercept(40.0, 20));
+        assert_eq!(
+            tracker.threshold(),
+            config().fallback_bb,
+            "2BB floor while warming up"
+        );
+        assert!(!tracker.should_intercept(1.9));
+        assert!(tracker.should_intercept(2.0));
     }
 
     #[test]
@@ -386,10 +397,10 @@ mod tests {
         let mut tracker = Tracker::new(config());
         record_many(&mut tracker, &[5.0, 5.0, 5.0, 5.0]);
         assert!(
-            !tracker.should_intercept(0.0, 20),
+            !tracker.should_intercept(0.0),
             "zero EV loss is never intercepted"
         );
-        assert!(!tracker.should_intercept(-1.0, 20));
+        assert!(!tracker.should_intercept(-1.0));
     }
 
     #[test]
@@ -404,9 +415,9 @@ mod tests {
             2,
             "k = ceil(4/3) = 2, the 2nd largest = 3.0"
         );
-        assert_eq!(tracker.threshold(20), 3.0);
-        assert!(!tracker.should_intercept(2.9, 20));
-        assert!(tracker.should_intercept(3.0, 20));
+        assert_eq!(tracker.threshold(), 3.0);
+        assert!(!tracker.should_intercept(2.9));
+        assert!(tracker.should_intercept(3.0));
     }
 
     #[test]
@@ -492,7 +503,7 @@ mod tests {
             } else {
                 0.5 + rng.random::<f64>() * 60.0
             };
-            let fires = tracker.should_intercept(loss, 20);
+            let fires = tracker.should_intercept(loss);
             intercepts += u64::from(fires);
             intercepted_this_hand |= fires;
             tracker.record_action(loss);

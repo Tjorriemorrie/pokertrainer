@@ -51,7 +51,7 @@ pub enum ServerMessage {
         intercepted: bool,
     },
     /// One evaluated action: global action index and the EV lost against the
-    /// optimal action.
+    /// optimal action, in big blinds.
     ChartTick { action_index: u64, ev_loss: f64 },
     /// A decimated dataset (100 points mapping the chart window) sent on
     /// connect and periodically, so the client renders the stored history

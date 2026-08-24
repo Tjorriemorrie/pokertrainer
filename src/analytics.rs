@@ -23,7 +23,7 @@ pub const CHART_WINDOW: usize = 1000;
 pub const DECIMATED_POINTS: usize = 100;
 
 /// A chart point: the x coordinate (the action's global or session ordinal)
-/// plus the EV lost against the optimal action.
+/// plus the EV lost against the optimal action, in big blinds.
 pub type ChartPoint = (u64, f64);
 
 /// One hero decision awaiting a database write.
@@ -33,6 +33,7 @@ pub struct PendingDecision {
     pub street: Street,
     pub played: String,
     pub optimal: String,
+    /// EV given up against the optimal action, in big blinds.
     pub ev_loss: f64,
 }
 
@@ -44,6 +45,7 @@ pub struct SessionSummary {
     pub ended: String,
     pub actions: i64,
     pub hands: i32,
+    /// Mean EV loss across the session's actions, in big blinds.
     pub avg_ev_loss: f64,
 }
 

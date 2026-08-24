@@ -65,8 +65,9 @@ pub enum TableEvent {
         /// `REVIEW_DONE` to advance).
         intercepted: bool,
     },
-    /// One evaluated action for the top-bar EV tracker; the decimated
-    /// 1,000-action dataset arrives separately in chart snapshots.
+    /// One evaluated action for the top-bar EV tracker (EV loss in big
+    /// blinds); the decimated 1,000-action dataset arrives separately in
+    /// chart snapshots.
     ChartTick { action_index: u64, ev_loss: f64 },
 }
 
@@ -323,20 +324,16 @@ impl TableSession {
         let ev_loss = analyzed
             .played
             .as_ref()
-            .map(|played| played.ev_loss)
+            .map(|played| played.ev_loss_bb)
             .unwrap_or(0.0);
 
-        let intercepted = self
-            .blunder_tracker
-            .should_intercept(ev_loss, self.state.blind_level().big_blind);
+        let intercepted = self.blunder_tracker.should_intercept(ev_loss);
         self.blunder_tracker.record_action(ev_loss);
 
         if intercepted {
             tracing::info!(
                 ev_loss,
-                threshold = %(self.blunder_tracker.threshold(
-                    self.state.blind_level().big_blind
-                )),
+                threshold = %(self.blunder_tracker.threshold()),
                 hand_no = self.hand_no,
                 "blunder intercepted — freezing the state transition"
             );
@@ -368,7 +365,7 @@ impl TableSession {
             .analyzed
             .played
             .as_ref()
-            .map(|played| played.ev_loss)
+            .map(|played| played.ev_loss_bb)
             .unwrap_or(0.0);
         tracing::info!(
             action = ?pending.action,

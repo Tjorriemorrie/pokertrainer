@@ -341,7 +341,9 @@ fn error_message(message: &str) -> String {
 mod tests {
     use super::*;
     use crate::blunder::BlunderConfig;
-    use crate::decision::{Analysis, AnalyzedDecision, PlayedEvaluation, SurvivalConfig};
+    use crate::decision::{
+        Analysis, AnalyzedDecision, PlayedEvaluation, SearchReport, SurvivalConfig,
+    };
     use crate::game::{Action, Seat};
     use crate::mcts::MctsConfig;
     use crate::server::http::{AppState, ServeListener, default_assets};
@@ -500,9 +502,17 @@ mod tests {
             optimal: fold,
             played: Some(PlayedEvaluation {
                 analysis: fold,
-                ev_loss: 0.0,
+                ev_loss_bb: 0.0,
                 is_optimal: true,
             }),
+            search: SearchReport {
+                worlds: 1,
+                iterations: 1,
+                max_depth: 1,
+                max_tree_depth: 1,
+                nodes: 2,
+                rollout_actions: 5,
+            },
         }
     }
 

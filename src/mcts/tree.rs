@@ -50,6 +50,18 @@ pub(crate) struct Payoff {
 /// bust probability, and total visits.
 pub(crate) type WorldValue = (Action, Option<BetSize>, f64, f64, f64, u64);
 
+/// How deep one world's search actually ran: the deepest tree node expanded,
+/// how many nodes the tree holds in total, and how many actions were
+/// simulated in the rollouts below the tree horizon. The tree-depth cap and
+/// iteration budget live in the solve result, so the realized effort can be
+/// compared against the configured budget.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SearchStats {
+    pub(crate) max_tree_depth: usize,
+    pub(crate) nodes: usize,
+    pub(crate) rollout_actions: u64,
+}
+
 /// One node of a single-world search tree. Every node keeps its own copy of
 /// the game state (boards and contributions are path-dependent), so worlds
 /// never share information and sampled opponent holdings stay isolated.
@@ -78,6 +90,10 @@ pub(crate) struct WorldSearch<'a> {
     baseline: u32,
     config: MctsConfig,
     root_candidates: Candidates,
+    /// Deepest node expanded so far (in hero-decision depth).
+    max_tree_depth: usize,
+    /// Actions simulated in rollouts so far.
+    rollout_actions: u64,
 }
 
 impl<'a> WorldSearch<'a> {
@@ -108,15 +124,28 @@ impl<'a> WorldSearch<'a> {
             baseline,
             config,
             root_candidates,
+            max_tree_depth: 0,
+            rollout_actions: 0,
         }
     }
 
-    pub(crate) fn run<R: Rng + ?Sized>(&mut self, rng: &mut R) -> Result<Vec<WorldValue>> {
+    pub(crate) fn run<R: Rng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+    ) -> Result<(Vec<WorldValue>, SearchStats)> {
         for _ in 0..self.config.iterations {
             self.iterate(rng)?;
         }
         self.fill_unexpanded_root_candidates(rng)?;
-        self.root_values()
+        let values = self.root_values()?;
+        Ok((
+            values,
+            SearchStats {
+                max_tree_depth: self.max_tree_depth,
+                nodes: self.nodes.len(),
+                rollout_actions: self.rollout_actions,
+            },
+        ))
     }
 
     fn iterate<R: Rng + ?Sized>(&mut self, rng: &mut R) -> Result<()> {
@@ -173,6 +202,7 @@ impl<'a> WorldSearch<'a> {
         let parent_offset = self.nodes[index].offset;
         let next_offset = step(&mut next, action, self.runout, parent_offset)?;
         let hero_depth = self.nodes[index].hero_depth + 1;
+        self.max_tree_depth = self.max_tree_depth.max(hero_depth);
 
         let kind = if next.is_hand_over() || next.folded(Seat::Hero) || beyond_horizon {
             Kind::Leaf
@@ -227,6 +257,7 @@ impl<'a> WorldSearch<'a> {
                 let mut next = self.clone_state(index);
                 let next_offset = step(&mut next, action, self.runout, self.nodes[index].offset)?;
                 let hero_depth = parent_hero_depth + 1;
+                self.max_tree_depth = self.max_tree_depth.max(hero_depth);
                 let beyond_horizon = hero_depth >= self.config.max_depth;
                 let kind = if next.is_hand_over() || next.folded(Seat::Hero) || beyond_horizon {
                     Kind::Leaf
@@ -328,7 +359,7 @@ impl<'a> WorldSearch<'a> {
             .unwrap_or(index)
     }
 
-    fn leaf_payoff<R: Rng + ?Sized>(&self, rng: &mut R, index: usize) -> Result<Payoff> {
+    fn leaf_payoff<R: Rng + ?Sized>(&mut self, rng: &mut R, index: usize) -> Result<Payoff> {
         let node = &self.nodes[index];
         if node.state.is_hand_over() {
             let stack = node.state.stack(Seat::Hero);
@@ -338,7 +369,9 @@ impl<'a> WorldSearch<'a> {
             });
         }
         let mut state = node.state.clone_with_hole_cards(self.cards_of(node));
-        rollout(rng, &mut state, self.runout, node.offset, self.baseline)
+        let (payoff, actions) = rollout(rng, &mut state, self.runout, node.offset, self.baseline)?;
+        self.rollout_actions += actions as u64;
+        Ok(payoff)
     }
 
     fn cards_of(&self, node: &Node) -> [[Card; 2]; 3] {
@@ -531,13 +564,22 @@ mod tests {
         let (state, world) = make_world();
         let mut search = make_search(&state, &world);
         let mut rng = seeded_rng(22);
-        let values = search.run(&mut rng).unwrap();
+        let (values, stats) = search.run(&mut rng).unwrap();
         assert_eq!(values.len(), candidates(&state).len());
         for (action, _, value, _, _, visits) in &values {
             assert!(value.is_finite(), "{action:?} EV not finite");
             assert!(*visits >= 1, "{action:?} never visited");
             assert!(candidates(&state).iter().any(|(a, _)| a == action));
         }
+        assert!(
+            stats.nodes > 1,
+            "the search grows past the root: {} nodes",
+            stats.nodes
+        );
+        assert!(
+            stats.rollout_actions > 0,
+            "simulations below the horizon count actions"
+        );
     }
 
     #[test]
@@ -545,7 +587,7 @@ mod tests {
         let (state, world) = make_world();
         let mut search = make_search(&state, &world);
         let mut rng = seeded_rng(23);
-        search.run(&mut rng).unwrap();
+        let _ = search.run(&mut rng).unwrap();
         let iterations = MctsConfig::test().iterations as u64;
         assert!(
             search.nodes[search.root].visits >= iterations,
@@ -559,7 +601,7 @@ mod tests {
         let (state, world) = make_world();
         let mut search = make_search(&state, &world);
         let mut rng = seeded_rng(24);
-        search.run(&mut rng).unwrap();
+        let _ = search.run(&mut rng).unwrap();
 
         let mut found = false;
         for index in 0..search.node_count() {
@@ -578,7 +620,7 @@ mod tests {
         let (state, world) = make_world();
         let mut search = make_search(&state, &world);
         let mut rng = seeded_rng(25);
-        search.run(&mut rng).unwrap();
+        let _ = search.run(&mut rng).unwrap();
 
         let mut checked = 0;
         for index in 0..search.node_count() {

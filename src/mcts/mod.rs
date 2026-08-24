@@ -46,11 +46,22 @@ impl ActionValue {
 }
 
 /// The outcome of one solve: one EV per candidate action, sorted from best
-/// to worst, expected value in chips.
+/// to worst, expected value in chips — plus how deep and how wide the search
+/// actually ran, so the UI can show and audit the solver's effort.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SolveResult {
     pub actions: Vec<ActionValue>,
     pub worlds: usize,
+    /// The effective per-world iteration budget after street scaling.
+    pub iterations: usize,
+    /// The effective tree-depth cap in hero decisions after street scaling.
+    pub max_depth: usize,
+    /// Total tree nodes expanded across all worlds.
+    pub nodes: usize,
+    /// The deepest tree node expanded across all worlds.
+    pub max_tree_depth: usize,
+    /// Total actions simulated in rollouts across all worlds.
+    pub rollout_actions: u64,
 }
 
 /// Solves the hero's current decision.
@@ -59,7 +70,9 @@ pub struct SolveResult {
 /// ranges (`[Opponent1, Opponent2]`), runs an isolated expectimax-UCT search
 /// per world over the hero's candidate actions, and returns the
 /// range-probability-weighted action EVs — opponent holdings are never
-/// averaged across worlds mid-search.
+/// averaged across worlds mid-search. The budget is scaled per street via
+/// [`MctsConfig::for_street`], so early streets (more unknown runouts) get
+/// the deeper search they need.
 pub fn solve<R: Rng + ?Sized>(
     rng: &mut R,
     state: &GameState,
@@ -87,19 +100,26 @@ pub fn solve_with_candidates<R: Rng + ?Sized>(
         return Err(Error::Solver("solver requires the hero to act".into()));
     }
 
-    let worlds = WorldSampler::sample(rng, state, ranges, config.worlds)?;
+    let budget = config.for_street(state.street());
+    let worlds = WorldSampler::sample(rng, state, ranges, budget.worlds)?;
     let baseline = state.stack(Seat::Hero);
 
     let mut per_world: Vec<PerWorld> = Vec::with_capacity(worlds.len());
+    let mut total_nodes = 0usize;
+    let mut max_tree_depth = 0usize;
+    let mut total_rollout_actions = 0u64;
     for world in &worlds {
         let mut search = WorldSearch::new(
             world.build_state(state),
             &world.runout,
             baseline,
             root_candidates.to_vec(),
-            *config,
+            budget,
         );
-        let values = search.run(rng)?;
+        let (values, stats) = search.run(rng)?;
+        total_nodes += stats.nodes;
+        max_tree_depth = max_tree_depth.max(stats.max_tree_depth);
+        total_rollout_actions += stats.rollout_actions;
         per_world.push((
             world.weight,
             values
@@ -133,6 +153,11 @@ pub fn solve_with_candidates<R: Rng + ?Sized>(
     Ok(SolveResult {
         actions,
         worlds: worlds.len(),
+        iterations: budget.iterations,
+        max_depth: budget.max_depth,
+        nodes: total_nodes,
+        max_tree_depth,
+        rollout_actions: total_rollout_actions,
     })
 }
 
@@ -354,7 +379,13 @@ mod tests {
             assert!(pair[0].ev >= pair[1].ev, "actions not sorted by EV");
         }
         assert!(result.actions.iter().all(|a| a.visits >= 1));
-        assert_eq!(result.worlds, MctsConfig::test().worlds);
+        let budget = MctsConfig::test().for_street(state.street());
+        assert_eq!(
+            result.worlds, budget.worlds,
+            "the street-scaled world count is reported"
+        );
+        assert_eq!(result.iterations, budget.iterations);
+        assert_eq!(result.max_depth, budget.max_depth);
     }
 
     /// Deals a hand from a custom deck and plays to a river where Opponent 1

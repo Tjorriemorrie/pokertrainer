@@ -23,15 +23,22 @@ interface and coaches decision-making with a range-based solver.
   holdings are sampled from range vectors with blocker (card-removal)
   adjustment; every sampled world keeps its own isolated expectimax-UCT
   search, and action EVs are the range-probability-weighted average across
-  worlds.
+  worlds. The budget scales with the street: preflop gets 2× the worlds,
+  2× the iterations, and one extra tree-depth cap (flop 1.5×, turn 1.25×,
+  river unchanged) because early streets branch over far more unknown
+  runouts. Every solve reports how deep it actually went — worlds,
+  iterations, realized tree depth, nodes, and rollout actions — and the
+  coach panel shows this alongside per-action visit counts so the search
+  effort can be audited.
 - **Decision layer:** validates player-submitted actions (including
   off-bucket bet-slider amounts) and evaluates them against the optimal
   action. Because only first place pays, "optimal" maximizes a survivability
   score derived from CRRA utility over the hero's stack:
   `EV − λσ² − κ·P(bust)` with λ = γ/(2S) and bust cost κ = S·ln(S/b) under
   Kelly (γ = 1) — variance and bust risk are penalized more the shorter the
-  hero's stack. The played action's exact chip EV loss is reported against
-  the optimal one.
+  hero's stack. The played action's EV loss is normalized to **big blinds**,
+  so a preflop mistake counts as heavily as an equally bad river mistake
+  regardless of pot size.
 - **HTTP + WebSocket bridge:** an Axum server (`127.0.0.1:8744` by
   default, `SERVER_ADDR` to change) serving the rendered app shell and static
   assets (`assets/`), plus a WebSocket at `/ws` with the event protocol:
@@ -49,8 +56,9 @@ interface and coaches decision-making with a range-based solver.
   decisions, and deals the next hand automatically. Opponent ranges are
   uniform until profile/sequence-node loading is wired into the loop.
 - **Blunder intervention engine:** monitors the hero's rolling error
-  rate (EV loss per action) and intercepts the worst blunders with a dynamic,
-  calibrated threshold. After a 24-action warm-up the trigger is the
+  rate (EV loss per action, in big blinds so pot size never skews severity)
+  and intercepts the worst blunders with a dynamic, calibrated threshold.
+  After a 24-action warm-up the trigger is the
   `(1 − p)`-quantile of your own last 300 EV losses, where
   `p = 1/(3 · A_hand)` and `A_hand` is the rolling actions-per-hand ratio —
   tuned so about one hand in three is interrupted. Below the threshold the
@@ -62,13 +70,15 @@ interface and coaches decision-making with a range-based solver.
   replayed and the game resumes.
 - **Session persistence & EV analytics:** every hero decision is stored
   in the database (`hero_decisions`) with the hand number, street, played and
-  optimal action, and the EV lost. The top-bar chart plays back your lifetime
+  optimal action, and the EV lost (in big blinds). The top-bar chart plays
+  back your lifetime
   history: on connect the server sends a decimated `CHART_SNAPSHOT` (100
   points mapping the last 1,000 actions across every table) and keeps it
   refreshed while you play. When you finish a table — press **Finish table**
   in the top bar or just close the tab — the session is finalized, and the
   **Tournament history** link (or `/tournaments`) shows one such graph per
-  finished tournament with its hands/actions and average EV loss. Sessions
+  finished tournament with its hands/actions and average EV loss in BB.
+  Sessions
   without any stored decision never appear.
 - **GGPoker frontend:** a server-rendered GGPoker table skin with the
   Spin and Gold look — dark-teal oval felt on a wooden rail, three fixed seat

@@ -37,11 +37,31 @@ impl Analysis {
 pub struct PlayedEvaluation {
     /// The solver/risk analysis of the played action itself.
     pub analysis: Analysis,
-    /// The chip EV given up relative to the optimal action (0.0 when the
-    /// played action is the optimal one).
-    pub ev_loss: f64,
+    /// The chip EV given up relative to the optimal action, normalized to
+    /// big blinds (0.0 when the played action is the optimal one). Big-blind
+    /// units make errors comparable across streets and pot sizes: a preflop
+    /// mistake counts as heavily as the same-big-blind river mistake.
+    pub ev_loss_bb: f64,
     /// Whether the played action is exactly the survivability-optimal one.
     pub is_optimal: bool,
+}
+
+/// How wide and deep the solve behind a decision actually went, echoed for
+/// the UI so the search effort can be audited.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SearchReport {
+    /// Determinizations sampled from the opponent ranges.
+    pub worlds: usize,
+    /// Per-world iteration budget after street scaling.
+    pub iterations: usize,
+    /// Tree-depth cap in hero decisions after street scaling.
+    pub max_depth: usize,
+    /// Deepest tree node actually expanded.
+    pub max_tree_depth: usize,
+    /// Total tree nodes expanded across all worlds.
+    pub nodes: usize,
+    /// Total actions simulated in rollouts across all worlds.
+    pub rollout_actions: u64,
 }
 
 /// The outcome of analyzing the hero's current decision node.
@@ -54,6 +74,8 @@ pub struct AnalyzedDecision {
     pub optimal: Analysis,
     /// The evaluation of the played action, when one was submitted.
     pub played: Option<PlayedEvaluation>,
+    /// The solve's realized search effort.
+    pub search: SearchReport,
 }
 
 /// Validates a player-submitted action against the current state: the hand
@@ -131,6 +153,7 @@ pub fn analyze<R: Rng + ?Sized>(
         .copied()
         .ok_or_else(|| Error::Decision("no candidate actions to rank".into()))?;
 
+    let big_blind = f64::from(state.blind_level().big_blind);
     let played = played
         .map(|action| -> Result<PlayedEvaluation> {
             let analysis = analyses
@@ -140,7 +163,7 @@ pub fn analyze<R: Rng + ?Sized>(
                 .ok_or_else(|| Error::Decision("played action missing from the analysis".into()))?;
             Ok(PlayedEvaluation {
                 analysis,
-                ev_loss: (optimal.ev - analysis.ev).max(0.0),
+                ev_loss_bb: ((optimal.ev - analysis.ev).max(0.0)) / big_blind,
                 is_optimal: action == optimal.action,
             })
         })
@@ -150,6 +173,14 @@ pub fn analyze<R: Rng + ?Sized>(
         ranking: analyses,
         optimal,
         played,
+        search: SearchReport {
+            worlds: result.worlds,
+            iterations: result.iterations,
+            max_depth: result.max_depth,
+            max_tree_depth: result.max_tree_depth,
+            nodes: result.nodes,
+            rollout_actions: result.rollout_actions,
+        },
     })
 }
 
@@ -187,6 +218,7 @@ fn rank_desc(a: &Analysis, b: &Analysis) -> Ordering {
 mod tests {
     use super::*;
     use crate::card::{Card, Deck, Rank, Suit};
+    use crate::game::Seat;
     use crate::game::Street;
     use crate::game::blinds::BlindLevel;
     use crate::game::state::GameState;
@@ -362,8 +394,9 @@ mod tests {
         let played = result.played.unwrap();
         assert!(!played.is_optimal);
         assert_eq!(
-            played.ev_loss,
-            (result.optimal.ev - played.analysis.ev).max(0.0)
+            played.ev_loss_bb,
+            (result.optimal.ev - played.analysis.ev).max(0.0) / 20.0,
+            "EV loss is reported in big blinds (BB = 20)"
         );
     }
 
@@ -399,7 +432,7 @@ mod tests {
 
         let played = result.played.unwrap();
         assert!(played.is_optimal, "folding should be optimal here");
-        assert_eq!(played.ev_loss, 0.0);
+        assert_eq!(played.ev_loss_bb, 0.0);
     }
 
     #[test]
@@ -519,5 +552,58 @@ mod tests {
         };
         assert!(safe.ev < busty.ev);
         assert_eq!(rank_desc(&safe, &busty), Ordering::Less);
+    }
+
+    /// Regression for the junk-hand coaching complaint: with 6♠3♦ preflop
+    /// against two 100%-AA ranges the solver must resolve fold as the best
+    /// action — no "you should've bet" noise from an under-searched preflop.
+    #[test]
+    fn junk_preflop_hand_never_recommends_betting_against_aces() {
+        let mut state = GameState::new(Seat::Opponent1, level());
+        state
+            .start_hand(&mut Deck::shuffled(&mut seeded_rng(18)))
+            .unwrap();
+        state.set_hole_cards(
+            Seat::Hero,
+            [
+                card(Rank::Six, Suit::Spades),
+                card(Rank::Three, Suit::Diamonds),
+            ],
+        );
+        assert_eq!(state.to_act(), Seat::Hero);
+        assert_eq!(state.street(), Street::Preflop);
+
+        let mut rng = seeded_rng(19);
+        let result = analyze(
+            &mut rng,
+            &state,
+            &[aces(), aces()],
+            &MctsConfig::test(),
+            &SurvivalConfig::default(),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            result.optimal.action,
+            Action::Fold,
+            "63o cannot open against two pinned AA ranges: {:#?}",
+            result.ranking
+        );
+        for candidate in &result.ranking {
+            if matches!(
+                candidate.action,
+                Action::Bet(_) | Action::Raise(_) | Action::AllIn
+            ) {
+                assert!(
+                    candidate.score <= result.optimal.score,
+                    "a raise scored above fold for 63o: {candidate:?}"
+                );
+            }
+        }
+        assert!(
+            result.search.iterations >= MctsConfig::test().iterations,
+            "the preflop street budget was applied"
+        );
     }
 }

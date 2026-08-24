@@ -82,7 +82,7 @@ pub fn tournaments_page(sessions: &[(SessionSummary, Vec<ChartPoint>)]) -> Strin
   <div class="pt-tournament-head">
     <span class="pt-tournament-title">Tournament #{}</span>
     <span class="pt-tournament-meta">{} → {}</span>
-    <span class="pt-tournament-meta">{} hands · {} actions · avg EV loss {:.2}</span>
+    <span class="pt-tournament-meta">{} hands · {} actions · avg EV loss {:.2} BB</span>
   </div>
   <canvas class="ev-chart" width="1200" height="48" data-points='{}'></canvas>
 </section>"#,
@@ -530,8 +530,8 @@ pub fn tactical_overlay_fragment(
             optimal.ev
         ));
         html.push_str(&format!(
-            r#"<div class="pt-ev-loss">EV lost: <b>{:.1}</b> chips</div>"#,
-            played.ev_loss
+            r#"<div class="pt-ev-loss">EV lost: <b>{:.2}</b> BB</div>"#,
+            played.ev_loss_bb
         ));
     } else {
         html.push_str(&format!(
@@ -542,7 +542,7 @@ pub fn tactical_overlay_fragment(
     }
 
     html.push_str(
-        r#"<table class="pt-ranking"><tr><th>Action</th><th>EV</th><th>σ</th><th>Bust</th></tr>"#,
+        r#"<table class="pt-ranking"><tr><th>Action</th><th>EV</th><th>σ</th><th>Bust</th><th>Visits</th></tr>"#,
     );
     for analysis in &decision.ranking {
         let row_class = if analysis.action == optimal.action {
@@ -557,14 +557,26 @@ pub fn tactical_overlay_fragment(
             ""
         };
         html.push_str(&format!(
-            r#"<tr class="{row_class}"><td>{}</td><td>{:.1}</td><td>{:.0}</td><td>{:.1}%</td></tr>"#,
+            r#"<tr class="{row_class}"><td>{}</td><td>{:.1}</td><td>{:.0}</td><td>{:.1}%</td><td>{}</td></tr>"#,
             escape(&action_label(analysis.action)),
             analysis.ev,
             analysis.sigma(),
-            analysis.bust_prob * 100.0
+            analysis.bust_prob * 100.0,
+            analysis.visits
         ));
     }
     html.push_str("</table>");
+
+    let search = &decision.search;
+    html.push_str(&format!(
+        r#"<div class="pt-search-meta">Search: {} worlds × {} iterations · tree depth {} of {} cap · {} nodes · {} rollout actions</div>"#,
+        search.worlds,
+        search.iterations,
+        search.max_tree_depth,
+        search.max_depth,
+        search.nodes,
+        search.rollout_actions
+    ));
 
     if intercepted {
         html.push_str(
@@ -582,7 +594,7 @@ mod tests {
     use super::*;
     use crate::card::Deck;
     use crate::card::Rank;
-    use crate::decision::{Analysis, PlayedEvaluation};
+    use crate::decision::{Analysis, PlayedEvaluation, SearchReport};
     use crate::game::blinds::BlindLevel;
     use crate::rng::seeded_rng;
 
@@ -712,7 +724,7 @@ mod tests {
         let page = tournaments_page(&sessions);
         assert!(page.contains(r#"data-tournament-id="7""#));
         assert!(page.contains("Tournament #7"));
-        assert!(page.contains("3 hands · 3 actions · avg EV loss 12.50"));
+        assert!(page.contains("3 hands · 3 actions · avg EV loss 12.50 BB"));
         assert!(page.contains("2026-08-01T10:00:00Z → 2026-08-01T10:05:00Z"));
         assert!(page.contains("Tournament #42"));
         assert!(
@@ -1052,9 +1064,17 @@ mod tests {
             optimal: fold,
             played: Some(PlayedEvaluation {
                 analysis: call,
-                ev_loss: 18.0,
+                ev_loss_bb: 0.9,
                 is_optimal: false,
             }),
+            search: SearchReport {
+                worlds: 16,
+                iterations: 96,
+                max_depth: 3,
+                max_tree_depth: 3,
+                nodes: 1240,
+                rollout_actions: 4120,
+            },
         }
     }
 
@@ -1064,10 +1084,15 @@ mod tests {
         assert!(fragment.contains("Hand #7 — Decision review"));
         assert!(fragment.contains("You played <b>Call</b>"));
         assert!(fragment.contains("Optimal: <b>Fold</b>"));
-        assert!(fragment.contains("EV lost: <b>18.0</b> chips"));
+        assert!(fragment.contains("EV lost: <b>0.90</b> BB"));
         assert!(fragment.contains(r#"<tr class="optimal"><td>Fold</td>"#));
         assert!(fragment.contains(r#"<tr class="played"><td>Call</td>"#));
+        assert!(fragment.contains("<th>Visits</th>"));
         assert!(fragment.contains(r#"data-overlay-close"#));
+        assert!(
+            fragment.contains("Search: 16 worlds × 96 iterations"),
+            "the search-effort line is shown: {fragment}"
+        );
         assert!(
             fragment.contains(r#"class="pt-feedback-card""#),
             "the breakdown renders in the coach panel beside the table"

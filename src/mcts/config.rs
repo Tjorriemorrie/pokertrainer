@@ -1,7 +1,9 @@
 use crate::error::{Error, Result};
+use crate::game::Street;
 
 /// Parameters controlling one solver run: how many determinizations are
 /// sampled from the opponent ranges and how deep each per-world search goes.
+/// Effective budgets are scaled per street via [`MctsConfig::for_street`].
 ///
 /// A "world" is one sampled opponent holding plus the remaining deck order;
 /// every world gets its own isolated search, and the root action values are
@@ -60,6 +62,37 @@ impl MctsConfig {
         }
         Ok(())
     }
+
+    /// The effective budget for a decision on `street`.
+    ///
+    /// Early streets branch over many more unknown runouts than the river, so
+    /// a straight per-street budget either under-searches preflop (noisy junk
+    /// hands get erratic "optimal" calls) or wastes time on the river. The
+    /// multipliers spend the extra effort where the branching is:
+    ///
+    /// * preflop — 2× worlds, 2× iterations, one extra tree-depth cap,
+    /// * flop — 1.5× worlds and iterations,
+    /// * turn — 1.25× worlds and iterations,
+    /// * river — unchanged.
+    pub fn for_street(self, street: Street) -> Self {
+        let (worlds_scale, iterations_scale, depth_extra) = match street {
+            Street::Preflop => (2.0, 2.0, 1_usize),
+            Street::Flop => (1.5, 1.5, 0),
+            Street::Turn => (1.25, 1.25, 0),
+            Street::River => (1.0, 1.0, 0),
+        };
+        Self {
+            worlds: scale_up(self.worlds, worlds_scale),
+            iterations: scale_up(self.iterations, iterations_scale),
+            max_depth: self.max_depth + depth_extra,
+            ..self
+        }
+    }
+}
+
+/// Rounds a budget up to the nearest whole unit, at least one.
+fn scale_up(base: usize, scale: f64) -> usize {
+    ((base as f64 * scale).ceil() as usize).max(1)
 }
 
 #[cfg(test)]
@@ -108,5 +141,35 @@ mod tests {
             };
             assert!(matches!(config.validate(), Err(Error::InvalidConfig(_))));
         }
+    }
+
+    #[test]
+    fn street_budgets_scale_effort_where_the_branching_is() {
+        let base = MctsConfig {
+            worlds: 10,
+            iterations: 100,
+            uct_c: 60.0,
+            max_depth: 3,
+        };
+
+        let preflop = base.for_street(crate::game::Street::Preflop);
+        assert_eq!(preflop.worlds, 20, "preflop doubles the worlds");
+        assert_eq!(preflop.iterations, 200, "preflop doubles the iterations");
+        assert_eq!(preflop.max_depth, 4, "preflop gains one tree-depth cap");
+
+        let flop = base.for_street(crate::game::Street::Flop);
+        assert_eq!(flop.worlds, 15);
+        assert_eq!(flop.iterations, 150);
+        assert_eq!(flop.max_depth, 3, "postflop keeps the depth cap");
+
+        let turn = base.for_street(crate::game::Street::Turn);
+        assert_eq!(turn.worlds, 13, "1.25× rounds up to the whole unit");
+
+        assert_eq!(
+            base.for_street(crate::game::Street::River),
+            base,
+            "the river keeps the base budget"
+        );
+        preflop.validate().unwrap();
     }
 }
