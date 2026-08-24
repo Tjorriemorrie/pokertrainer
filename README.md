@@ -173,7 +173,8 @@ interface and coaches decision-making with a range-based solver.
   calls, bets, raises, the dealt board (each street's cards are logged as
   they land — `Flop 2c 7h Kd`, `Turn 4s`, `River Jd`), and results are
   appended below earlier entries and the
-  panel auto-scrolls to the newest line. At showdown every player's revealed
+  panel auto-scrolls to the newest line. At showdown the full board is logged
+  (`Board 2c 7h Kd 4s Jd`), then every player's revealed
   cards (with their hand class) are logged, followed by a line stating who
   won (name, amount, and the winning hand class) or how the pot was split,
   so the log tells the whole story of the hand. When a hand ends, no centre

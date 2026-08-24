@@ -762,6 +762,8 @@ impl TableSession {
                 );
             }
             HandEndReason::Showdown => {
+                let board = self.state.board().to_vec();
+                self.log_line(format!("Board {}", cards_text(&board)));
                 for (seat, cards, class) in &result.revealed {
                     self.log_line(format!("{seat} shows {} {} ({class})", cards[0], cards[1]));
                 }
@@ -1706,7 +1708,8 @@ mod tests {
         assert_eq!(session.log().last().unwrap(), "final");
     }
 
-    /// At showdown every revealed hand is logged, followed by a line stating
+    /// At showdown the full board is logged first, then every revealed hand,
+    /// followed by a line stating
     /// the winner (with the winning hand class) or the split-pot shares, so
     /// the action log tells the whole story of the hand.
     #[test]
@@ -1722,6 +1725,26 @@ mod tests {
         );
         session.submit(Action::Call).unwrap();
         let log = session.log();
+        let board_line = session
+            .state()
+            .board()
+            .iter()
+            .map(|card| card.to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let board = format!("Board {board_line}");
+        let board_pos = log
+            .iter()
+            .position(|line| line.eq(&board))
+            .expect("the full board is logged at showdown");
+        let first_reveal = log
+            .iter()
+            .position(|line| line.contains("shows"))
+            .expect("revealed cards are logged at showdown");
+        assert!(
+            board_pos < first_reveal,
+            "the board line comes before the revealed hands: {log:?}"
+        );
         assert!(
             log.iter().any(|line| line.contains("shows")),
             "revealed cards are logged at showdown: {log:?}"
