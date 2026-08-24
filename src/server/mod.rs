@@ -16,6 +16,7 @@ pub use session::{TableEvent, TableSession};
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use sqlx::PgPool;
 
@@ -31,6 +32,7 @@ pub const LIVE_MCTS: MctsConfig = MctsConfig {
     iterations: 96,
     uct_c: 60.0,
     max_depth: 3,
+    min_duration: Duration::from_secs(5),
 };
 
 /// Everything the server needs to run: the bind address, the solver

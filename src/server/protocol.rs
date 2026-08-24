@@ -82,7 +82,11 @@ pub enum ServerMessage {
 pub enum SearchPhase {
     /// Still working toward the configured iteration budget.
     Searching,
-    /// The budget is reached; the search idles until the next decision.
+    /// The iteration budget is reached but the minimum think time has not
+    /// elapsed yet — the search keeps deepening.
+    DepthReached,
+    /// Both the budget and the minimum think time are met; the search idles
+    /// until the next decision.
     Ready,
 }
 
@@ -458,6 +462,19 @@ mod tests {
             .to_json()
             .unwrap(),
             r#"{"type":"SEARCH_STATUS","iterations_done":32,"target_iterations":64,"tree_depth":3,"max_depth":5,"nodes":412,"phase":"SEARCHING"}"#
+        );
+        assert_eq!(
+            ServerMessage::SearchStatus {
+                iterations_done: 64,
+                target_iterations: 64,
+                tree_depth: 5,
+                max_depth: 5,
+                nodes: 900,
+                phase: SearchPhase::DepthReached,
+            }
+            .to_json()
+            .unwrap(),
+            r#"{"type":"SEARCH_STATUS","iterations_done":64,"target_iterations":64,"tree_depth":5,"max_depth":5,"nodes":900,"phase":"DEPTH_REACHED"}"#
         );
         assert_eq!(
             ServerMessage::SearchStatus {

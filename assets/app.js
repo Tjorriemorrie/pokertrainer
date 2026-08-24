@@ -176,17 +176,25 @@ function setStatus(text, cls) {
     statusEl.className = cls;
   }
 
+  function formatK(n) {
+    if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, "") + "M";
+    if (n >= 1_000) return (n / 1_000).toFixed(1).replace(/\.0$/, "") + "k";
+    return String(n);
+  }
+
   function setSolverStatus(msg) {
     if (!mctsEl) return;
+    const depth = `d${msg.tree_depth}/${msg.max_depth}`;
+    const text = `${depth} · ${formatK(msg.iterations_done)}`;
+    let cls;
     if (msg.phase === "READY") {
-      mctsEl.textContent = `search d${msg.tree_depth}/${msg.max_depth} · done`;
-      mctsEl.className = "mcts-status status-ok";
-      return;
+      cls = "status-ok";
+    } else if (msg.phase === "DEPTH_REACHED") {
+      cls = "status-wait";
+    } else {
+      cls = "status-bad";
     }
-    const target = msg.target_iterations || 1;
-    const pct = Math.round((100 * msg.iterations_done) / target);
-    const cls = pct >= 66 ? "status-ok" : pct >= 33 ? "status-wait" : "status-bad";
-    mctsEl.textContent = `search d${msg.tree_depth}/${msg.max_depth} · ${pct}%`;
+    mctsEl.textContent = text;
     mctsEl.className = `mcts-status ${cls}`;
   }
 

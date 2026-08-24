@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use crate::error::{Error, Result};
 use crate::game::Street;
 
@@ -20,6 +22,9 @@ pub struct MctsConfig {
     /// Maximum number of hero decisions explored in the tree per world before
     /// falling back to rollout policy.
     pub max_depth: usize,
+    /// Minimum wall-clock time a decision keeps searching, even after the
+    /// iteration budget is reached, so the tree has time to grow deeper.
+    pub min_duration: Duration,
 }
 
 impl Default for MctsConfig {
@@ -29,6 +34,7 @@ impl Default for MctsConfig {
             iterations: 128,
             uct_c: 60.0,
             max_depth: 4,
+            min_duration: Duration::from_secs(5),
         }
     }
 }
@@ -41,6 +47,7 @@ impl MctsConfig {
             iterations: 32,
             uct_c: 40.0,
             max_depth: 3,
+            min_duration: Duration::ZERO,
         }
     }
 
@@ -104,6 +111,11 @@ mod tests {
         MctsConfig::default().validate().unwrap();
         assert_eq!(MctsConfig::default().worlds, 32);
         assert_eq!(MctsConfig::default().iterations, 128);
+        assert_eq!(
+            MctsConfig::default().min_duration,
+            Duration::from_secs(5),
+            "live searches keep thinking for at least five seconds"
+        );
     }
 
     #[test]
@@ -112,6 +124,11 @@ mod tests {
         config.validate().unwrap();
         assert!(config.worlds <= 8);
         assert!(config.iterations <= 64);
+        assert_eq!(
+            config.min_duration,
+            Duration::ZERO,
+            "tests skip the minimum-duration wait"
+        );
     }
 
     #[test]
@@ -150,6 +167,7 @@ mod tests {
             iterations: 100,
             uct_c: 60.0,
             max_depth: 3,
+            min_duration: Duration::ZERO,
         };
 
         let preflop = base.for_street(crate::game::Street::Preflop);

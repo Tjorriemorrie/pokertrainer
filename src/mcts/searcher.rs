@@ -47,7 +47,11 @@ pub struct ReshapeReport {
 pub enum SearcherPhase {
     /// Still working toward the configured iteration budget.
     Searching,
-    /// The budget is reached: the search idles until the next decision.
+    /// The iteration budget is reached but the minimum think time has not
+    /// elapsed yet — the search keeps deepening.
+    DepthReached,
+    /// Both the budget and the minimum think time are met: the search idles
+    /// until the next decision.
     Ready,
 }
 
@@ -55,6 +59,7 @@ impl SearcherPhase {
     pub fn as_str(self) -> &'static str {
         match self {
             SearcherPhase::Searching => "searching",
+            SearcherPhase::DepthReached => "depth_reached",
             SearcherPhase::Ready => "ready",
         }
     }
@@ -105,6 +110,7 @@ pub struct Searcher {
     epoch: u64,
     sweeps: u64,
     target: u64,
+    started: Instant,
 }
 
 impl Searcher {
@@ -130,6 +136,7 @@ impl Searcher {
             epoch: 0,
             sweeps: 0,
             target: budget.iterations as u64,
+            started: Instant::now(),
         };
         searcher.rebuild_arenas(state);
         searcher.fill_all()?;
@@ -140,9 +147,11 @@ impl Searcher {
         self.hand_no
     }
 
-    /// Whether work remains before the current decision's budget is met.
+    /// Whether work remains before the current decision's budget is met: the
+    /// iteration target must be reached and the minimum think time must have
+    /// elapsed.
     pub fn needs_work(&self) -> bool {
-        self.sweeps < self.target
+        self.sweeps < self.target || self.started.elapsed() < self.config.min_duration
     }
 
     /// Re-roots the search at `state`, the hero's next decision point. With a
@@ -171,6 +180,7 @@ impl Searcher {
         self.budget = self.config.for_street(state.street());
         self.target = self.budget.iterations as u64;
         self.sweeps = 0;
+        self.started = Instant::now();
         self.epoch += 1;
 
         if self
@@ -331,12 +341,22 @@ impl Searcher {
             },
             iterations_done: self.sweeps,
             target_iterations: self.target,
-            phase: if self.needs_work() {
-                SearcherPhase::Searching
-            } else {
-                SearcherPhase::Ready
-            },
+            phase: self.phase(),
         })
+    }
+
+    /// The lifecycle phase of the current decision: still searching, depth
+    /// reached but the minimum think time not yet elapsed, or fully done.
+    fn phase(&self) -> SearcherPhase {
+        let depth_reached = self.sweeps >= self.target;
+        let time_met = self.started.elapsed() >= self.config.min_duration;
+        if depth_reached && time_met {
+            SearcherPhase::Ready
+        } else if depth_reached {
+            SearcherPhase::DepthReached
+        } else {
+            SearcherPhase::Searching
+        }
     }
 
     /// The root candidate set (identical across worlds: computed from
@@ -478,6 +498,31 @@ mod tests {
                 .unwrap()
                 .is_none(),
             "a ready search has nothing left to do"
+        );
+    }
+
+    #[test]
+    fn depth_reached_bridges_the_budget_and_the_minimum_think_time() {
+        let state = preflop_decision();
+        let mut rng = seeded_rng(108);
+        let config = MctsConfig {
+            iterations: 1,
+            min_duration: Duration::from_secs(3600),
+            ..MctsConfig::test()
+        };
+        let mut searcher = Searcher::build(&state, uniform_ranges(), config, 1, &mut rng).unwrap();
+        let status = searcher
+            .run_chunk(Duration::from_millis(5))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            status.phase,
+            SearcherPhase::DepthReached,
+            "the budget is met but the minimum think time has not elapsed"
+        );
+        assert!(
+            searcher.needs_work(),
+            "the minimum think time keeps the search working"
         );
     }
 

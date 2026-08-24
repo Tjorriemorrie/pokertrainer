@@ -325,6 +325,7 @@ async fn run_searcher(
 fn search_status_message(status: &SearcherStatus) -> String {
     let phase = match status.phase {
         SearcherPhase::Searching => SearchPhase::Searching,
+        SearcherPhase::DepthReached => SearchPhase::DepthReached,
         SearcherPhase::Ready => SearchPhase::Ready,
     };
     match (ServerMessage::SearchStatus {
@@ -1010,6 +1011,36 @@ mod tests {
         let message = state_message(&mut session).unwrap();
         assert!(message.contains("\"type\":\"TABLE_STATE_UPDATE\""));
         assert!(message.contains("Hand #1"));
+    }
+
+    #[test]
+    fn search_status_message_serializes_every_phase() {
+        let result = crate::mcts::SolveResult {
+            actions: vec![],
+            worlds: 1,
+            iterations: 1,
+            max_depth: 1,
+            nodes: 2,
+            max_tree_depth: 1,
+            rollout_actions: 5,
+        };
+        for (phase, tag) in [
+            (SearcherPhase::Searching, "SEARCHING"),
+            (SearcherPhase::DepthReached, "DEPTH_REACHED"),
+            (SearcherPhase::Ready, "READY"),
+        ] {
+            let status = SearcherStatus {
+                result: result.clone(),
+                iterations_done: 1,
+                target_iterations: 1,
+                phase,
+            };
+            let json = parse(&search_status_message(&status));
+            assert_eq!(json["phase"], tag);
+            assert_eq!(json["iterations_done"], 1);
+            assert_eq!(json["tree_depth"], 1);
+            assert_eq!(json["max_depth"], 1);
+        }
     }
 
     #[tokio::test]

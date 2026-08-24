@@ -41,9 +41,13 @@ interface and coaches decision-making with a range-based solver.
   opponent worlds (so holdings never clash with the dealt board), and
   submissions answer instantly from the latest snapshot (an off-bucket
   slider amount falls back to a full inline solve). The header shows a live
-  **search-depth badge** next to the connection status — `search d3/5 · 42%`
-  — that turns red early in the search, amber partway, and green once the
-  street-scaled budget is reached.
+  **search-depth badge** next to the connection status — `d4/4 · 71k` — that
+  reads the realized tree depth against the planned cap and the number of
+  iterations run (in thousands). It turns **red** while the search is still
+  working toward its depth budget, **orange** once the depth is reached but
+  the minimum think time (five seconds) has not elapsed yet, and **green**
+  when both are met. The solver keeps deepening for at least five seconds
+  per decision, so the tree has time to grow past a shallow early budget.
 - **Decision layer:** validates player-submitted actions (including
   off-bucket bet-slider amounts) and evaluates them against the optimal
   action. Because only first place pays, "optimal" maximizes a survivability
@@ -65,8 +69,8 @@ interface and coaches decision-making with a range-based solver.
   - Server → Client `CHART_TICK`: one evaluated action appended to the
     top-bar EV curve.
   - Server → Client `SEARCH_STATUS`: the background solver's live progress
-    (iterations done vs target, realized tree depth, nodes, phase) that
-    drives the header depth badge.
+    (iterations done, realized tree depth, nodes, phase) that drives the
+    header depth badge.
 
   Each connection owns a live table session that drives the opponents with a
   simple placeholder policy, runs the survivability solver on your
