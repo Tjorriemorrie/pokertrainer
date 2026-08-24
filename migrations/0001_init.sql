@@ -1,4 +1,4 @@
--- S1: base schema for the local pokertrainer database.
+-- Base schema for the local pokertrainer database.
 
 -- Base opponent identities and broad player types (e.g. LAG, NIT).
 CREATE TABLE opponent_profiles (

@@ -13,7 +13,7 @@ use crate::server::protocol::{self, ClientMessage, ServerMessage};
 use crate::server::session::{TableEvent, TableSession};
 use crate::server::views;
 
-/// Where the client is sent once it finishes the table (S9).
+/// Where the client is sent once it finishes the table.
 pub const TOURNAMENTS_URL: &str = "/tournaments";
 
 /// The outcome of handling one client frame: the frames to send back, how
@@ -27,7 +27,7 @@ pub struct FrameOutcome {
 
 /// Upgrades `/ws` connections; each connection owns an isolated table session
 /// seeded from OS entropy and, when the database is available, an analytics
-/// session that stores every hero decision (S9).
+/// session that stores every hero decision.
 pub async fn handler(State(app): State<Arc<AppState>>, ws: WebSocketUpgrade) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_socket(socket, app))
 }
@@ -86,6 +86,16 @@ async fn handle_socket(socket: WebSocket, app: Arc<AppState>) {
                 return;
             }
             return;
+        }
+
+        if session.state().is_hand_over() {
+            tokio::time::sleep(std::time::Duration::from_millis(app.result_pause_ms)).await;
+            for frame in advance_frames(&mut session) {
+                if sender.send(Message::Text(frame.into())).await.is_err() {
+                    close_session(app.pool.as_ref(), session_id).await;
+                    return;
+                }
+            }
         }
 
         if ticks_since_snapshot >= app.snapshot_interval.max(1) {
@@ -149,7 +159,7 @@ async fn persist_records(
     }
 }
 
-/// The decimated chart dataset mapping the last 1,000 stored actions (S9);
+/// The decimated chart dataset mapping the last 1,000 stored actions;
 /// an empty dataset means there is no stored history.
 async fn snapshot_frame(pool: Option<&PgPool>) -> Option<String> {
     let pool = pool?;
@@ -198,6 +208,18 @@ fn state_message(session: &mut TableSession) -> Result<String> {
         fragment: views::table_fragment(session.state(), session.hand_no(), session.log(), &sounds),
     }
     .to_json()
+}
+
+/// Deals the next hand once the winner has been shown for the configured
+/// pause and serializes the resulting state update.
+fn advance_frames(session: &mut TableSession) -> Vec<String> {
+    match session
+        .advance_after_result()
+        .and_then(|()| state_message(session))
+    {
+        Ok(frame) => vec![frame],
+        Err(error) => vec![error_message(&error.to_string())],
+    }
 }
 
 /// Handles one client text frame; never fails the connection — problems are
@@ -419,6 +441,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_finished_hand_shows_the_win_badge_then_deals_the_next_hand() {
+        let mut session = make_session();
+        session.stage_pending_interception(Action::Fold, sample_analysis());
+
+        let outcome = handle_client_message(&mut session, r#"{"type":"REVIEW_DONE"}"#);
+        assert!(
+            session.state().is_hand_over(),
+            "with the hero folded, opponents play the hand to its end"
+        );
+        let json = parse(outcome.messages.last().unwrap());
+        assert_eq!(json["type"], "TABLE_STATE_UPDATE");
+        let fragment = json["fragment"].as_str().unwrap();
+        assert!(
+            fragment.contains(r#"class="pt-win"><b>WIN</b>"#),
+            "the winner is marked at their seat: {fragment}"
+        );
+        assert!(
+            fragment.contains(r#"class="pt-seat pt-winner""#),
+            "the winning seat carries the winner class: {fragment}"
+        );
+        assert!(
+            !fragment.contains(r#"id="action-panel""#),
+            "the dock stays hidden while the hand is over: {fragment}"
+        );
+        assert_eq!(session.hand_no(), 1, "the deal waits for the result pause");
+
+        let frames = advance_frames(&mut session);
+        assert_eq!(frames.len(), 1, "one state frame for the fresh deal");
+        let next = parse(&frames[0]);
+        assert_eq!(next["type"], "TABLE_STATE_UPDATE");
+        let next_fragment = next["fragment"].as_str().unwrap();
+        assert!(
+            next_fragment.contains("Hand #2"),
+            "the pause advances to the next hand: {next_fragment}"
+        );
+        assert!(
+            !next_fragment.contains("pt-win"),
+            "the win badge does not leak into the fresh hand: {next_fragment}"
+        );
+        assert_eq!(session.hand_no(), 2);
+        assert!(!session.state().is_hand_over());
+    }
+
     fn sample_analysis() -> AnalyzedDecision {
         let fold = Analysis {
             action: Action::Fold,
@@ -547,12 +613,13 @@ mod tests {
     }
 
     async fn spawn_server() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
-        spawn_server_with(None, 100).await
+        spawn_server_with(None, 100, 0).await
     }
 
     async fn spawn_server_with(
         pool: Option<PgPool>,
         snapshot_interval: usize,
+        result_pause_ms: u64,
     ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -565,6 +632,7 @@ mod tests {
                 blunder: BlunderConfig::default(),
                 pool,
                 snapshot_interval,
+                result_pause_ms,
             }),
         );
         let handle = tokio::spawn(async move {
@@ -614,7 +682,7 @@ mod tests {
                 "TRIGGER_TACTICAL_OVERLAY" => {
                     assert_eq!(
                         frame["intercepted"], true,
-                        "S8 overlays are always intercepted"
+                        "overlays are always intercepted"
                     );
                     assert!(
                         frame["fragment"]
@@ -633,16 +701,31 @@ mod tests {
         }
         assert!(chart_tick, "every submitted action is charted");
 
-        for payload in [
-            r#"{"type":"ACTION_SUBMIT","action":{"kind":"zzz"}}"#,
-            "not json at all",
-            r#"{"type":"ACTION_SUBMIT","action":{"kind":"raise"}}"#,
+        for (payload, expected) in [
+            (
+                r#"{"type":"ACTION_SUBMIT","action":{"kind":"zzz"}}"#,
+                "unknown action kind",
+            ),
+            ("not json at all", "malformed message"),
+            (
+                r#"{"type":"ACTION_SUBMIT","action":{"kind":"raise"}}"#,
+                "requires an amount",
+            ),
         ] {
             stream.send(TMessage::Text(payload.into())).await.unwrap();
-            let frame = parse(&next_text(&mut stream).await);
-            assert_eq!(
-                frame["type"], "ERROR",
-                "payload {payload} should be rejected"
+            let error = loop {
+                let frame = parse(&next_text(&mut stream).await);
+                match frame["type"].as_str().unwrap() {
+                    "ERROR" => break frame,
+                    // A hand that ended earlier may still ship its delayed
+                    // next-deal state before the error frame arrives.
+                    "TABLE_STATE_UPDATE" => continue,
+                    other => panic!("unexpected frame type {other} for payload {payload}"),
+                }
+            };
+            assert!(
+                error["message"].as_str().unwrap().contains(expected),
+                "payload {payload} should be rejected: {error}"
             );
         }
 
@@ -650,14 +733,20 @@ mod tests {
             .send(TMessage::Binary(vec![1, 2, 3].into()))
             .await
             .unwrap();
-        // Any response after the binary frame proves the server kept playing.
         stream
             .send(TMessage::Text(
                 r#"{"type":"ACTION_SUBMIT","action":{"kind":"zzz"}}"#.into(),
             ))
             .await
             .unwrap();
-        let frame = parse(&next_text(&mut stream).await);
+        let frame = loop {
+            let frame = parse(&next_text(&mut stream).await);
+            match frame["type"].as_str().unwrap() {
+                "ERROR" => break frame,
+                "TABLE_STATE_UPDATE" => continue,
+                other => panic!("unexpected frame type {other}"),
+            }
+        };
         assert_eq!(frame["type"], "ERROR", "server must survive binary frames");
 
         stream.close(None).await.unwrap();
@@ -679,6 +768,57 @@ mod tests {
             frame,
             json!({"type": "SESSION_FINISHED", "url": TOURNAMENTS_URL})
         );
+        drop(stream);
+    }
+
+    #[tokio::test]
+    async fn the_socket_shows_the_winner_then_deals_after_the_pause() {
+        let (address, _server) = spawn_server().await;
+        let (mut stream, _) = connect_async(format!("ws://{address}/ws")).await.unwrap();
+        let initial = parse(&next_text(&mut stream).await);
+        assert_eq!(initial["type"], "TABLE_STATE_UPDATE");
+
+        // Folding is always legal on the hero's first decision (the hero
+        // posted the small blind), and it always ends the hand — either
+        // immediately or once the fold applies after a review.
+        stream
+            .send(TMessage::Text(
+                r#"{"type":"ACTION_SUBMIT","action":{"kind":"fold"}}"#.into(),
+            ))
+            .await
+            .unwrap();
+
+        let mut win_seen = false;
+        loop {
+            let frame = parse(&next_text(&mut stream).await);
+            match frame["type"].as_str().unwrap() {
+                "CHART_TICK" => {}
+                "TRIGGER_TACTICAL_OVERLAY" => {
+                    stream
+                        .send(TMessage::Text(r#"{"type":"REVIEW_DONE"}"#.into()))
+                        .await
+                        .unwrap();
+                }
+                "TABLE_STATE_UPDATE" => {
+                    let fragment = frame["fragment"].as_str().unwrap();
+                    if fragment.contains("pt-win") {
+                        win_seen = true;
+                        assert!(
+                            !fragment.contains(r#"id="action-panel""#),
+                            "the dock is hidden while the winner shows: {fragment}"
+                        );
+                    } else if win_seen {
+                        assert!(
+                            fragment.contains("Hand #2"),
+                            "the pause deals the next hand: {fragment}"
+                        );
+                        break;
+                    }
+                }
+                other => panic!("unexpected frame type {other}"),
+            }
+        }
+        assert!(win_seen, "the win badge was shown at the winner's seat");
         drop(stream);
     }
 
@@ -712,7 +852,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (address, _server) = spawn_server_with(Some(pool.clone()), 1).await;
+        let (address, _server) = spawn_server_with(Some(pool.clone()), 1, 0).await;
         let (mut stream, _) = connect_async(format!("ws://{address}/ws")).await.unwrap();
 
         let initial = parse(&next_text(&mut stream).await);
@@ -769,8 +909,17 @@ mod tests {
             .send(TMessage::Text(r#"{"type":"FINISH_TABLE"}"#.into()))
             .await
             .unwrap();
-        let frame = parse(&next_text(&mut stream).await);
-        assert_eq!(frame["type"], "SESSION_FINISHED");
+        let finished = loop {
+            let frame = parse(&next_text(&mut stream).await);
+            match frame["type"].as_str().unwrap() {
+                "SESSION_FINISHED" => break frame,
+                // Delayed post-result deals or snapshot refreshes may arrive
+                // before the navigation frame.
+                "TABLE_STATE_UPDATE" | "CHART_SNAPSHOT" => continue,
+                other => panic!("unexpected frame type {other} while finishing"),
+            }
+        };
+        assert_eq!(finished["type"], "SESSION_FINISHED");
         drop(stream);
 
         let recordings: Vec<(i32, i32, i32, f64)> = sqlx::query_as(

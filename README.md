@@ -3,28 +3,28 @@
 A local poker trainer that replicates the GGPoker 3-max Spin and Gold table
 interface and coaches decision-making with a range-based solver.
 
-## What's implemented so far
+## Features
 
-- **S0 — Project scaffolding:** configuration loading (`.env`), structured
+- **Project scaffolding:** configuration loading (`.env`), structured
   logging, and a typed error convention.
-- **S1 — Database layer:** PostgreSQL schema (opponent profiles, stats,
+- **Database layer:** PostgreSQL schema (opponent profiles, stats,
   contextual ranges, sessions/decisions) with idempotent migrations and an
   in-memory range cache.
-- **S2 — Core poker primitives:** card/deck model, a bitboard hand evaluator
+- **Core poker primitives:** card/deck model, a bitboard hand evaluator
   (5- and 7-card), and a deterministic thread-local RNG.
-- **S3 — Game state engine:** full 3-max Spin and Gold rules — blinds/button
+- **Game state engine:** full 3-max Spin and Gold rules — blinds/button
   rotation, 500-chip starting stacks, street progression, main/side pot
   accounting, and the legal-action flow (fold/check/call/bet/raise/all-in).
-- **S4 — Range model:** the 169-hand matrix (13×13 grid), GGPoker-style
+- **Range model:** the 169-hand matrix (13×13 grid), GGPoker-style
   bet-sizing buckets (preflop 2bb/3bb/4bb/pot, postflop 1/3/1/2/3/4/pot/
   overbet), Bayesian range filtering, and sequence-node resolution with a
   population fallback.
-- **S5 — MCTS solver:** a hero-perspective, range-based search. Opponent
+- **MCTS solver:** a hero-perspective, range-based search. Opponent
   holdings are sampled from range vectors with blocker (card-removal)
   adjustment; every sampled world keeps its own isolated expectimax-UCT
   search, and action EVs are the range-probability-weighted average across
   worlds.
-- **S6 — Decision layer:** validates player-submitted actions (including
+- **Decision layer:** validates player-submitted actions (including
   off-bucket bet-slider amounts) and evaluates them against the optimal
   action. Because only first place pays, "optimal" maximizes a survivability
   score derived from CRRA utility over the hero's stack:
@@ -32,7 +32,7 @@ interface and coaches decision-making with a range-based solver.
   Kelly (γ = 1) — variance and bust risk are penalized more the shorter the
   hero's stack. The played action's exact chip EV loss is reported against
   the optimal one.
-- **S7 — HTTP + WebSocket bridge:** an Axum server (`127.0.0.1:8744` by
+- **HTTP + WebSocket bridge:** an Axum server (`127.0.0.1:8744` by
   default, `SERVER_ADDR` to change) serving the rendered app shell and static
   assets (`assets/`), plus a WebSocket at `/ws` with the event protocol:
   - Client → Server `ACTION_SUBMIT`: an action type plus a bet-size bucket
@@ -45,10 +45,10 @@ interface and coaches decision-making with a range-based solver.
     top-bar EV curve.
 
   Each connection owns a live table session that drives the opponents with a
-  simple placeholder policy, runs the S6 survivability solver on your
+  simple placeholder policy, runs the survivability solver on your
   decisions, and deals the next hand automatically. Opponent ranges are
   uniform until profile/sequence-node loading is wired into the loop.
-- **S8 — Blunder intervention engine:** monitors the hero's rolling error
+- **Blunder intervention engine:** monitors the hero's rolling error
   rate (EV loss per action) and intercepts the worst blunders with a dynamic,
   calibrated threshold. After a 24-action warm-up the trigger is the
   `(1 − p)`-quantile of your own last 300 EV losses, where
@@ -60,7 +60,7 @@ interface and coaches decision-making with a range-based solver.
   vs the optimal move. You must press **I understand — continue** (which
   sends `REVIEW_DONE` over the WebSocket) before the held-back action is
   replayed and the game resumes.
-- **S9 — Session persistence & EV analytics:** every hero decision is stored
+- **Session persistence & EV analytics:** every hero decision is stored
   in the database (`hero_decisions`) with the hand number, street, played and
   optimal action, and the EV lost. The top-bar chart plays back your lifetime
   history: on connect the server sends a decimated `CHART_SNAPSHOT` (100
@@ -70,7 +70,7 @@ interface and coaches decision-making with a range-based solver.
   **Tournament history** link (or `/tournaments`) shows one such graph per
   finished tournament with its hands/actions and average EV loss. Sessions
   without any stored decision never appear.
-- **S10 — GGPoker frontend:** a server-rendered GGPoker table skin with the
+- **GGPoker frontend:** a server-rendered GGPoker table skin with the
   Spin and Gold look — dark-teal oval felt on a wooden rail, three fixed seat
   pods (opponents top-left/top-right, hero bottom-center) that stay in place
   when someone folds or busts, gold pot pill, and per-seat bet badges: every
@@ -79,7 +79,12 @@ interface and coaches decision-making with a range-based solver.
   as the betting round closes. An **action log** is docked to the left of the
   oval, exactly as tall as the table, always visible: hand deals, folds,
   calls, bets, raises and results are appended below earlier entries and the
-  panel auto-scrolls to the newest line. The
+  panel auto-scrolls to the newest line. When a hand ends, no centre banner
+  appears: a gold **WIN** ribbon drops over the winner's seat showing the
+  exact amount they took down (and the win jingle plays), stays for about two
+  seconds, and then the next hand is dealt automatically. Amounts render
+  larger: stack pills are as big as the pot pill, and the pot pill and the
+  street-bet chips on the felt are one size larger than before. The
   table sits top-left; the coach feedback panel renders beside it so
   blunder breakdowns never cover the cards. The action dock lives in its own
   right-aligned block directly below the oval — steel-blue **Fold**, green

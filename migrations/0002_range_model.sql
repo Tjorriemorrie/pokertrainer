@@ -1,4 +1,4 @@
--- S4: range model — add stack-depth bucket and per-node sample counts to
+-- Range model — add stack-depth bucket and per-node sample counts to
 -- contextual_ranges so ranges can be keyed by (node, profile, stack bucket)
 -- and the <30-hand population fallback can be applied.
 

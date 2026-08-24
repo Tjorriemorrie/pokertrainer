@@ -20,7 +20,7 @@
 
 ## Commits
 
-- When a task or stage is finished and verified, commit immediately with a concise message (e.g. "S1 — Database layer"); do not wait for the user to ask.
+- When a task or stage is finished and verified, commit immediately with a concise message (e.g. "Database layer"); do not wait for the user to ask.
 - Stage only intended files; never commit secrets, IDE config (`.idea/`), `data/`, or `target/`.
 
 ## README

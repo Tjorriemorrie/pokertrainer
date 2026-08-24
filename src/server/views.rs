@@ -1,7 +1,7 @@
 use crate::analytics::{ChartPoint, SessionSummary};
 use crate::card::{Card, Suit};
 use crate::decision::AnalyzedDecision;
-use crate::game::{Action, GameState, HandEndReason, Seat, Street};
+use crate::game::{Action, GameState, Seat, Street};
 use crate::range::BetSize;
 use crate::server::session::Sound;
 
@@ -16,7 +16,7 @@ pub fn index_page() -> String {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Poker Trainer</title>
-<link rel="stylesheet" href="/assets/style.css?v=6">
+<link rel="stylesheet" href="/assets/style.css?v=7">
 </head>
 <body class="pt-body">
   <header class="pt-topwrap">
@@ -48,7 +48,7 @@ pub fn index_page() -> String {
         .to_string()
 }
 
-/// The finished-tournament history page (S9): one server-rendered card per
+/// The finished-tournament history page: one server-rendered card per
 /// finished session whose decimated EV dataset is drawn client-side with the
 /// same canvas style as the live top-bar chart.
 pub fn tournaments_page(sessions: &[(SessionSummary, Vec<ChartPoint>)]) -> String {
@@ -59,7 +59,7 @@ pub fn tournaments_page(sessions: &[(SessionSummary, Vec<ChartPoint>)]) -> Strin
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Poker Trainer — Tournaments</title>
-<link rel="stylesheet" href="/assets/style.css?v=6">
+<link rel="stylesheet" href="/assets/style.css?v=7">
 </head>
 <body class="pt-body">
 <header class="pt-topwrap">
@@ -251,9 +251,7 @@ pub fn table_fragment(state: &GameState, hand_no: u64, log: &[String], sounds: &
         html.push_str("</div>");
     }
 
-    if state.is_hand_over() {
-        html.push_str(&result_html(state));
-    } else if state.to_act() != Seat::Hero {
+    if !state.is_hand_over() && state.to_act() != Seat::Hero {
         html.push_str(&format!(
             r#"<div class="pt-wait">Waiting for {}…</div>"#,
             escape(&state.to_act().to_string())
@@ -345,10 +343,22 @@ fn seat_html(state: &GameState, seat: Seat) -> String {
         String::new()
     };
 
-    let cls = if active {
-        "pt-seat pt-active"
-    } else {
-        "pt-seat"
+    let win = state.hand_result().and_then(|result| {
+        result
+            .awards
+            .iter()
+            .find(|award| award.seat == seat)
+            .map(|award| award.amount)
+    });
+    let win_html = match win {
+        Some(amount) => format!(r#"<div class="pt-win"><b>WIN</b><span>+{amount}</span></div>"#),
+        None => String::new(),
+    };
+
+    let cls = match (active, win.is_some()) {
+        (true, _) => "pt-seat pt-active",
+        (false, true) => "pt-seat pt-winner",
+        (false, false) => "pt-seat",
     };
     let seat_name = escape(&seat.to_string());
     format!(
@@ -357,6 +367,7 @@ fn seat_html(state: &GameState, seat: Seat) -> String {
 <div class="pt-seat-cards">{cards}{flag}</div>
 <div class="pt-stack"><i class="pt-chip-dot"></i>{stack_pill}</div>
 {bet_html}
+{win_html}
 </div>"#
     )
 }
@@ -484,40 +495,9 @@ fn action_panel(state: &GameState) -> String {
     html
 }
 
-fn result_html(state: &GameState) -> String {
-    let Some(result) = state.hand_result() else {
-        return String::new();
-    };
-    let total: u32 = result.awards.iter().map(|award| award.amount).sum();
-    let mut html = r#"<div class="pt-result">"#.to_string();
-    match result.reason {
-        HandEndReason::Fold(winner) => {
-            html.push_str(&format!("{winner} win {total} — everyone else folded"))
-        }
-        HandEndReason::Showdown => {
-            let winners: Vec<String> = result
-                .awards
-                .iter()
-                .map(|award| format!("{} +{}", award.seat, award.amount))
-                .collect();
-            html.push_str(&format!("Showdown · {}", winners.join(" · ")));
-            for (seat, cards, _class) in &result.revealed {
-                html.push_str(&format!(
-                    r#"<div class="pt-reveal">{}: {} {}</div>"#,
-                    seat,
-                    card_html(cards[0]),
-                    card_html(cards[1])
-                ));
-            }
-        }
-    }
-    html.push_str("</div>");
-    html
-}
-
 /// The tactical-breakdown fragment rendered into the coach-feedback panel
 /// beside the table: played vs optimal action, the EV given up, and the
-/// survivability-ranked candidate table. Intercepted blunders (S8) freeze the
+/// survivability-ranked candidate table. Intercepted blunders freeze the
 /// table: the card is titled accordingly and only offers a confirmation that
 /// unlocks the transition.
 pub fn tactical_overlay_fragment(
@@ -653,7 +633,7 @@ mod tests {
         assert!(page.contains(r#"/assets/app.js"#));
         assert!(
             page.contains(r#"id="finish-table""#),
-            "the S9 finish control is present"
+            "the finish control is present"
         );
         assert!(
             page.contains(r#"href="/tournaments""#),
@@ -661,15 +641,15 @@ mod tests {
         );
         assert!(
             page.contains(r#"id="sound-toggle""#),
-            "the S10 sound toggle is present"
+            "the sound toggle is present"
         );
         assert!(
-            page.contains(r#"/assets/style.css?v=6"#),
+            page.contains(r#"/assets/style.css?v=7"#),
             "the stylesheet link is versioned so browsers drop stale cached CSS"
         );
         assert!(
             !page.contains("cdn.tailwindcss.com"),
-            "the S10 skin ships its own CSS and works offline"
+            "the skin ships its own CSS and works offline"
         );
     }
 
@@ -881,7 +861,7 @@ mod tests {
     }
 
     #[test]
-    fn table_fragment_shows_waiting_and_results_when_appropriate() {
+    fn table_fragment_shows_waiting_and_the_win_badge_when_appropriate() {
         let mut state = GameState::new(Seat::Hero, level());
         state
             .start_hand(&mut Deck::shuffled(&mut seeded_rng(35)))
@@ -894,8 +874,24 @@ mod tests {
         state.apply_action(Action::Fold).unwrap();
         assert!(state.is_hand_over());
         let finished = table_fragment(&state, 1, &[], &[]);
-        assert!(finished.contains("win 30 — everyone else folded"));
+        assert!(
+            finished.contains(r#"class="pt-win"><b>WIN</b><span>+30</span>"#),
+            "the win is shown next to the winner, not in the centre: {finished}"
+        );
+        assert!(
+            finished.contains(r#"data-seat="Opponent 1" class="pt-seat pt-winner""#)
+                || finished.contains(r#"class="pt-seat pt-winner" data-seat="Opponent 1""#),
+            "the winner's seat is marked: {finished}"
+        );
+        assert!(
+            !finished.contains("pt-result"),
+            "the centre result banner is gone: {finished}"
+        );
         assert!(!finished.contains(r#"id="action-panel""#));
+        assert!(
+            !finished.contains(r#"class="pt-wait""#),
+            "no waiting pill once the hand is over: {finished}"
+        );
     }
 
     #[test]
@@ -1101,7 +1097,7 @@ mod tests {
     }
 
     #[test]
-    fn showdown_fragment_reveals_cards_and_awards() {
+    fn showdown_fragment_reveals_cards_and_marks_winners() {
         let mut state = GameState::new(Seat::Hero, level());
         let mut deck = Deck::shuffled(&mut seeded_rng(36));
         state.start_hand(&mut deck).unwrap();
@@ -1113,14 +1109,25 @@ mod tests {
 
         let fragment = table_fragment(&state, 1, &[], &[]);
         assert!(
-            fragment.contains("Showdown ·"),
-            "winners are listed: {fragment}"
+            fragment.contains(r#"class="pt-win"><b>WIN</b>"#),
+            "winners carry a WIN badge at their seat: {fragment}"
         );
-        for card in state.hero_cards() {
-            assert!(
-                fragment.contains(&format!(r#"data-code="{}""#, card)),
-                "hero cards are revealed at showdown"
-            );
+        assert!(
+            fragment.matches("pt-winner").count() >= 1,
+            "at least one seat is marked the winner: {fragment}"
+        );
+        for seat in Seat::ALL {
+            let cards = state.hole_cards(seat).expect("all cards revealed");
+            for card in cards {
+                assert!(
+                    fragment.contains(&format!(r#"data-code="{}""#, card)),
+                    "{seat}'s cards are revealed at showdown"
+                );
+            }
         }
+        assert!(
+            !fragment.contains("pt-result"),
+            "reveals render at the seats, not in a centre banner: {fragment}"
+        );
     }
 }

@@ -1,4 +1,4 @@
-/* S10 — GGPoker table skin.
+/* GGPoker table skin.
    Palette sampled from the reference screenshots:
    felt #284551, fold #154F8E, check/call #14801E, bet/raise #9A3533,
    gold accents #CF9F5D. Pure CSS — no framework, no network. */
@@ -311,8 +311,8 @@ button { font-family: inherit; }
   background: rgba(8, 13, 18, 0.74);
   border: 1px solid rgba(207, 159, 93, 0.38);
   border-radius: 999px;
-  padding: 2px 11px;
-  font-size: 0.8rem;
+  padding: 2px 12px;
+  font-size: 1.25rem;
   font-weight: 700;
   color: #f1e9d7;
   display: inline-flex;
@@ -358,16 +358,62 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
 .pt-flag.allin { color: #ffd27d; }
 .pt-flag.bust { color: #9aa5b1; }
 
+/* Hand-over win display: a gold ribbon draped over the winner's seat (shown
+   for the result pause before the next hand is dealt). */
+.pt-seat.pt-winner .pt-seat-name {
+  color: var(--gold-light);
+  text-shadow: 0 0 12px rgba(243, 217, 164, 0.9);
+}
+
+.pt-win {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  pointer-events: none;
+  background: rgba(10, 16, 22, 0.35);
+  border-radius: 10px;
+}
+
+.pt-win b {
+  padding: 0.12rem 0.9rem;
+  border-radius: 999px;
+  background: linear-gradient(var(--gold-light), var(--gold-dark));
+  color: #241b0d;
+  font-size: 1.05rem;
+  font-weight: 900;
+  letter-spacing: 0.24em;
+  border: 1px solid #fff0cc;
+  box-shadow: 0 3px 16px rgba(0, 0, 0, 0.65);
+  transform: rotate(-4deg);
+}
+
+.pt-win span {
+  font-size: 1.4rem;
+  font-weight: 900;
+  color: var(--gold);
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.85);
+  background: rgba(8, 13, 18, 0.72);
+  border: 1px solid rgba(207, 159, 93, 0.55);
+  border-radius: 999px;
+  padding: 0.05rem 0.75rem;
+  transform: rotate(-4deg);
+}
+
 .pt-bet {
   position: absolute;
-  min-width: 46px;
+  min-width: 52px;
   text-align: center;
   background: linear-gradient(var(--gold-light), var(--gold));
   color: #2a2010;
-  font-size: 0.85rem;
+  font-size: 1.05rem;
   font-weight: 800;
   border-radius: 999px;
-  padding: 3px 12px;
+  padding: 4px 14px;
   border: 2px solid #fff0cc;
   box-shadow:
     0 2px 8px rgba(0, 0, 0, 0.55),
@@ -419,6 +465,7 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
   border: 1px solid rgba(207, 159, 93, 0.45);
   border-radius: 999px;
   padding: 0.28rem 1.05rem;
+  font-size: 1.25rem;
   font-weight: 800;
   letter-spacing: 0.07em;
   z-index: 5;

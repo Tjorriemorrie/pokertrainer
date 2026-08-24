@@ -18,8 +18,9 @@ use crate::server::{views, ws};
 
 /// Shared server state injected into handlers: static assets, the solver
 /// configuration used for every table session, the optional analytics store
-/// (S9) backing decision persistence and the tournaments page, and how many
-/// chart ticks pass between decimated snapshot refreshes.
+/// backing decision persistence and the tournaments page, how many
+/// chart ticks pass between decimated snapshot refreshes, and how long the
+/// winner stays on screen before the next hand is dealt.
 #[derive(Clone, Debug)]
 pub struct AppState {
     pub assets: ServeDir,
@@ -28,6 +29,7 @@ pub struct AppState {
     pub blunder: BlunderConfig,
     pub pool: Option<PgPool>,
     pub snapshot_interval: usize,
+    pub result_pause_ms: u64,
 }
 
 /// Serves the repository `assets/` directory, anchored at the crate manifest
@@ -87,7 +89,7 @@ async fn health() -> impl IntoResponse {
     (StatusCode::OK, axum::Json(json!({ "status": "ok" })))
 }
 
-/// The finished-tournament history page (S9): one decimated EV chart per
+/// The finished-tournament history page: one decimated EV chart per
 /// finished session. Without a database this endpoint cannot render anything.
 async fn tournaments(State(app): State<Arc<AppState>>) -> Response {
     let Some(pool) = app.pool.clone() else {
@@ -141,6 +143,7 @@ mod tests {
             blunder: BlunderConfig::default(),
             pool: None,
             snapshot_interval: 100,
+            result_pause_ms: 0,
         })
     }
 
@@ -223,6 +226,7 @@ mod tests {
             blunder: BlunderConfig::default(),
             pool: Some(pool.clone()),
             snapshot_interval: 100,
+            result_pause_ms: 0,
         });
         let (status, body) = get_with(state, "/tournaments").await;
         assert_eq!(status, StatusCode::OK);

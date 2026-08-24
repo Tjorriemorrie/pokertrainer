@@ -2,13 +2,13 @@ use std::collections::VecDeque;
 
 use crate::error::{Error, Result};
 
-/// Calibration parameters for the blunder-intervention engine (S8).
+/// Calibration parameters for the blunder-intervention engine.
 ///
 /// Interventions are calibrated so that roughly one in `target_hands` hands
 /// is interrupted: after a warm-up phase the trigger threshold is the
 /// `(1 − p)`-quantile of the hero's own rolling EV-loss history, where
 /// `p = 1 / (target_hands · A_hand)` and `A_hand` is the rolling
-/// actions-per-hand ratio (TECHNICAL.md S9 calibration).
+/// actions-per-hand ratio.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BlunderConfig {
     /// Interventions fire on roughly one hand in this many.

@@ -61,12 +61,12 @@ pub enum TableEvent {
     TacticalOverlay {
         decision: AnalyzedDecision,
         hand_no: u64,
-        /// S8: whether the state transition was halted (the client must send
+        /// Whether the state transition was halted (the client must send
         /// `REVIEW_DONE` to advance).
         intercepted: bool,
     },
-    /// One evaluated action for the top-bar EV tracker. S9 adds the decimated
-    /// 1,000-action dataset.
+    /// One evaluated action for the top-bar EV tracker; the decimated
+    /// 1,000-action dataset arrives separately in chart snapshots.
     ChartTick { action_index: u64, ev_loss: f64 },
 }
 
@@ -94,7 +94,7 @@ pub struct TableSession {
     blunder_tracker: Tracker,
     pending: Option<PendingInterception>,
     records: Vec<PendingDecision>,
-    /// Sound cues accumulated since the last rendered state update (S10).
+    /// Sound cues accumulated since the last rendered state update.
     sounds: Vec<Sound>,
 }
 
@@ -164,7 +164,7 @@ impl TableSession {
         &self.log
     }
 
-    /// Queues one evaluated hero decision for persistence (S9); the session
+    /// Queues one evaluated hero decision for persistence; the session
     /// stays database-free and the ownership of the write is the WebSocket
     /// layer's.
     fn record_decision(&mut self, analyzed: &AnalyzedDecision, played: Action, ev_loss: f64) {
@@ -256,18 +256,26 @@ impl TableSession {
         Ok(())
     }
 
+    /// Deals the next hand after the result pause and drives the opponents
+    /// until the hero must act. Called by the WebSocket layer once the client
+    /// has shown the winner for a beat.
+    pub fn advance_after_result(&mut self) -> Result<()> {
+        self.deal_next_hand()?;
+        self.pump()?;
+        Ok(())
+    }
+
     /// Drives the opponents until a decision or the end of the hand is
-    /// reached: hands that end without hero action are logged and followed by
-    /// the next deal. Returns whether anything happened.
+    /// reached. When the hand ends the result is logged and the win sound
+    /// queued, but the next deal is deferred to [`Self::advance_after_result`]
+    /// so the winner stays on screen for a beat. Returns whether anything
+    /// happened.
     pub fn pump(&mut self) -> Result<bool> {
         let mut acted = false;
+        if self.state.is_hand_over() {
+            return Ok(acted);
+        }
         loop {
-            if self.state.is_hand_over() {
-                self.log_hand_result();
-                self.deal_next_hand()?;
-                acted = true;
-                continue;
-            }
             if self.state.to_act() == Seat::Hero {
                 return Ok(acted);
             }
@@ -280,6 +288,10 @@ impl TableSession {
             }
             self.log_line(views::describe_action(actor, action, call_amount));
             acted = true;
+            if self.state.is_hand_over() {
+                self.log_hand_result();
+                return Ok(acted);
+            }
         }
     }
 
@@ -287,7 +299,7 @@ impl TableSession {
     /// publish. The solve runs synchronously in the calling task (the local,
     /// single-user WebSocket connection).
     ///
-    /// S8: when the played action's EV loss clears the calibrated dynamic
+    /// When the played action's EV loss clears the calibrated dynamic
     /// threshold the state transition is halted — the action is parked in
     /// [`PendingInterception`] and only replayed by [`Self::confirm_review`].
     pub fn submit(&mut self, action: Action) -> Result<Vec<TableEvent>> {
@@ -450,7 +462,7 @@ pub fn apply_settled(
     Ok(outcome)
 }
 
-/// S7 placeholder policy for the opponents: checks any free option, otherwise
+/// Placeholder policy for the opponents: checks any free option, otherwise
 /// mostly calls, occasionally folds, and rarely min-raises; bets the minimum
 /// (sometimes half pot) when first in. Busted (zero-stack) seats always take
 /// the only actions available to them. Legality is guaranteed by construction.
@@ -540,7 +552,7 @@ mod tests {
         SurvivalConfig::default()
     }
 
-    /// S8 test preset: the warm-up floor is unreachable, so nothing ever
+    /// Test preset: the warm-up floor is unreachable, so nothing ever
     /// intercepts — suboptimal actions apply immediately without feedback.
     fn never_intercepts() -> BlunderConfig {
         BlunderConfig {
@@ -549,7 +561,7 @@ mod tests {
         }
     }
 
-    /// S8 test preset: a zero-chip floor means every non-optimal decision
+    /// Test preset: a zero-chip floor means every non-optimal decision
     /// intercepts (a one-entry history is enough to leave the empty state).
     fn always_intercepts() -> BlunderConfig {
         BlunderConfig {
@@ -683,14 +695,20 @@ mod tests {
         assert!(events.contains(&TableEvent::State));
         assert_eq!(
             session.hand_no(),
-            2,
-            "folding here ends the hand; the next one is dealt"
+            1,
+            "the hand-over state stays visible until the result pause ends"
         );
+        assert!(
+            session.state().is_hand_over(),
+            "folding here ends the hand; the deal waits for the result pause"
+        );
+        session.advance_after_result().unwrap();
+        assert_eq!(session.hand_no(), 2);
         assert!(!session.state().is_hand_over());
         assert_eq!(session.state().to_act(), Seat::Hero);
     }
 
-    /// S9: every applied hero submission queues a database record carrying the
+    /// Every applied hero submission queues a database record carrying the
     /// hand, street, played/optimal labels, and the EV lost.
     #[test]
     fn every_applied_submission_queues_a_decision_record() {
@@ -723,8 +741,8 @@ mod tests {
         );
     }
 
-    /// The S8 replacement for the S7 unconditional overlay: below the dynamic
-    /// threshold there is no feedback at all, and the action applies.
+    /// Below the dynamic threshold there is no feedback at all, and the
+    /// action applies without any overlay.
     #[test]
     fn suboptimal_plays_below_the_threshold_apply_without_feedback() {
         let state = river_facing_bet();
@@ -997,7 +1015,7 @@ mod tests {
     }
 
     #[test]
-    fn one_hero_submission_can_complete_more_than_one_opponent_hand() {
+    fn one_submission_runs_opponents_to_the_hand_over_state_then_advances() {
         let state = river_facing_bet();
         let mut session = TableSession::resume(
             state,
@@ -1010,8 +1028,15 @@ mod tests {
         );
         let events = session.submit(Action::Call).unwrap();
         assert!(!events.is_empty());
+        assert_eq!(session.hand_no(), 1, "the result stays on screen first");
+        assert!(
+            session.state().is_hand_over(),
+            "calling here ends the hand at showdown"
+        );
+        session.advance_after_result().unwrap();
         assert_eq!(session.hand_no(), 2);
         assert!(!session.state().is_hand_over());
+        assert_eq!(session.state().to_act(), Seat::Hero);
     }
 
     #[test]
@@ -1028,8 +1053,9 @@ mod tests {
         assert_eq!(session.log().last().unwrap(), "final");
     }
 
-    /// S10: sound cues accumulate with the actions they describe and are
+    /// Sound cues accumulate with the actions they describe and are
     /// drained by the WebSocket layer when the state fragment is rendered.
+    /// The deal sound waits for the result pause: the win shows first.
     #[test]
     fn state_updates_accumulate_and_drain_sound_cues() {
         let state = river_facing_bet();
@@ -1054,8 +1080,14 @@ mod tests {
             "ending the hand cues the win sound: {sounds:?}"
         );
         assert!(
-            sounds.contains(&Sound::Deal),
-            "the freshly dealt hand cues a deal sound: {sounds:?}"
+            !sounds.contains(&Sound::Deal),
+            "the deal sound waits for the result pause: {sounds:?}"
+        );
+
+        session.advance_after_result().unwrap();
+        assert!(
+            session.take_sounds().contains(&Sound::Deal),
+            "the freshly dealt hand cues a deal sound"
         );
         assert!(
             session.take_sounds().is_empty(),
@@ -1063,7 +1095,7 @@ mod tests {
         );
     }
 
-    /// S10: checks stay silent — no chip sound without committing chips.
+    /// Checks stay silent — no chip sound without committing chips.
     #[test]
     fn sound_for_maps_actions_to_cues() {
         assert_eq!(TableSession::sound_for(Action::Fold), Some(Sound::Fold));

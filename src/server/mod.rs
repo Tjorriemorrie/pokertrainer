@@ -1,4 +1,4 @@
-//! The local HTTP + WebSocket server serving the table UI (S7).
+//! The local HTTP + WebSocket server serving the table UI.
 //!
 //! Axum serves the rendered shell page and static assets over HTTP and swaps
 //! HTML fragments into the client DOM over a WebSocket (see [`protocol`]).
@@ -34,8 +34,9 @@ pub const LIVE_MCTS: MctsConfig = MctsConfig {
 };
 
 /// Everything the server needs to run: the bind address, the solver
-/// configuration applied to every new table session, and how often the
-/// decimated chart snapshot refreshes (S9).
+/// configuration applied to every new table session, how often the decimated
+/// chart snapshot refreshes, and how long the winner stays on screen
+/// before the next hand is dealt.
 #[derive(Clone, Copy, Debug)]
 pub struct ServerConfig {
     pub bind: SocketAddr,
@@ -43,6 +44,7 @@ pub struct ServerConfig {
     pub survival: SurvivalConfig,
     pub blunder: BlunderConfig,
     pub snapshot_interval: usize,
+    pub result_pause_ms: u64,
 }
 
 impl ServerConfig {
@@ -54,13 +56,14 @@ impl ServerConfig {
             survival: SurvivalConfig::default(),
             blunder: BlunderConfig::default(),
             snapshot_interval: 100,
+            result_pause_ms: 2000,
         }
     }
 }
 
 /// Boots the server on the configured address and serves until the process
 /// ends. `pool` is the analytics store for decision persistence and the
-/// tournaments page (S9); [`None`] keeps the table playable without it.
+/// tournaments page; [`None`] keeps the table playable without it.
 pub async fn serve(config: ServerConfig, pool: Option<PgPool>) -> Result<()> {
     let state = Arc::new(AppState {
         assets: http::default_assets(),
@@ -69,6 +72,7 @@ pub async fn serve(config: ServerConfig, pool: Option<PgPool>) -> Result<()> {
         blunder: config.blunder,
         pool,
         snapshot_interval: config.snapshot_interval,
+        result_pause_ms: config.result_pause_ms,
     });
     http::serve(config.bind, state).await
 }
@@ -92,6 +96,7 @@ mod tests {
         config.mcts.validate().unwrap();
         config.blunder.validate().unwrap();
         assert!(config.snapshot_interval > 0);
+        assert!(config.result_pause_ms > 0);
     }
 
     #[tokio::test]
@@ -104,6 +109,7 @@ mod tests {
                 survival: SurvivalConfig::default(),
                 blunder: crate::blunder::BlunderConfig::default(),
                 snapshot_interval: 100,
+                result_pause_ms: 0,
             },
             None,
         ));

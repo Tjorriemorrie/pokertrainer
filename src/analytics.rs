@@ -1,4 +1,4 @@
-//! S9 — session persistence & EV analytics.
+//! Session persistence & EV analytics.
 //!
 //! Every hero decision is logged to `hero_decisions` live (decisions are
 //! applied at human speed, so an awaited write per action is far below the
@@ -9,8 +9,8 @@
 //!   across every session (the lifetime curve, snapped on connect), and
 //! * the `/tournaments` page — one decimated chart per finished session.
 //!
-//! Charts are decimated server-side to [`DECIMATED_POINTS`] points per the
-//! S9 pipeline so the client can render them instantly.
+//! Charts are decimated server-side to [`DECIMATED_POINTS`] points so the
+//! client can render them instantly.
 
 use sqlx::{PgExecutor, PgPool};
 

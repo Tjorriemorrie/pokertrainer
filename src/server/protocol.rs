@@ -29,11 +29,11 @@ pub enum ClientMessage {
     ActionSubmit {
         action: SubmittedAction,
     },
-    /// S8: the player has reviewed an intercepted blunder and wants the held
-    /// back action applied.
+    /// The player has reviewed an intercepted blunder and wants the held-back
+    /// action applied.
     ReviewDone,
-    /// S9: the player is done with the table — the session is finalized and
-    /// the server replies with [`ServerMessage::SessionFinished`].
+    /// The player is done with the table — the session is finalized and the
+    /// server replies with [`ServerMessage::SessionFinished`].
     FinishTable,
 }
 
@@ -46,19 +46,19 @@ pub enum ServerMessage {
     /// A full tactical-breakdown fragment to overlay the table.
     TriggerTacticalOverlay {
         fragment: String,
-        /// S8: whether the state transition was halted — the client must
-        /// send `REVIEW_DONE` before the action is applied.
+        /// Whether the state transition was halted — the client must send
+        /// `REVIEW_DONE` before the action is applied.
         intercepted: bool,
     },
     /// One evaluated action: global action index and the EV lost against the
     /// optimal action.
     ChartTick { action_index: u64, ev_loss: f64 },
-    /// S9: a decimated dataset (100 points mapping the chart window) sent on
+    /// A decimated dataset (100 points mapping the chart window) sent on
     /// connect and periodically, so the client renders the stored history
     /// instantly instead of replaying every tick.
     ChartSnapshot { points: Vec<ChartPoint> },
-    /// S9: the table was finished (`FINISH_TABLE`); the client navigates to
-    /// the given page.
+    /// The table was finished (`FINISH_TABLE`); the client navigates to the
+    /// given page.
     SessionFinished { url: String },
     /// A rejected submission; the connection stays open.
     Error { message: String },
