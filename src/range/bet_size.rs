@@ -13,6 +13,8 @@ pub enum BetSize {
     ThreeBb,
     /// Preflop open-raise to 4 big blinds.
     FourBb,
+    /// Raise to double the call amount (GGPoker's default when facing a raise).
+    TwoX,
     /// Postflop 1/3 pot.
     ThirdPot,
     /// Postflop 1/2 pot.
@@ -97,6 +99,7 @@ impl BetSize {
             BetSize::Min => min_amount,
             BetSize::ThreeBb => 3 * big_blind,
             BetSize::FourBb => 4 * big_blind,
+            BetSize::TwoX => 2 * to_call,
             BetSize::ThirdPot => to_call + (pot + to_call) / 3,
             BetSize::HalfPot => to_call + (pot + to_call) / 2,
             BetSize::ThreeQuarterPot => to_call + 3 * (pot + to_call) / 4,
@@ -113,6 +116,7 @@ impl BetSize {
             BetSize::Min => "MIN",
             BetSize::ThreeBb => "3BB",
             BetSize::FourBb => "4BB",
+            BetSize::TwoX => "2X",
             BetSize::ThirdPot => "1/3POT",
             BetSize::HalfPot => "1/2POT",
             BetSize::ThreeQuarterPot => "3/4POT",
@@ -240,6 +244,12 @@ mod tests {
     }
 
     #[test]
+    fn to_raise_to_two_x_doubles_the_call() {
+        let (pot, to_call, bb, min, stack) = (100, 70, 20, 140, 500);
+        assert_eq!(BetSize::TwoX.to_raise_to(pot, to_call, bb, min, stack), 140);
+    }
+
+    #[test]
     fn to_raise_to_clamps_to_stack() {
         let (pot, to_call, bb, min, stack) = (100, 0, 20, 20, 60);
         assert_eq!(BetSize::Pot.to_raise_to(pot, to_call, bb, min, stack), 60);
@@ -254,6 +264,7 @@ mod tests {
         assert_eq!(BetSize::Min.label(), "MIN");
         assert_eq!(BetSize::ThreeBb.label(), "3BB");
         assert_eq!(BetSize::FourBb.label(), "4BB");
+        assert_eq!(BetSize::TwoX.label(), "2X");
         assert_eq!(BetSize::ThirdPot.label(), "1/3POT");
         assert_eq!(BetSize::HalfPot.label(), "1/2POT");
         assert_eq!(BetSize::ThreeQuarterPot.label(), "3/4POT");

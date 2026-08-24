@@ -1200,6 +1200,17 @@ fn seat_html(state: &GameState, seat: Seat) -> String {
     )
 }
 
+/// The GGPoker-style percentage label for a pot-fraction sizing chip.
+fn pot_percent_label(bucket: BetSize) -> &'static str {
+    match bucket {
+        BetSize::ThirdPot => "33%",
+        BetSize::HalfPot => "50%",
+        BetSize::ThreeQuarterPot => "75%",
+        BetSize::Pot => "100%",
+        _ => "",
+    }
+}
+
 /// The GGPoker-style bottom dock overlaid on the felt: sizing chips (chip
 /// values only — no BB labels), a golden bet slider with fine-grain wheel
 /// control, and the Fold / Check-Call / Bet-Raise buttons.
@@ -1231,20 +1242,24 @@ fn action_panel(state: &GameState) -> String {
             (legal.min_raise_to, legal.max_raise_to)
         };
         let stack = state.stack(Seat::Hero);
+        let preflop = state.street() == Street::Preflop;
+        let facing_raise =
+            raising && to_call > 0 && (!preflop || state.current_bet() > level.big_blind);
+        let pot_fractions = facing_raise || !preflop;
 
         html.push_str(r#"<div class="pt-bet-row">"#);
-        let buckets: &[BetSize] = if state.street() == Street::Preflop {
+        let buckets: &[BetSize] = if pot_fractions {
             &[
-                BetSize::Min,
-                BetSize::ThreeBb,
-                BetSize::FourBb,
+                BetSize::ThirdPot,
+                BetSize::HalfPot,
+                BetSize::ThreeQuarterPot,
                 BetSize::Pot,
             ]
         } else {
             &[
                 BetSize::Min,
-                BetSize::HalfPot,
-                BetSize::ThreeQuarterPot,
+                BetSize::ThreeBb,
+                BetSize::FourBb,
                 BetSize::Pot,
             ]
         };
@@ -1256,8 +1271,13 @@ fn action_panel(state: &GameState) -> String {
                 continue;
             }
             seen.push(amount);
+            let label = if pot_fractions {
+                pot_percent_label(*bucket).to_string()
+            } else {
+                amount.to_string()
+            };
             html.push_str(&format!(
-                r#"<button type="button" class="pt-chip-size" data-bucket="{}" data-size="{amount}">{amount}</button>"#,
+                r#"<button type="button" class="pt-chip-size" data-bucket="{}" data-size="{amount}">{label}</button>"#,
                 escape(bucket.label())
             ));
         }
@@ -1268,8 +1288,9 @@ fn action_panel(state: &GameState) -> String {
         }
         html.push_str("</div>");
 
-        let preflop = state.street() == Street::Preflop;
-        let default_bucket: BetSize = if preflop {
+        let default_bucket: BetSize = if facing_raise && preflop {
+            BetSize::TwoX
+        } else if preflop {
             BetSize::ThreeBb
         } else {
             BetSize::HalfPot
@@ -1291,30 +1312,31 @@ fn action_panel(state: &GameState) -> String {
     html.push_str(r#"<div class="pt-action-row">"#);
     if legal.can_fold {
         html.push_str(
-            r#"<button type="button" class="action-btn fold" data-kind="fold">Fold</button>"#,
+            r#"<button type="button" class="action-btn red" data-kind="fold">Fold</button>"#,
         );
     }
     if legal.can_check {
         html.push_str(
-            r#"<button type="button" class="action-btn green" data-kind="check">Check</button>"#,
+            r#"<button type="button" class="action-btn red" data-kind="check">Check</button>"#,
         );
     }
     if legal.can_call {
         html.push_str(&format!(
-            r#"<button type="button" class="action-btn green" data-kind="call">Call {}</button>"#,
+            r#"<button type="button" class="action-btn red" data-kind="call">Call<span class="amt">{}</span></button>"#,
             legal.call_amount
         ));
     }
     if !sizing && legal.can_all_in {
-        html.push_str(
-            r#"<button type="button" class="action-btn red" data-kind="all_in">All-in</button>"#,
-        );
+        html.push_str(&format!(
+            r#"<button type="button" class="action-btn red" data-kind="all_in">All-in<span class="amt">{}</span></button>"#,
+            state.stack(Seat::Hero)
+        ));
     }
     if sizing {
         let red_label = if betting {
-            format!("Bet {initial}")
+            format!(r#"Bet<span class="amt">{initial}</span>"#)
         } else {
-            format!("Raise to {initial}")
+            format!(r#"Raise to<span class="amt">{initial}</span>"#)
         };
         html.push_str(&format!(
             r#"<button type="button" class="action-btn red" id="raise-btn" data-kind="{kind}">{red_label}</button>"#
@@ -1970,7 +1992,7 @@ mod tests {
         assert!(fragment.contains("Hand #3"));
         assert!(fragment.contains("Blinds 10/20 · Preflop"));
         assert!(
-            fragment.contains(r#"data-kind="call">Call 10"#),
+            fragment.contains(r#"data-kind="call">Call<span class="amt">10</span>"#),
             "{fragment}"
         );
         assert!(fragment.contains(r#"data-kind="fold"#));
@@ -2052,6 +2074,40 @@ mod tests {
         assert!(
             fragment.contains(r#"data-bucket="ALLIN" data-size="300""#),
             "the all-in chip is a live preset that drives the slider to the whole stack: {fragment}"
+        );
+    }
+
+    #[test]
+    fn action_panel_facing_a_raise_preflop_shows_pot_fractions_and_two_x() {
+        // Hero calls, Opponent 1 raises to 100, Opponent 2 folds: the hero
+        // faces 80 more into a pot of 140 with 280 behind.
+        let mut state = GameState::new(Seat::Opponent1, level());
+        state
+            .start_hand(&mut Deck::shuffled(&mut seeded_rng(38)))
+            .unwrap();
+        state.apply_action(Action::Call).unwrap();
+        state.apply_action(Action::Raise(100)).unwrap();
+        state.apply_action(Action::Fold).unwrap();
+        assert_eq!(state.to_act(), Seat::Hero);
+
+        let fragment = table_fragment(&state, 1, 0, &[], &[]);
+        assert!(
+            fragment.contains(r#"data-kind="call">Call<span class="amt">80</span>"#),
+            "{fragment}"
+        );
+        assert!(
+            fragment.contains(r#"data-kind="raise">Raise to<span class="amt">180</span>"#),
+            "the default raise is 2x the call, clamped to the min-raise: {fragment}"
+        );
+        for pct in ["33%", "50%", "75%"] {
+            assert!(
+                fragment.contains(&format!(r#">{pct}</button>"#)),
+                "pot-fraction chip {pct} is shown: {fragment}"
+            );
+        }
+        assert!(
+            fragment.contains(r#"data-bucket="ALLIN""#),
+            "the pot-sized raise collapses into the all-in chip: {fragment}"
         );
     }
 

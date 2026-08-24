@@ -578,17 +578,17 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
 .pt-chip-size {
   min-width: 54px;
   padding: 0.32rem 0.65rem;
-  border-radius: 8px;
-  border: 1px solid rgba(207, 159, 93, 0.5);
-  background: rgba(10, 16, 22, 0.85);
-  color: var(--gold);
+  border-radius: 6px;
+  border: 1px solid #3a424c;
+  background: #2a3038;
+  color: #c9d1d9;
   font-weight: 800;
   font-size: 0.86rem;
   cursor: pointer;
   transition: background 0.12s ease;
 }
 
-.pt-chip-size:hover { background: rgba(207, 159, 93, 0.18); }
+.pt-chip-size:hover { background: #343b45; }
 
 .pt-chip-size.allin {
   background: linear-gradient(var(--red-2), #7c2a28);
@@ -687,19 +687,25 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
 .action-btn:hover { filter: brightness(1.13); }
 .action-btn:active { transform: translateY(1px); }
 
-.action-btn.fold {
-  background: linear-gradient(var(--fold-1), var(--fold-2));
-  color: #eaf3fb;
-}
-
-.action-btn.green {
-  background: linear-gradient(var(--green-1), var(--green-2));
-  color: #eafbef;
-}
-
 .action-btn.red {
   background: linear-gradient(var(--red-1), var(--red-2));
   color: #ffe9e4;
+}
+
+/* The table action dock uses square, uniformly red buttons with the amount
+   stacked under the label (GGPoker style). */
+.pt-action-dock .action-btn {
+  border-radius: 4px;
+  padding: 0.5rem 1.2rem;
+  line-height: 1.15;
+}
+
+.pt-action-dock .action-btn .amt {
+  display: block;
+  font-size: 0.82em;
+  font-weight: 700;
+  opacity: 0.92;
+  margin-top: 2px;
 }
 
 /* ------------------------------------------------------------------ log */

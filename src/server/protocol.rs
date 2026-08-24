@@ -199,6 +199,7 @@ pub fn parse_bucket(name: &str) -> Result<BetSize> {
         "min" => Ok(BetSize::Min),
         "3bb" => Ok(BetSize::ThreeBb),
         "4bb" => Ok(BetSize::FourBb),
+        "2x" | "twox" => Ok(BetSize::TwoX),
         "1/3pot" | "third" => Ok(BetSize::ThirdPot),
         "1/2pot" | "half" => Ok(BetSize::HalfPot),
         "3/4pot" | "threequarter" => Ok(BetSize::ThreeQuarterPot),
@@ -354,6 +355,7 @@ mod tests {
         assert_eq!(parse_bucket("min").unwrap(), BetSize::Min);
         assert_eq!(parse_bucket("3bb").unwrap(), BetSize::ThreeBb);
         assert_eq!(parse_bucket("4BB").unwrap(), BetSize::FourBb);
+        assert_eq!(parse_bucket("2x").unwrap(), BetSize::TwoX);
         assert_eq!(parse_bucket("1/3pot").unwrap(), BetSize::ThirdPot);
         assert_eq!(parse_bucket("1/2pot").unwrap(), BetSize::HalfPot);
         assert_eq!(parse_bucket("3/4pot").unwrap(), BetSize::ThreeQuarterPot);

@@ -81,22 +81,39 @@ pub fn candidates(state: &GameState) -> Vec<(Action, Option<BetSize>)> {
     }
 
     if legal.can_raise && legal.min_raise_to <= legal.max_raise_to {
-        for &bucket in size_buckets(street) {
+        let facing_raise_preflop =
+            street == Street::Preflop && to_call > 0 && state.current_bet() > big_blind;
+        let buckets: &[BetSize] = if facing_raise_preflop {
+            &[
+                BetSize::TwoX,
+                BetSize::ThirdPot,
+                BetSize::HalfPot,
+                BetSize::ThreeQuarterPot,
+                BetSize::Pot,
+            ]
+        } else {
+            size_buckets(street)
+        };
+        for &bucket in buckets {
             let amount = bucket
                 .to_raise_to(pot, to_call, big_blind, legal.min_raise_to, stack)
                 .clamp(legal.min_raise_to, legal.max_raise_to);
             if amount >= legal.max_raise_to {
                 push(&mut out, &legal, Action::AllIn, Some(BetSize::AllIn));
             } else {
-                let label = BetSize::classify(
-                    street,
-                    amount,
-                    pot,
-                    to_call,
-                    big_blind,
-                    legal.min_raise_to,
-                    stack,
-                );
+                let label = if facing_raise_preflop {
+                    bucket
+                } else {
+                    BetSize::classify(
+                        street,
+                        amount,
+                        pot,
+                        to_call,
+                        big_blind,
+                        legal.min_raise_to,
+                        stack,
+                    )
+                };
                 push(&mut out, &legal, Action::Raise(amount), Some(label));
             }
         }
@@ -192,9 +209,9 @@ mod tests {
     }
 
     #[test]
-    fn facing_a_bet_offers_fold_call_and_bucket_raises() {
+    fn facing_a_raise_preflop_offers_two_x_and_pot_fraction_raises() {
         // Hero calls, Opponent 1 raises to 100, Opponent 2 folds: the hero
-        // now faces 80 more into a pot of 150.
+        // now faces 80 more into a pot of 150 with 280 behind.
         let mut state = hero_open_state();
         state.apply_action(Action::Call).unwrap();
         state.apply_action(Action::Raise(100)).unwrap();
@@ -206,15 +223,15 @@ mod tests {
         assert!(actions.contains(&Action::Fold));
         assert!(actions.contains(&Action::Call));
         assert!(actions.contains(&Action::AllIn));
+        // 2x the call (160) clamps to the min-raise (180).
         assert!(actions.contains(&Action::Raise(180)));
-        assert!(
-            !actions.contains(&Action::Raise(300)),
-            "the pot-sized re-raise exceeds the hero stack and collapses into all-in"
-        );
+        // 1/2 pot (190) and 3/4 pot (245) survive; pot (300) collapses to all-in.
+        assert!(actions.contains(&Action::Raise(190)));
+        assert!(actions.contains(&Action::Raise(245)));
         assert!(
             cands
                 .iter()
-                .any(|(a, b)| *a == Action::Raise(180) && *b == Some(BetSize::Min))
+                .any(|(a, b)| *a == Action::Raise(180) && *b == Some(BetSize::TwoX))
         );
         assert!(
             cands

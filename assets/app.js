@@ -234,13 +234,10 @@ function setStatus(text, cls) {
       if (!slider || !raiseBtn) return;
       const value = Number(slider.value);
       const max = Number(slider.max);
-      if (value >= max) {
-        raiseBtn.textContent = "All-in";
-      } else if (raiseBtn.dataset.kind === "bet") {
-        raiseBtn.textContent = `Bet ${value}`;
-      } else {
-        raiseBtn.textContent = `Raise to ${value}`;
-      }
+      const label = raiseBtn.dataset.kind === "bet" ? "Bet" : "Raise to";
+      raiseBtn.innerHTML = value >= max
+        ? `All-in<span class="amt">${value}</span>`
+        : `${label}<span class="amt">${value}</span>`;
     };
     const setValue = (value) => {
       if (!slider) return;

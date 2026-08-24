@@ -224,9 +224,13 @@ interface and coaches decision-making with a range-based solver.
   table sits top-left; meaning the coach panel never hides the cards. The page is fluid: on wide
   screens the right column stretches and on narrow ones it wraps below the
   table. The action dock lives in its own
-  right-aligned block directly below the oval — steel-blue **Fold**, green
-  **Check/Call**, red **Bet/Raise**, sizing chips (Min / ½-pot / ¾-pot / Pot /
-  All-in) labelled in **chip values only** — stacks show their chip count
+  right-aligned block directly below the oval — square, uniformly red
+  **Fold** / **Check** / **Call** / **Bet-Raise** buttons with the amount
+  stacked under the label (e.g. "Call" over "70", "Raise to" over "140"),
+  and sizing chips that show **chip values** when opening the betting
+  (Min / 3bb / 4bb / Pot) but switch to **pot fractions** (33% / 50% / 75% /
+  100%) whenever you face a bet or raise — facing a raise preflop the default
+  raise is **2× the call** — stacks show their chip count
   with a muted `?` placeholder for the BB equivalent, just like the real
   client (hold **Alt** and the BB values appear, so you still build the
   conversion reflex yourself), seat pods carry no avatar icons — just name,
