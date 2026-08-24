@@ -1780,6 +1780,7 @@ mod tests {
                 pool,
                 snapshot_interval,
                 result_pause_ms,
+                history_dir: crate::hh::default_history_dir(),
             }),
         );
         let handle = tokio::spawn(async move {

@@ -1,10 +1,11 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use serde_json::json;
 use sqlx::PgPool;
 use tower_http::services::ServeDir;
@@ -13,14 +14,16 @@ use crate::analytics;
 use crate::blunder::BlunderConfig;
 use crate::decision::SurvivalConfig;
 use crate::error::Result;
+use crate::hh;
 use crate::mcts::MctsConfig;
 use crate::server::{views, ws};
 
 /// Shared server state injected into handlers: static assets, the solver
 /// configuration used for every table session, the optional analytics store
 /// backing decision persistence and the tournaments page, how many
-/// chart ticks pass between decimated snapshot refreshes, and how long the
-/// winner stays on screen before the next hand is dealt.
+/// chart ticks pass between decimated snapshot refreshes, how long the
+/// winner stays on screen before the next hand is dealt, and where the
+/// GGPoker hand-history zips live.
 #[derive(Clone, Debug)]
 pub struct AppState {
     pub assets: ServeDir,
@@ -30,6 +33,7 @@ pub struct AppState {
     pub pool: Option<PgPool>,
     pub snapshot_interval: usize,
     pub result_pause_ms: u64,
+    pub history_dir: PathBuf,
 }
 
 /// Serves the repository `assets/` directory, anchored at the crate manifest
@@ -47,6 +51,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/health", get(health))
         .route("/tournaments", get(tournaments))
         .route("/tournaments/{id}", get(tournament_detail))
+        .route("/history", get(history))
+        .route("/history/scan", post(history_scan))
+        .route("/history/tournaments/{id}", get(history_tournament_detail))
         .route("/ws", get(ws::handler))
         .nest_service("/assets", state.assets.clone())
         .with_state(state)
@@ -209,6 +216,97 @@ async fn tournament_detail(State(app): State<Arc<AppState>>, Path(id): Path<i32>
     }
 }
 
+/// The GGPoker hand-history page: the scan trigger, lifetime aggregates, and
+/// the imported-tournament listing (newest first).
+async fn history(State(app): State<Arc<AppState>>) -> Response {
+    let Some(pool) = app.pool.clone() else {
+        return unavailable("analytics store is unavailable");
+    };
+    let page = match history_page_data(&pool).await {
+        Ok((stats, tournaments)) => views::history_page(&stats, &tournaments),
+        Err(error) => {
+            tracing::warn!(%error, "history page failed to render");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(json!({ "error": error.to_string() })),
+            )
+                .into_response();
+        }
+    };
+    Html(page).into_response()
+}
+
+/// Loads the data driving the history page: lifetime stats plus the listing.
+async fn history_page_data(
+    pool: &PgPool,
+) -> Result<(hh::OverallStats, Vec<hh::TournamentListing>)> {
+    let stats = hh::overall_stats(pool).await?;
+    let tournaments = hh::list_tournaments(pool).await?;
+    Ok((stats, tournaments))
+}
+
+/// Scans the configured history directory, imports the found hands, and
+/// renders the results page restricted to the newly imported hands.
+async fn history_scan(State(app): State<Arc<AppState>>) -> Response {
+    let Some(pool) = app.pool.clone() else {
+        return unavailable("analytics store is unavailable");
+    };
+    let run = match hh::scan_directory(&app.history_dir) {
+        Ok(run) => run,
+        Err(error) => return scan_failure(error),
+    };
+    match hh::import_scan(&pool, &run).await {
+        Ok(outcome) => Html(views::history_scan_result_page(&outcome)).into_response(),
+        Err(error) => {
+            tracing::warn!(%error, "hand history scan failed to import");
+            scan_failure(error)
+        }
+    }
+}
+
+fn scan_failure(error: crate::error::Error) -> Response {
+    tracing::warn!(%error, "hand history scan failed");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        axum::Json(json!({ "error": error.to_string() })),
+    )
+        .into_response()
+}
+
+/// One imported tournament's detail: stored summary, aggregates, and hands.
+async fn history_tournament_detail(
+    State(app): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Response {
+    let Some(pool) = app.pool.clone() else {
+        return unavailable("analytics store is unavailable");
+    };
+    match hh::load_tournament(&pool, &id).await {
+        Ok(Some(detail)) => Html(views::history_tournament_detail_page(&detail)).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            axum::Json(json!({ "error": "tournament not found" })),
+        )
+            .into_response(),
+        Err(error) => {
+            tracing::warn!(%error, tournament_id = %id, "history tournament detail failed to render");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(json!({ "error": error.to_string() })),
+            )
+                .into_response()
+        }
+    }
+}
+
+fn unavailable(message: &'static str) -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        axum::Json(json!({ "error": message })),
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,6 +323,7 @@ mod tests {
             pool: None,
             snapshot_interval: 100,
             result_pause_ms: 0,
+            history_dir: crate::hh::default_history_dir(),
         })
     }
 
@@ -304,6 +403,7 @@ mod tests {
             pool: Some(pool.clone()),
             snapshot_interval: 100,
             result_pause_ms: 0,
+            history_dir: crate::hh::default_history_dir(),
         });
 
         let (status, body) = get_with(state.clone(), "/").await;
@@ -429,6 +529,7 @@ mod tests {
             pool: Some(pool.clone()),
             snapshot_interval: 100,
             result_pause_ms: 0,
+            history_dir: crate::hh::default_history_dir(),
         });
         let (status, body) = get_with(state, "/tournaments").await;
         assert_eq!(status, StatusCode::OK);
@@ -494,6 +595,7 @@ mod tests {
             pool: Some(pool.clone()),
             snapshot_interval: 100,
             result_pause_ms: 0,
+            history_dir: crate::hh::default_history_dir(),
         });
         let newest_id = *ids.last().unwrap();
         let oldest_id = ids[0];
@@ -593,6 +695,7 @@ mod tests {
             pool: Some(pool.clone()),
             snapshot_interval: 100,
             result_pause_ms: 0,
+            history_dir: crate::hh::default_history_dir(),
         });
         let (status, body) = get_with(state, &format!("/tournaments/{session_id}")).await;
         assert_eq!(status, StatusCode::OK);
@@ -612,6 +715,7 @@ mod tests {
                 pool: Some(pool.clone()),
                 snapshot_interval: 100,
                 result_pause_ms: 0,
+                history_dir: crate::hh::default_history_dir(),
             }),
             "/tournaments/999999999",
         )
@@ -679,5 +783,241 @@ mod tests {
             .await
             .unwrap();
         assert_ne!(response.status(), StatusCode::OK);
+    }
+
+    // ------------------------------------------------------- hand history
+
+    async fn post_with(state: Arc<AppState>, path: &str) -> (StatusCode, String) {
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        (status, String::from_utf8_lossy(&bytes).to_string())
+    }
+
+    #[tokio::test]
+    async fn history_requires_an_analytics_store() {
+        let (status, body) = get("/history").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(body.contains("analytics store is unavailable"));
+
+        let (status, body) = post_with(test_state(), "/history/scan").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(body.contains("analytics store is unavailable"));
+
+        let (status, _) = get("/history/tournaments/1").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn history_scan_imports_zips_and_renders_new_hand_stats() {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+
+        let _guard = crate::analytics::DB_TEST_LOCK.lock().await;
+        dotenvy::dotenv().ok();
+        let database_url = match std::env::var("DATABASE_URL") {
+            Ok(url) if !url.is_empty() => url,
+            _ => panic!(
+                "DATABASE_URL is required for database integration tests; start PostgreSQL via pg.ps1"
+            ),
+        };
+        let pool = crate::db::connect(&database_url).await.unwrap();
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let tournament_id = format!("T{unique}");
+        let hand_id = format!("SG{unique}");
+        let dir = std::env::temp_dir().join(format!("pokertrainer_http_scan_{unique}"));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let hand_text = format!(
+            "Poker Hand #{hand_id}: Tournament #{tournament_id}, Spin&Gold #7 Hold'em No Limit - Level1(10/20) - 2026/08/21 15:07:44
+Table '39856' 3-max Seat #2 is the button
+Seat 2: Hero (540 in chips)
+Seat 3: 14c11a2a (360 in chips)
+Hero: posts small blind 10
+14c11a2a: posts big blind 20
+*** HOLE CARDS ***
+Dealt to Hero [As Kh]
+Hero: raises 20 to 40
+14c11a2a: calls 20
+*** FLOP *** [2c 7h 9d]
+Hero: bets 30
+14c11a2a: folds
+Uncalled bet (30) returned to Hero
+*** SHOWDOWN ***
+Hero collected 80 from pot
+*** SUMMARY ***
+Total pot 80 | Rake 0 | Jackpot 0 | Bingo 0 | Fortune 0 | Tax 0
+Board [2c 7h 9d]
+Seat 2: Hero (small blind) collected (80)
+"
+        );
+        let summary_text = format!(
+            "Tournament #{tournament_id}, Spin&Gold #7, Hold'em No Limit
+Buy-in: $0.25
+3 Players
+Total Prize Pool: $0.75
+Tournament started 2026/08/21 15:03:37 
+1st : Hero, $0.75
+You finished in 1st place.
+"
+        );
+        let zip_path = dir.join("export.zip");
+        let file = std::fs::File::create(&zip_path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        writer
+            .start_file("hands.txt", SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(hand_text.as_bytes()).unwrap();
+        writer
+            .start_file("summary.txt", SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(summary_text.as_bytes()).unwrap();
+        writer.finish().unwrap();
+
+        let state = Arc::new(AppState {
+            assets: default_assets(),
+            mcts: MctsConfig::test(),
+            survival: SurvivalConfig::default(),
+            blunder: BlunderConfig::default(),
+            pool: Some(pool.clone()),
+            snapshot_interval: 100,
+            result_pause_ms: 0,
+            history_dir: dir.clone(),
+        });
+
+        let (status, body) = get_with(state.clone(), "/history").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("Hand history"));
+        assert!(body.contains(r#"action="/history/scan""#));
+
+        let (status, body) = post_with(state.clone(), "/history/scan").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("<title>Poker Trainer — Scan results</title>"));
+        assert!(body.contains("<span>New hands</span><b>1</b>"), "{body}");
+        assert!(body.contains("<span>New tournaments</span><b>1</b>"));
+        assert!(body.contains("<span>Won</span><b>1</b>"));
+        assert!(body.contains("<span>Win ratio</span><b>100%</b>"), "{body}");
+
+        // A re-scan is idempotent: nothing new, hand skipped.
+        let (status, body) = post_with(state.clone(), "/history/scan").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("<span>New hands</span><b>0</b>"), "{body}");
+        assert!(body.contains("<span>Already imported</span><b>1</b>"));
+
+        // The listing shows the tournament and the detail page the hand.
+        let (status, body) = get_with(state.clone(), "/history").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains(&format!("href=\"/history/tournaments/{tournament_id}\"")));
+        assert!(body.contains("$0.50"), "{body}");
+
+        let (status, body) = get_with(
+            state.clone(),
+            &format!("/history/tournaments/{tournament_id}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("As Kh"));
+        assert!(body.contains(r#"class="pt-result-badge win">WIN</span>"#));
+
+        let (status, _) = get_with(state, "/history/tournaments/999999999").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        sqlx::query("DELETE FROM gg_tournaments WHERE id = $1")
+            .bind(&tournament_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn history_scan_reports_bad_zips_without_failing_the_scan() {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+
+        let _guard = crate::analytics::DB_TEST_LOCK.lock().await;
+        dotenvy::dotenv().ok();
+        let database_url = match std::env::var("DATABASE_URL") {
+            Ok(url) if !url.is_empty() => url,
+            _ => panic!(
+                "DATABASE_URL is required for database integration tests; start PostgreSQL via pg.ps1"
+            ),
+        };
+        let pool = crate::db::connect(&database_url).await.unwrap();
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let tournament_id = format!("T{unique}");
+        let hand_id = format!("SG{unique}");
+        let dir = std::env::temp_dir().join(format!("pokertrainer_http_scan_bad_{unique}"));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let zip_path = dir.join("mixed.zip");
+        let file = std::fs::File::create(&zip_path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        writer
+            .start_file("junk.txt", SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"not poker").unwrap();
+        writer
+            .start_file("hands.txt", SimpleFileOptions::default())
+            .unwrap();
+        write!(
+            writer,
+            "Poker Hand #{hand_id}: Tournament #{tournament_id}, Spin&Gold #7 Hold'em No Limit - Level1(10/20) - 2026/08/21 15:07:44\n\
+             Table '39856' 3-max Seat #2 is the button\n\
+             Seat 2: Hero (540 in chips)\n\
+             Seat 3: 14c11a2a (360 in chips)\n\
+             Hero: posts small blind 10\n\
+             14c11a2a: posts big blind 20\n\
+             *** HOLE CARDS ***\n\
+             Dealt to Hero [As Kh]\n\
+             Hero: folds\n\
+             *** SUMMARY ***\n\
+             Seat 2: Hero folded\n"
+        )
+        .unwrap();
+        writer.finish().unwrap();
+
+        let state = Arc::new(AppState {
+            assets: default_assets(),
+            mcts: MctsConfig::test(),
+            survival: SurvivalConfig::default(),
+            blunder: BlunderConfig::default(),
+            pool: Some(pool.clone()),
+            snapshot_interval: 100,
+            result_pause_ms: 0,
+            history_dir: dir.clone(),
+        });
+
+        let (status, body) = post_with(state, "/history/scan").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("<span>New hands</span><b>1</b>"), "{body}");
+        assert!(
+            body.contains("no recognizable PokerCraft content"),
+            "the junk entry is listed as skipped: {body}"
+        );
+
+        sqlx::query("DELETE FROM gg_tournaments WHERE id = $1")
+            .bind(&tournament_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

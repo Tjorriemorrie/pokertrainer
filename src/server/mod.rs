@@ -76,6 +76,7 @@ pub async fn serve(config: ServerConfig, pool: Option<PgPool>) -> Result<()> {
         pool,
         snapshot_interval: config.snapshot_interval,
         result_pause_ms: config.result_pause_ms,
+        history_dir: crate::hh::default_history_dir(),
     });
     http::serve(config.bind, state).await
 }

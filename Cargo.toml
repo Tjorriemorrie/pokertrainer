@@ -18,6 +18,7 @@ tower-http = { version = "0.6", features = ["fs"] }
 tracing = "0.1.44"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 tokio-tungstenite = "0.28"

@@ -20,6 +20,8 @@ pub enum Error {
     Decision(String),
     #[error("analytics error: {0}")]
     Analytics(String),
+    #[error("hand history error: {0}")]
+    Hh(String),
     #[error("database error: {0}")]
     Sqlx(#[from] sqlx::Error),
     #[error("io error: {0}")]

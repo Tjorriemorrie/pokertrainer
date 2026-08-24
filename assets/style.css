@@ -1156,3 +1156,67 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
   padding: 0.85rem 2rem;
   margin: 1.2rem 0;
 }
+
+/* ---------------------------------------------------------- hand history */
+
+.pt-main > .pt-detail + .pt-detail { margin-top: 1.2rem; }
+
+.pt-hh-title {
+  font-size: 1.15rem;
+  font-weight: 800;
+  color: var(--gold-light);
+  margin: 0;
+}
+
+.pt-detail-head .pt-hh-title { margin-right: auto; }
+
+.pt-hh-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.pt-hh-table th {
+  text-align: left;
+  color: #6b7280;
+  font-weight: 600;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.pt-hh-table td {
+  padding: 0.45rem 0.6rem;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+.pt-hh-table tr:last-child td { border-bottom: none; }
+
+.pt-hh-date { color: #9ca3af; }
+
+.pt-hh-sub {
+  color: #6b7280;
+  font-size: 0.78rem;
+}
+
+.pt-hh-board {
+  white-space: normal !important;
+  color: #9ca3af;
+  font-size: 0.8rem;
+  min-width: 160px;
+}
+
+.pt-pos { color: #86efac; }
+.pt-neg { color: #fca5a5; }
+
+.pt-hh-failures {
+  background: #1c1917;
+  border: 1px solid #44403c;
+  border-radius: 8px;
+  padding: 0.6rem 1rem;
+  color: #fde68a;
+  font-size: 0.85rem;
+}
+
+.pt-hh-failures ul { margin: 0.4rem 0 0.2rem; padding-left: 1.2rem; }
+.pt-hh-failures li { margin: 0.15rem 0; word-break: break-all; }

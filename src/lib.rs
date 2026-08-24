@@ -7,6 +7,7 @@ pub mod decision;
 pub mod error;
 pub mod eval;
 pub mod game;
+pub mod hh;
 pub mod live;
 pub mod mcts;
 pub mod opponent;

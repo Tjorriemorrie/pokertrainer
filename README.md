@@ -166,6 +166,22 @@ interface and coaches decision-making with a range-based solver.
   shows the outcome and final stack, hands played, hands won/lost, win rate,
   all-in frequency, average/total EV loss, and the biggest blunder — for any
   past tournament, not just the one you just finished.
+- **GGPoker hand-history import:** your real PokerCraft exports zip files
+  dropped into the `history/` folder are scanned and imported into the
+  database. The dashboard and table headers link to **Hand history**
+  (`/history`), which starts with a **Scan for new hand histories** button.
+  Scanning reads every zip in the folder (already-imported hands are skipped,
+  so re-scanning is always safe) and then shows a **results page** whose
+  stats cover *only the newly imported hands* — hands won/lost, win ratio,
+  all-ins, showdowns, and chips won/lost. Back on the history page, the
+  imported tournaments are listed newest first with buy-in, place, prize,
+  profit, hands, and win rate, under lifetime totals: tournaments won, hand
+  win ratio, all-ins, total profit, and net chips. Each tournament links to
+  its detail page, which shows every hand (time, blinds, position, cards,
+  all-in/showdown, invested vs collected chips, result, board) plus the
+  tournament's money outcome. Profit is real money — the buy-in and prize
+  come from the tournament-summary files PokerCraft exports next to the
+  hands.
 - **GGPoker frontend:** a server-rendered GGPoker table skin with the
   Spin and Gold look — dark-teal oval felt on a wooden rail, three fixed seat
   pods (opponents top-left/top-right, hero bottom-center) that stay in place
@@ -297,6 +313,17 @@ standing), dealing stops, a
 winner/loser modal
 appears, and its **Continue** button jumps straight to that tournament's
 detail page.
+
+### Importing your GGPoker hand histories
+
+PokerCraft exports your played tournaments as zip files. Put them in the
+`history/` folder, then open the **Hand history** link (dashboard or table
+header, <http://127.0.0.1:8744/history>) and press **Scan for new hand
+histories**. The scan imports every hand and tournament found in the zips;
+hands that were already imported are skipped, so you can re-scan whenever
+new zips arrive. The results page shows the stats of only the hands imported
+by that scan, and the history page keeps a running tournament listing (latest
+first) with your total profit, win ratios, and per-tournament detail pages.
 
 ### Running the tests
 

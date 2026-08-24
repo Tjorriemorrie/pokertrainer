@@ -23,6 +23,9 @@ target
 # Local PostgreSQL instance managed by pg.ps1
 /data
 
+# Personal GGPoker PokerCraft exports (imported on demand)
+/history
+
 # Local environment / secrets
 .env
 
