@@ -944,3 +944,111 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
 }
 
 .pt-tournament-title { font-weight: 700; color: #e5e7eb; }
+.pt-tournament-title { text-decoration: none; }
+.pt-tournament-title:hover { color: var(--gold); }
+
+.pt-result-badge {
+  display: inline-block;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  border-radius: 999px;
+  padding: 0.15rem 0.7rem;
+  align-self: center;
+}
+.pt-result-badge.win { background: #064e3b; color: #86efac; }
+.pt-result-badge.loss { background: #7f1d1d; color: #fecaca; }
+
+/* --------------------------------------------------- tournament detail */
+
+.pt-detail {
+  background: #0d1117;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 1.25rem 1.5rem;
+}
+
+.pt-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+  padding-bottom: 0.9rem;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 1rem;
+}
+
+.pt-detail-meta { font-size: 0.85rem; color: #9ca3af; }
+
+.pt-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0.8rem;
+  margin-bottom: 1.2rem;
+}
+
+.pt-stat-card {
+  background: #0a0f16;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.8rem 1rem;
+  text-align: center;
+}
+
+.pt-stat-card span {
+  display: block;
+  font-size: 0.6rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #6b7280;
+  margin-bottom: 4px;
+}
+
+.pt-stat-card b {
+  font-size: 1.25rem;
+  font-weight: 800;
+  color: var(--gold-light);
+}
+
+/* --------------------------------------------------- tournament modal */
+
+.pt-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(4, 8, 12, 0.72);
+}
+
+.pt-modal[hidden] { display: none; }
+
+.pt-modal-card {
+  background: #0d1117;
+  border: 1px solid #3b3f52;
+  border-radius: 16px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.7);
+  padding: 2rem 2.25rem;
+  max-width: 420px;
+  width: 90%;
+  text-align: center;
+}
+
+.pt-modal-title {
+  font-size: 1.5rem;
+  font-weight: 900;
+  margin: 0 0 0.6rem;
+}
+
+.pt-modal.win .pt-modal-title { color: var(--gold-light); }
+.pt-modal.loss .pt-modal-title { color: #f87171; }
+
+.pt-modal-body {
+  color: #c7d0da;
+  font-size: 0.95rem;
+  line-height: 1.5;
+  margin: 0 0 1.4rem;
+}
+
+.pt-modal-card .action-btn { width: 100%; }

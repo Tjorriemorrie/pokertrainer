@@ -26,6 +26,19 @@ pub const DECIMATED_POINTS: usize = 100;
 /// plus the EV lost against the optimal action, in big blinds.
 pub type ChartPoint = (u64, f64);
 
+/// A `hero_sessions` row joined with its decision aggregates, as read by the
+/// summary and detail queries.
+type SummaryRow = (
+    i32,
+    String,
+    String,
+    i64,
+    i32,
+    f64,
+    Option<String>,
+    Option<i32>,
+);
+
 /// One hero decision awaiting a database write.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PendingDecision {
@@ -35,6 +48,19 @@ pub struct PendingDecision {
     pub optimal: String,
     /// EV given up against the optimal action, in big blinds.
     pub ev_loss: f64,
+}
+
+/// One completed hand awaiting a database write: who won it and how the hero
+/// fared, so the tournament detail page can aggregate wins, losses, and
+/// all-in frequency.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingHandResult {
+    pub hand_no: u64,
+    pub hero_won: bool,
+    pub hero_all_in: bool,
+    pub hero_busted: bool,
+    /// The winning seat's index (0: Hero, 1: Opponent 1, 2: Opponent 2).
+    pub winner_seat: i32,
 }
 
 /// A finished session shown on the tournaments page.
@@ -47,6 +73,11 @@ pub struct SessionSummary {
     pub hands: i32,
     /// Mean EV loss across the session's actions, in big blinds.
     pub avg_ev_loss: f64,
+    /// The tournament outcome (`WIN`/`LOSS`), or `None` for sessions finished
+    /// manually before a winner was decided.
+    pub result: Option<String>,
+    /// The hero's stack when the tournament ended, or `None` when unknown.
+    pub final_stack: Option<i32>,
 }
 
 /// The `hero_decisions.street` index (0: Preflop, 1: Flop, 2: Turn,
@@ -113,6 +144,27 @@ pub async fn finish_session(pool: &PgPool, session_id: i32) -> Result<bool> {
     Ok(done.rows_affected() > 0)
 }
 
+/// Finalizes a session that ended naturally: records the outcome and the
+/// hero's final stack alongside the end timestamp (idempotent).
+pub async fn finalize_session(
+    pool: &PgPool,
+    session_id: i32,
+    result: &str,
+    final_stack: i32,
+) -> Result<bool> {
+    let done = sqlx::query(
+        "UPDATE hero_sessions
+         SET session_end = now(), result = $2, final_stack = $3
+         WHERE id = $1 AND session_end IS NULL",
+    )
+    .bind(session_id)
+    .bind(result)
+    .bind(final_stack)
+    .execute(pool)
+    .await?;
+    Ok(done.rows_affected() > 0)
+}
+
 /// Writes one decision row; returns its id.
 pub async fn record_decision(
     pool: &PgPool,
@@ -134,6 +186,32 @@ pub async fn persist_records(
     }
     transaction.commit().await?;
     Ok(records.len())
+}
+
+/// Writes a batch of per-hand results atomically; returns the persisted count.
+pub async fn persist_hand_results(
+    pool: &PgPool,
+    session_id: i32,
+    results: &[PendingHandResult],
+) -> Result<usize> {
+    let mut transaction = pool.begin().await?;
+    for result in results {
+        sqlx::query(
+            "INSERT INTO hero_hand_results
+                 (session_id, hand_number, hero_won, hero_all_in, hero_busted, winner_seat)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(session_id)
+        .bind(hand_number(result.hand_no)?)
+        .bind(result.hero_won)
+        .bind(result.hero_all_in)
+        .bind(result.hero_busted)
+        .bind(result.winner_seat)
+        .execute(&mut *transaction)
+        .await?;
+    }
+    transaction.commit().await?;
+    Ok(results.len())
 }
 
 /// The last [`CHART_WINDOW`] actions across every session, oldest first, with
@@ -186,20 +264,22 @@ pub async fn load_session(pool: &PgPool, session_id: i32, limit: usize) -> Resul
 /// Finished sessions (each with at least one recorded decision), newest
 /// first, for the tournaments page.
 pub async fn list_finished_sessions(pool: &PgPool, limit: i64) -> Result<Vec<SessionSummary>> {
-    let rows: Vec<(i32, String, String, i64, i32, f64)> = sqlx::query_as(
+    let rows: Vec<SummaryRow> = sqlx::query_as(
         "SELECT
-             s.id,
-             to_char(s.session_start AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),
-             to_char(s.session_end   AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),
-             count(d.id),
-             COALESCE(max(d.hand_number), 0),
-             COALESCE(avg(d.ev_loss), 0.0)
-         FROM hero_sessions s
-         JOIN hero_decisions d ON d.session_id = s.id
-         WHERE s.session_end IS NOT NULL
-         GROUP BY s.id
-         ORDER BY s.session_end DESC, s.id DESC
-         LIMIT $1",
+                 s.id,
+                 to_char(s.session_start AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),
+                 to_char(s.session_end   AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),
+                 count(d.id),
+                 COALESCE(max(d.hand_number), 0),
+                 COALESCE(avg(d.ev_loss), 0.0),
+                 s.result,
+                 s.final_stack
+             FROM hero_sessions s
+             JOIN hero_decisions d ON d.session_id = s.id
+             WHERE s.session_end IS NOT NULL
+             GROUP BY s.id
+             ORDER BY s.session_end DESC, s.id DESC
+             LIMIT $1",
     )
     .bind(limit)
     .fetch_all(pool)
@@ -208,16 +288,127 @@ pub async fn list_finished_sessions(pool: &PgPool, limit: i64) -> Result<Vec<Ses
     Ok(rows
         .into_iter()
         .map(
-            |(id, started, ended, actions, hands, avg_ev_loss)| SessionSummary {
-                id,
-                started,
-                ended,
-                actions,
-                hands,
-                avg_ev_loss,
+            |(id, started, ended, actions, hands, avg_ev_loss, result, final_stack)| {
+                SessionSummary {
+                    id,
+                    started,
+                    ended,
+                    actions,
+                    hands,
+                    avg_ev_loss,
+                    result,
+                    final_stack,
+                }
             },
         )
         .collect())
+}
+
+/// The full detail of one finished tournament: the session summary plus the
+/// hand-level aggregates (wins, losses, all-in frequency) and EV stats that
+/// the detail page renders.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TournamentDetail {
+    pub summary: SessionSummary,
+    pub hands: i64,
+    pub hands_won: i64,
+    pub hands_lost: i64,
+    pub all_ins: i64,
+    pub all_in_pct: f64,
+    pub total_ev_loss: f64,
+    pub max_ev_loss: f64,
+    pub points: Vec<ChartPoint>,
+}
+
+/// Loads one tournament's detail, or `None` when the session does not exist
+/// or has no recorded decisions.
+pub async fn load_tournament_detail(
+    pool: &PgPool,
+    session_id: i32,
+) -> Result<Option<TournamentDetail>> {
+    let summary_row: Option<SummaryRow> = sqlx::query_as(
+        "SELECT
+                 s.id,
+                 to_char(s.session_start AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),
+                 to_char(s.session_end   AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),
+                 count(d.id),
+                 COALESCE(max(d.hand_number), 0),
+                 COALESCE(avg(d.ev_loss), 0.0),
+                 s.result,
+                 s.final_stack
+             FROM hero_sessions s
+             LEFT JOIN hero_decisions d ON d.session_id = s.id
+             WHERE s.id = $1
+             GROUP BY s.id",
+    )
+    .bind(session_id)
+    .fetch_optional(pool)
+    .await?;
+
+    let Some((id, started, ended, actions, hands, avg_ev_loss, result, final_stack)) = summary_row
+    else {
+        return Ok(None);
+    };
+    if actions == 0 {
+        return Ok(None);
+    }
+
+    let hand_stats: (i64, i64, i64) = sqlx::query_as(
+        "SELECT count(*),
+                COALESCE(sum(CASE WHEN hero_won THEN 1 ELSE 0 END), 0),
+                COALESCE(sum(CASE WHEN hero_all_in THEN 1 ELSE 0 END), 0)
+         FROM hero_hand_results WHERE session_id = $1",
+    )
+    .bind(session_id)
+    .fetch_one(pool)
+    .await?;
+    let (hand_count, hands_won, all_ins) = hand_stats;
+    let total_hands = if hand_count > 0 {
+        hand_count
+    } else {
+        hands as i64
+    };
+    let hands_lost = total_hands - hands_won;
+    let all_in_pct = if total_hands > 0 {
+        all_ins as f64 * 100.0 / total_hands as f64
+    } else {
+        0.0
+    };
+
+    let ev_stats: (f64, f64) = sqlx::query_as(
+        "SELECT COALESCE(sum(ev_loss), 0.0), COALESCE(max(ev_loss), 0.0)
+         FROM hero_decisions WHERE session_id = $1",
+    )
+    .bind(session_id)
+    .fetch_one(pool)
+    .await?;
+    let (total_ev_loss, max_ev_loss) = ev_stats;
+
+    let points = decimate(
+        &load_session(pool, session_id, CHART_WINDOW).await?,
+        DECIMATED_POINTS,
+    );
+
+    Ok(Some(TournamentDetail {
+        summary: SessionSummary {
+            id,
+            started,
+            ended,
+            actions,
+            hands,
+            avg_ev_loss,
+            result,
+            final_stack,
+        },
+        hands: total_hands,
+        hands_won,
+        hands_lost,
+        all_ins,
+        all_in_pct,
+        total_ev_loss,
+        max_ev_loss,
+        points,
+    }))
 }
 
 /// Server-side chart decimation: splits the point series into `target` bins
@@ -416,6 +607,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hand_results_and_finalize_feed_the_tournament_detail() {
+        let _guard = DB_TEST_LOCK.lock().await;
+        let pool = test_pool().await;
+
+        let session_id = start_session(&pool).await.unwrap();
+        persist_records(
+            &pool,
+            session_id,
+            &[
+                decision(1, Street::Preflop, 0.0),
+                decision(1, Street::Flop, 30.0),
+                decision(2, Street::Preflop, 10.0),
+            ],
+        )
+        .await
+        .unwrap();
+        persist_hand_results(
+            &pool,
+            session_id,
+            &[
+                PendingHandResult {
+                    hand_no: 1,
+                    hero_won: true,
+                    hero_all_in: false,
+                    hero_busted: false,
+                    winner_seat: 0,
+                },
+                PendingHandResult {
+                    hand_no: 2,
+                    hero_won: false,
+                    hero_all_in: true,
+                    hero_busted: true,
+                    winner_seat: 1,
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            finalize_session(&pool, session_id, "LOSS", 0)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !finalize_session(&pool, session_id, "LOSS", 0)
+                .await
+                .unwrap(),
+            "finalizing is idempotent"
+        );
+
+        let detail = load_tournament_detail(&pool, session_id)
+            .await
+            .unwrap()
+            .expect("a finished session with decisions has a detail");
+        assert_eq!(detail.summary.id, session_id);
+        assert_eq!(detail.summary.result.as_deref(), Some("LOSS"));
+        assert_eq!(detail.summary.final_stack, Some(0));
+        assert_eq!(detail.hands, 2);
+        assert_eq!(detail.hands_won, 1);
+        assert_eq!(detail.hands_lost, 1);
+        assert_eq!(detail.all_ins, 1);
+        assert!((detail.all_in_pct - 50.0).abs() < 1e-9);
+        assert!((detail.total_ev_loss - 40.0).abs() < 1e-9);
+        assert!((detail.max_ev_loss - 30.0).abs() < 1e-9);
+        assert_eq!(detail.points.len(), 3);
+
+        delete_sessions(&pool, &[session_id]).await;
+        assert_eq!(
+            load_tournament_detail(&pool, session_id).await.unwrap(),
+            None,
+            "a deleted session has no detail"
+        );
+    }
+
+    #[tokio::test]
     async fn global_recent_window_spans_sessions_in_order() {
         let _guard = DB_TEST_LOCK.lock().await;
         let pool = test_pool().await;
@@ -474,12 +741,27 @@ mod tests {
         for result in [
             start_session(&mirror).await.map(|_| ()),
             finish_session(&mirror, 1).await.map(|_| ()),
+            finalize_session(&mirror, 1, "WIN", 1500).await.map(|_| ()),
             record_decision(&mirror, 1, &decision(1, Street::Preflop, 0.0))
                 .await
                 .map(|_| ()),
+            persist_hand_results(
+                &mirror,
+                1,
+                &[PendingHandResult {
+                    hand_no: 1,
+                    hero_won: true,
+                    hero_all_in: false,
+                    hero_busted: false,
+                    winner_seat: 0,
+                }],
+            )
+            .await
+            .map(|_| ()),
             load_recent(&mirror, 10).await.map(|_| ()),
             load_session(&mirror, 1, 10).await.map(|_| ()),
             list_finished_sessions(&mirror, 10).await.map(|_| ()),
+            load_tournament_detail(&mirror, 1).await.map(|_| ()),
         ] {
             assert!(matches!(result, Err(Error::Sqlx(_))));
         }

@@ -350,6 +350,21 @@ function setStatus(text, cls) {
 
   /* --------------------------------------------------------- messages */
 
+  function showTournamentModal(won, url) {
+    const modal = document.getElementById("tournament-modal");
+    const title = document.getElementById("tournament-modal-title");
+    const body = document.getElementById("tournament-modal-body");
+    const continueBtn = document.getElementById("tournament-modal-continue");
+    if (!modal || !title || !body || !continueBtn) return;
+    modal.classList.toggle("win", won);
+    modal.classList.toggle("loss", !won);
+    title.textContent = won ? "You won the tournament!" : "You lost";
+    body.textContent = won
+      ? "You took down the Spin & Gold — nice run."
+      : "Better luck next time — review your hands to see where it slipped.";
+    continueBtn.onclick = () => { window.location.href = url; };
+    modal.hidden = false;
+  }
   function handleMessage(raw) {
     let msg;
     try {
@@ -387,6 +402,9 @@ case "CHART_SNAPSHOT":
         break;
       case "SEARCH_STATUS":
         setSolverStatus(msg);
+        break;
+      case "TOURNAMENT_FINISHED":
+        showTournamentModal(msg.won, msg.url);
         break;
       case "SESSION_FINISHED":
         window.location.href = msg.url;

@@ -1,4 +1,4 @@
-use crate::analytics::{ChartPoint, SessionSummary};
+use crate::analytics::{ChartPoint, SessionSummary, TournamentDetail};
 use crate::card::{Card, Suit};
 use crate::decision::{Analysis, AnalyzedDecision, SearchReport};
 use crate::game::{Action, GameState, Seat, Street};
@@ -45,6 +45,13 @@ pub fn index_page() -> String {
       </aside>
     </div>
   </main>
+  <div id="tournament-modal" class="pt-modal" hidden>
+    <div class="pt-modal-card">
+      <h2 id="tournament-modal-title" class="pt-modal-title">Tournament over</h2>
+      <p id="tournament-modal-body" class="pt-modal-body"></p>
+      <button id="tournament-modal-continue" class="action-btn pt-confirm" type="button">Continue</button>
+    </div>
+  </div>
   <script src="/assets/app.js?v=4"></script>
 </body>
 </html>"#
@@ -80,15 +87,22 @@ pub fn tournaments_page(sessions: &[(SessionSummary, Vec<ChartPoint>)]) -> Strin
     } else {
         for (summary, points) in sessions {
             let dataset = serde_json::to_string(points).unwrap_or_else(|_| "[]".to_string());
+            let result_badge = match summary.result.as_deref() {
+                Some("WIN") => r#"<span class="pt-result-badge win">WIN</span>"#,
+                Some("LOSS") => r#"<span class="pt-result-badge loss">LOSS</span>"#,
+                _ => "",
+            };
             html.push_str(&format!(
                 r#"<section class="pt-tournament" data-tournament-id="{}">
   <div class="pt-tournament-head">
-    <span class="pt-tournament-title">Tournament #{}</span>
+    <a class="pt-tournament-title" href="/tournaments/{}">Tournament #{}</a>
+    {result_badge}
     <span class="pt-tournament-meta">{} → {}</span>
     <span class="pt-tournament-meta">{} hands · {} actions · avg EV loss {:.2} BB</span>
   </div>
   <canvas class="ev-chart" width="1200" height="48" data-points='{}'></canvas>
 </section>"#,
+                summary.id,
                 summary.id,
                 summary.id,
                 escape(&summary.started),
@@ -127,6 +141,106 @@ pub fn tournaments_page(sessions: &[(SessionSummary, Vec<ChartPoint>)]) -> Strin
 
     html.push_str("</main>\n</body>\n</html>\n");
     html
+}
+
+/// The single-tournament detail page: the outcome, hand-level aggregates
+/// (hands, wins, losses, all-in frequency), EV stats, and the decimated
+/// action-EV chart.
+pub fn tournament_detail_page(detail: &TournamentDetail) -> String {
+    let summary = &detail.summary;
+    let dataset = serde_json::to_string(&detail.points).unwrap_or_else(|_| "[]".to_string());
+    let win_rate = if detail.hands > 0 {
+        detail.hands_won as f64 * 100.0 / detail.hands as f64
+    } else {
+        0.0
+    };
+
+    let result_badge = match summary.result.as_deref() {
+        Some("WIN") => r#"<span class="pt-result-badge win">WIN</span>"#,
+        Some("LOSS") => r#"<span class="pt-result-badge loss">LOSS</span>"#,
+        _ => r#"<span class="pt-result-badge">—</span>"#,
+    };
+    let final_stack = summary
+        .final_stack
+        .map(|stack| format!("{stack} chips"))
+        .unwrap_or_else(|| "—".to_string());
+
+    format!(
+        r##"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Poker Trainer — Tournament #{}</title>
+<link rel="stylesheet" href="/assets/style.css?v=10">
+</head>
+<body class="pt-body">
+<header class="pt-topwrap">
+  <h1 class="pt-page-title">Tournament #{}</h1>
+  <a href="/tournaments" class="pt-link">All tournaments</a>
+  <a href="/" class="pt-link">Back to the table</a>
+</header>
+<main class="pt-main">
+  <section class="pt-detail">
+    <div class="pt-detail-head">
+      {result_badge}
+      <span class="pt-detail-meta">{} → {}</span>
+      <span class="pt-detail-meta">Final stack: {}</span>
+    </div>
+    <div class="pt-stat-grid">
+      <div class="pt-stat-card"><span>Hands</span><b>{}</b></div>
+      <div class="pt-stat-card"><span>Hands won</span><b>{}</b></div>
+      <div class="pt-stat-card"><span>Hands lost</span><b>{}</b></div>
+      <div class="pt-stat-card"><span>Win rate</span><b>{:.0}%</b></div>
+      <div class="pt-stat-card"><span>All-ins</span><b>{}</b></div>
+      <div class="pt-stat-card"><span>All-in %</span><b>{:.0}%</b></div>
+      <div class="pt-stat-card"><span>Avg EV loss</span><b>{:.2} BB</b></div>
+      <div class="pt-stat-card"><span>Total EV lost</span><b>{:.2} BB</b></div>
+      <div class="pt-stat-card"><span>Biggest blunder</span><b>{:.2} BB</b></div>
+    </div>
+    <canvas class="ev-chart" width="1200" height="48" data-points='{}'></canvas>
+  </section>
+</main>
+<script>
+(() => {{
+  "use strict";
+  document.querySelectorAll("canvas[data-points]").forEach((canvas) => {{
+    const ctx = canvas.getContext("2d");
+    const values = JSON.parse(canvas.dataset.points || "[]").map((point) => point[1]);
+    if (values.length < 2) return;
+    const max = Math.max(1, ...values);
+    const step = canvas.width / (values.length - 1);
+    ctx.beginPath();
+    values.forEach((value, i) => {{
+      const x = i * step;
+      const y = canvas.height - (value / max) * (canvas.height - 6) - 3;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }});
+    ctx.strokeStyle = "#f59e0b";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }});
+}})();
+</script>
+</body>
+</html>"##,
+        summary.id,
+        summary.id,
+        escape(&summary.started),
+        escape(&summary.ended),
+        escape(&final_stack),
+        detail.hands,
+        detail.hands_won,
+        detail.hands_lost,
+        win_rate,
+        detail.all_ins,
+        detail.all_in_pct,
+        summary.avg_ev_loss,
+        detail.total_ev_loss,
+        detail.max_ev_loss,
+        dataset
+    )
 }
 
 /// Escapes a dynamic string for safe HTML embedding.
@@ -311,6 +425,7 @@ fn seat_html(state: &GameState, seat: Seat) -> String {
         ),
         _ => match state.hole_cards(seat) {
             Some(cards) => format!("{} {}", card_html(cards[0]), card_html(cards[1])),
+            None if state.eliminated(seat) => String::new(),
             None => r#"<span class="pt-card back"></span><span class="pt-card back"></span>"#
                 .to_string(),
         },
@@ -333,8 +448,8 @@ fn seat_html(state: &GameState, seat: Seat) -> String {
         r#"<span class="pt-flag">Fold</span>"#
     } else if all_in {
         r#"<span class="pt-flag allin">All-in</span>"#
-    } else if stack == 0 {
-        r#"<span class="pt-flag bust">Bust</span>"#
+    } else if state.eliminated(seat) {
+        r#"<span class="pt-flag bust">OUT</span>"#
     } else {
         ""
     };
@@ -664,7 +779,7 @@ fn opponents_block(opponents: &[OpponentSnapshot], big_blind: u32) -> String {
         } else if opponent.all_in {
             r#"<span class="pt-opp-flag allin">All-in</span>"#
         } else if opponent.stack == 0 {
-            r#"<span class="pt-opp-flag bust">Busted</span>"#
+            r#"<span class="pt-opp-flag bust">OUT</span>"#
         } else {
             ""
         };
@@ -889,6 +1004,8 @@ mod tests {
             actions,
             hands,
             avg_ev_loss,
+            result: None,
+            final_stack: None,
         }
     }
 
@@ -933,6 +1050,10 @@ mod tests {
         let page = tournaments_page(&sessions);
         assert!(page.contains(r#"data-tournament-id="7""#));
         assert!(page.contains("Tournament #7"));
+        assert!(
+            page.contains(r#"href="/tournaments/7""#),
+            "each card links to its detail page: {page}"
+        );
         assert!(page.contains("3 hands · 3 actions · avg EV loss 12.50 BB"));
         assert!(page.contains("2026-08-01T10:00:00Z → 2026-08-01T10:05:00Z"));
         assert!(page.contains("Tournament #42"));
@@ -953,6 +1074,76 @@ mod tests {
         let page = tournaments_page(&sessions);
         assert!(!page.contains(r#"<script>"evil""#));
         assert!(page.contains("&lt;script&gt;"));
+    }
+
+    fn detail(id: i32, result: Option<&str>, final_stack: Option<i32>) -> TournamentDetail {
+        TournamentDetail {
+            summary: SessionSummary {
+                id,
+                started: "2026-08-01T10:00:00Z".to_string(),
+                ended: "2026-08-01T10:05:00Z".to_string(),
+                actions: 4,
+                hands: 3,
+                avg_ev_loss: 2.5,
+                result: result.map(str::to_string),
+                final_stack,
+            },
+            hands: 3,
+            hands_won: 2,
+            hands_lost: 1,
+            all_ins: 1,
+            all_in_pct: 33.3,
+            total_ev_loss: 10.0,
+            max_ev_loss: 6.0,
+            points: vec![(1, 0.0), (2, 6.0), (3, 4.0)],
+        }
+    }
+
+    #[test]
+    fn tournament_detail_page_renders_the_stat_grid() {
+        let page = tournament_detail_page(&detail(7, Some("WIN"), Some(1500)));
+        assert!(page.contains("<title>Poker Trainer — Tournament #7</title>"));
+        assert!(page.contains(r#"class="pt-result-badge win">WIN</span>"#));
+        assert!(page.contains("Final stack: 1500 chips"));
+        assert!(page.contains("<span>Hands</span><b>3</b>"));
+        assert!(page.contains("<span>Hands won</span><b>2</b>"));
+        assert!(page.contains("<span>Hands lost</span><b>1</b>"));
+        assert!(page.contains("<span>Win rate</span><b>67%</b>"));
+        assert!(page.contains("<span>All-ins</span><b>1</b>"));
+        assert!(page.contains("<span>All-in %</span><b>33%</b>"));
+        assert!(page.contains("<span>Avg EV loss</span><b>2.50 BB</b>"));
+        assert!(page.contains("<span>Total EV lost</span><b>10.00 BB</b>"));
+        assert!(page.contains("<span>Biggest blunder</span><b>6.00 BB</b>"));
+        assert!(page.contains(r#"data-points='[[1,0.0],[2,6.0],[3,4.0]]'"#));
+    }
+
+    #[test]
+    fn tournament_detail_page_marks_losses_and_missing_results() {
+        let loss = tournament_detail_page(&detail(9, Some("LOSS"), Some(0)));
+        assert!(loss.contains(r#"class="pt-result-badge loss">LOSS</span>"#));
+
+        let unknown = tournament_detail_page(&detail(9, None, None));
+        assert!(unknown.contains(r#"class="pt-result-badge">—</span>"#));
+        assert!(unknown.contains("Final stack: —"));
+    }
+
+    #[test]
+    fn eliminated_seats_render_out_and_no_cards() {
+        let mut state = GameState::new(Seat::Hero, level());
+        state
+            .start_hand(&mut Deck::shuffled(&mut seeded_rng(37)))
+            .unwrap();
+        state.set_eliminated(Seat::Opponent1, true);
+        let fragment = table_fragment(&state, 1, &[], &[]);
+        assert!(
+            fragment.contains(r#"class="pt-flag bust">OUT</span>"#),
+            "an eliminated seat is flagged OUT: {fragment}"
+        );
+        assert_eq!(
+            fragment.matches(r#"class="pt-card back""#).count(),
+            2,
+            "only the non-eliminated opponent keeps hidden cards: {fragment}"
+        );
     }
 
     #[test]

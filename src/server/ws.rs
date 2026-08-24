@@ -7,7 +7,7 @@ use futures_util::{SinkExt, StreamExt};
 use sqlx::PgPool;
 use tokio::sync::mpsc;
 
-use crate::analytics;
+use crate::analytics::{self, PendingHandResult};
 use crate::error::Result;
 use crate::game::{Action, GameState, Seat};
 use crate::mcts::MctsConfig;
@@ -18,7 +18,7 @@ use crate::mcts::searcher::{
 use crate::range::hands::Range;
 use crate::server::http::AppState;
 use crate::server::protocol::{self, ClientMessage, SearchPhase, ServerMessage};
-use crate::server::session::{TableEvent, TableSession};
+use crate::server::session::{TableEvent, TableSession, TournamentResult};
 use crate::server::views;
 
 /// Where the client is sent once it finishes the table.
@@ -112,6 +112,27 @@ async fn handle_socket(socket: WebSocket, app: Arc<AppState>) {
                         close_session(app.pool.as_ref(), session_id).await;
                         return;
                     }
+                }
+
+                // A tournament ends the moment only one seat is left standing:
+                // persist the hand results, finalize the session with the
+                // outcome, and hand the client a winner/loser modal instead of
+                // dealing another hand.
+                if let Some(result) = session.tournament_result() {
+                    let _ = command_tx.send(SearchCommand::Stop);
+                    let hand_results = session.take_hand_results();
+                    let frame = finalize_tournament(
+                        app.pool.as_ref(),
+                        session_id,
+                        &result,
+                        hand_results,
+                    )
+                    .await;
+                    if sender.send(Message::Text(frame.into())).await.is_err() {
+                        return;
+                    }
+                    close_session(app.pool.as_ref(), session_id).await;
+                    return;
                 }
 
                 if outcome.finish_table {
@@ -426,6 +447,48 @@ fn session_finished_message() -> Option<String> {
         Ok(json) => Some(json),
         Err(error) => Some(error_message(&error.to_string())),
     }
+}
+
+/// The winner/loser modal frame sent when a tournament ends naturally.
+fn tournament_finished_message(won: bool, url: &str) -> Option<String> {
+    match (ServerMessage::TournamentFinished {
+        won,
+        url: url.to_string(),
+    })
+    .to_json()
+    {
+        Ok(json) => Some(json),
+        Err(error) => Some(error_message(&error.to_string())),
+    }
+}
+
+/// Persists the final hand results, finalizes the session with the outcome,
+/// and returns the winner/loser modal frame. Persistence is best-effort — the
+/// modal is sent even when the database is unavailable.
+async fn finalize_tournament(
+    pool: Option<&PgPool>,
+    session_id: Option<i32>,
+    result: &TournamentResult,
+    hand_results: Vec<PendingHandResult>,
+) -> String {
+    if let (Some(pool), Some(session_id)) = (pool, session_id) {
+        if let Err(error) = analytics::persist_hand_results(pool, session_id, &hand_results).await {
+            tracing::warn!(%error, session_id, "hand results could not be persisted");
+        }
+        let outcome = if result.won { "WIN" } else { "LOSS" };
+        let final_stack = result.final_stacks[Seat::Hero.index()] as i32;
+        if let Err(error) =
+            analytics::finalize_session(pool, session_id, outcome, final_stack).await
+        {
+            tracing::warn!(%error, session_id, "tournament result could not be finalized");
+        }
+    }
+    let url = match session_id {
+        Some(id) => format!("/tournaments/{id}"),
+        None => TOURNAMENTS_URL.to_string(),
+    };
+    tournament_finished_message(result.won, &url)
+        .unwrap_or_else(|| error_message("serialization failure"))
 }
 
 /// Deals the first hand and drives opponents until the hero must act.
@@ -976,6 +1039,108 @@ mod tests {
             parse(&message),
             json!({"type": "SESSION_FINISHED", "url": TOURNAMENTS_URL})
         );
+    }
+
+    #[test]
+    fn tournament_finished_message_carries_the_outcome_and_detail_url() {
+        let message = tournament_finished_message(true, "/tournaments/7").unwrap();
+        assert_eq!(
+            parse(&message),
+            json!({"type": "TOURNAMENT_FINISHED", "won": true, "url": "/tournaments/7"})
+        );
+        let loss = tournament_finished_message(false, "/tournaments/9").unwrap();
+        assert_eq!(
+            parse(&loss),
+            json!({"type": "TOURNAMENT_FINISHED", "won": false, "url": "/tournaments/9"})
+        );
+    }
+
+    fn sample_tournament_result(won: bool) -> TournamentResult {
+        TournamentResult {
+            won,
+            winner: if won { Seat::Hero } else { Seat::Opponent1 },
+            final_stacks: if won { [1500, 0, 0] } else { [0, 1500, 0] },
+            hands: 3,
+            hands_won: if won { 3 } else { 0 },
+            all_ins: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn finalize_tournament_without_a_pool_still_sends_the_modal() {
+        let frame =
+            finalize_tournament(None, None, &sample_tournament_result(true), Vec::new()).await;
+        assert_eq!(
+            parse(&frame),
+            json!({"type": "TOURNAMENT_FINISHED", "won": true, "url": TOURNAMENTS_URL})
+        );
+
+        let frame =
+            finalize_tournament(None, Some(7), &sample_tournament_result(false), Vec::new()).await;
+        assert_eq!(
+            parse(&frame),
+            json!({"type": "TOURNAMENT_FINISHED", "won": false, "url": "/tournaments/7"})
+        );
+    }
+
+    #[tokio::test]
+    async fn finalize_tournament_persists_results_and_finalizes_the_session() {
+        let _guard = crate::analytics::DB_TEST_LOCK.lock().await;
+        dotenvy::dotenv().ok();
+        let database_url = match std::env::var("DATABASE_URL") {
+            Ok(url) if !url.is_empty() => url,
+            _ => panic!(
+                "DATABASE_URL is required for database integration tests; start PostgreSQL via pg.ps1"
+            ),
+        };
+        let pool = crate::db::connect(&database_url).await.unwrap();
+        let session_id = analytics::start_session(&pool).await.unwrap();
+        analytics::persist_records(
+            &pool,
+            session_id,
+            &[crate::analytics::PendingDecision {
+                hand_no: 1,
+                street: crate::game::Street::Preflop,
+                played: "Call".into(),
+                optimal: "Fold".into(),
+                ev_loss: 1.0,
+            }],
+        )
+        .await
+        .unwrap();
+
+        let hand_results = vec![PendingHandResult {
+            hand_no: 1,
+            hero_won: true,
+            hero_all_in: false,
+            hero_busted: false,
+            winner_seat: 0,
+        }];
+        let frame = finalize_tournament(
+            Some(&pool),
+            Some(session_id),
+            &sample_tournament_result(true),
+            hand_results,
+        )
+        .await;
+        assert_eq!(
+            parse(&frame),
+            json!({"type": "TOURNAMENT_FINISHED", "won": true, "url": format!("/tournaments/{session_id}")})
+        );
+
+        let detail = analytics::load_tournament_detail(&pool, session_id)
+            .await
+            .unwrap()
+            .expect("the finalized session has a detail");
+        assert_eq!(detail.summary.result.as_deref(), Some("WIN"));
+        assert_eq!(detail.summary.final_stack, Some(1500));
+        assert_eq!(detail.hands_won, 1);
+
+        sqlx::query("DELETE FROM hero_sessions WHERE id = $1")
+            .bind(session_id)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     #[test]

@@ -62,6 +62,11 @@ pub struct GameState {
     acted: [bool; NUM_PLAYERS],
     folded: [bool; NUM_PLAYERS],
     all_in: [bool; NUM_PLAYERS],
+    /// Seats that have busted out of the tournament (zero chips at the end of
+    /// a hand). Unlike `folded`/`all_in`, this persists across hands: an
+    /// eliminated seat is never dealt cards, never posts a blind, and is
+    /// skipped in the action order.
+    eliminated: [bool; NUM_PLAYERS],
     to_act: Seat,
     hand_over: bool,
     hand_result: Option<HandResult>,
@@ -85,6 +90,7 @@ impl GameState {
             acted: [false; NUM_PLAYERS],
             folded: [false; NUM_PLAYERS],
             all_in: [false; NUM_PLAYERS],
+            eliminated: [false; NUM_PLAYERS],
             to_act: Seat::Hero,
             hand_over: false,
             hand_result: None,
@@ -92,9 +98,15 @@ impl GameState {
     }
 
     /// Deals a fresh hand: resets per-hand state, deals two cards to each
-    /// seat, and posts the blinds.
+    /// active (non-eliminated) seat, and posts the blinds.
     pub fn start_hand(&mut self, deck: &mut Deck) -> Result<()> {
-        if deck.remaining() < NUM_PLAYERS * 2 {
+        let active = self.active_seats().len();
+        if active < 2 {
+            return Err(Error::Game(
+                "tournament is over — cannot deal another hand".into(),
+            ));
+        }
+        if deck.remaining() < active * 2 {
             return Err(Error::Game("not enough cards to deal a hand".into()));
         }
 
@@ -114,26 +126,28 @@ impl GameState {
 
         let mut seat = self.button.next();
         for _ in 0..NUM_PLAYERS {
-            let first = deck
-                .deal()
-                .ok_or_else(|| Error::Game("deck exhausted".into()))?;
-            let second = deck
-                .deal()
-                .ok_or_else(|| Error::Game("deck exhausted".into()))?;
-            self.hole_cards[seat.index()] = [first, second];
+            if !self.eliminated[seat.index()] {
+                let first = deck
+                    .deal()
+                    .ok_or_else(|| Error::Game("deck exhausted".into()))?;
+                let second = deck
+                    .deal()
+                    .ok_or_else(|| Error::Game("deck exhausted".into()))?;
+                self.hole_cards[seat.index()] = [first, second];
+            }
             seat = seat.next();
         }
 
         self.post_blind(self.button, self.blind_level.small_blind);
-        self.post_blind(self.button.next(), self.blind_level.big_blind);
+        self.post_blind(self.next_active(self.button), self.blind_level.big_blind);
 
         self.to_act = self.first_to_act();
         Ok(())
     }
 
-    /// Rotates the button and deals the next hand.
+    /// Rotates the button to the next active seat and deals the next hand.
     pub fn next_hand(&mut self, deck: &mut Deck) -> Result<()> {
-        self.button = self.button.next();
+        self.button = self.next_active(self.button);
         self.start_hand(deck)
     }
 
@@ -364,6 +378,7 @@ impl GameState {
             revealed,
         };
         self.hand_result = Some(result.clone());
+        self.mark_eliminated();
         Ok(result)
     }
 
@@ -393,6 +408,12 @@ impl GameState {
     /// or injecting test scenarios; the caller keeps betting state consistent.
     pub fn set_stack(&mut self, seat: Seat, amount: u32) {
         self.stacks[seat.index()] = amount;
+    }
+
+    /// Overwrites a seat's eliminated flag. Used by tests to render a table
+    /// with a busted seat; the engine sets this itself at hand end.
+    pub fn set_eliminated(&mut self, seat: Seat, eliminated: bool) {
+        self.eliminated[seat.index()] = eliminated;
     }
 
     /// Overwrites a seat's hole cards. Used by the session layer (and solver
@@ -463,6 +484,31 @@ impl GameState {
         self.all_in[seat.index()]
     }
 
+    /// Whether a seat has busted out of the tournament (zero chips at the end
+    /// of a hand). Eliminated seats are skipped in every subsequent hand.
+    pub fn eliminated(&self, seat: Seat) -> bool {
+        self.eliminated[seat.index()]
+    }
+
+    /// The seats still in the tournament (not eliminated).
+    pub fn active_seats(&self) -> Vec<Seat> {
+        Seat::ALL
+            .into_iter()
+            .filter(|&seat| !self.eliminated[seat.index()])
+            .collect()
+    }
+
+    /// The tournament winner once only one seat remains, or `None` while the
+    /// tournament is still running.
+    pub fn tournament_winner(&self) -> Option<Seat> {
+        let active = self.active_seats();
+        if active.len() == 1 {
+            Some(active[0])
+        } else {
+            None
+        }
+    }
+
     /// The hero's hole cards (always known).
     pub fn hero_cards(&self) -> [Card; 2] {
         self.hole_cards[Seat::Hero.index()]
@@ -506,6 +552,7 @@ impl GameState {
             acted: self.acted,
             folded: self.folded,
             all_in: self.all_in,
+            eliminated: self.eliminated,
             to_act: self.to_act,
             hand_over: self.hand_over,
             hand_result: None,
@@ -534,24 +581,55 @@ impl GameState {
         }
     }
 
+    /// Marks every seat with zero chips as eliminated. Called once a hand
+    /// ends (fold win or showdown), after the pot has been awarded, so a
+    /// player who busts is out of the tournament from the next hand on.
+    fn mark_eliminated(&mut self) {
+        for seat in Seat::ALL {
+            if self.stacks[seat.index()] == 0 {
+                self.eliminated[seat.index()] = true;
+            }
+        }
+    }
+
+    /// The next non-eliminated seat clockwise from `seat` (wrapping). Used to
+    /// rotate the button and find the big blind past busted seats.
+    fn next_active(&self, seat: Seat) -> Seat {
+        let mut candidate = seat.next();
+        for _ in 0..NUM_PLAYERS {
+            if !self.eliminated[candidate.index()] {
+                return candidate;
+            }
+            candidate = candidate.next();
+        }
+        seat
+    }
+
     fn first_to_act(&self) -> Seat {
         action_order(self.button, self.street)
             .into_iter()
-            .find(|&seat| !self.folded[seat.index()] && !self.all_in[seat.index()])
+            .find(|&seat| {
+                !self.folded[seat.index()]
+                    && !self.all_in[seat.index()]
+                    && !self.eliminated[seat.index()]
+            })
             .unwrap_or_else(|| action_order(self.button, self.street)[0])
     }
 
     fn active_players(&self) -> Vec<Seat> {
         Seat::ALL
             .into_iter()
-            .filter(|&seat| !self.folded[seat.index()])
+            .filter(|&seat| !self.folded[seat.index()] && !self.eliminated[seat.index()])
             .collect()
     }
 
     fn advance_to_act(&mut self) {
         let mut seat = self.to_act.next();
         for _ in 0..NUM_PLAYERS {
-            if !self.folded[seat.index()] && !self.all_in[seat.index()] {
+            if !self.folded[seat.index()]
+                && !self.all_in[seat.index()]
+                && !self.eliminated[seat.index()]
+            {
                 self.to_act = seat;
                 return;
             }
@@ -561,7 +639,8 @@ impl GameState {
 
     fn round_complete(&self) -> bool {
         Seat::ALL.into_iter().all(|seat| {
-            self.folded[seat.index()]
+            self.eliminated[seat.index()]
+                || self.folded[seat.index()]
                 || self.all_in[seat.index()]
                 || (self.street_contrib[seat.index()] == self.current_bet
                     && self.acted[seat.index()])
@@ -581,6 +660,7 @@ impl GameState {
             pots,
             revealed: Vec::new(),
         });
+        self.mark_eliminated();
     }
 
     fn best_hand(&self, seat: Seat) -> Eval {
@@ -1081,5 +1161,80 @@ mod tests {
         assert_eq!(state.total_pot(), 60);
         assert_eq!(state.pots().len(), 1);
         assert_eq!(state.pots()[0].amount, 60);
+    }
+
+    #[test]
+    fn showdown_marks_busted_seats_eliminated() {
+        let mut state = GameState::new(Seat::Hero, level());
+        state.hole_cards = [
+            [card("As"), card("Ad")],
+            [card("Kh"), card("Kd")],
+            [card("Qh"), card("Qd")],
+        ];
+        state.board = vec![card("2c"), card("7c"), card("9c"), card("Jc"), card("3s")];
+        state.stacks = [0, 0, 0];
+        state.total_contrib = [500, 500, 500];
+        state.folded = [false, false, false];
+
+        state.showdown(&mut Deck::new()).unwrap();
+        assert_eq!(state.stack(Seat::Hero), 1500);
+        assert!(!state.eliminated(Seat::Hero));
+        assert!(state.eliminated(Seat::Opponent1));
+        assert!(state.eliminated(Seat::Opponent2));
+        assert_eq!(state.tournament_winner(), Some(Seat::Hero));
+    }
+
+    #[test]
+    fn tournament_winner_is_none_while_multiple_seats_remain() {
+        let state = GameState::new(Seat::Hero, level());
+        assert_eq!(state.tournament_winner(), None);
+        assert_eq!(state.active_seats().len(), 3);
+    }
+
+    #[test]
+    fn next_active_skips_eliminated_seats() {
+        let mut state = GameState::new(Seat::Hero, level());
+        state.eliminated[Seat::Opponent1.index()] = true;
+        assert_eq!(state.next_active(Seat::Hero), Seat::Opponent2);
+        assert_eq!(state.next_active(Seat::Opponent2), Seat::Hero);
+    }
+
+    #[test]
+    fn start_hand_skips_eliminated_seats_for_cards_and_blinds() {
+        let mut state = GameState::new(Seat::Hero, level());
+        state.eliminated[Seat::Opponent1.index()] = true;
+        state.start_hand(&mut deck(13)).unwrap();
+
+        // Only two active seats: the button (hero) posts the SB, the next
+        // active seat (Opponent 2) posts the BB.
+        assert_eq!(state.stack(Seat::Hero), 490);
+        assert_eq!(state.stack(Seat::Opponent2), 480);
+        assert_eq!(
+            state.stack(Seat::Opponent1),
+            500,
+            "eliminated seat is untouched"
+        );
+        assert_eq!(state.total_pot(), 30);
+        assert_eq!(state.to_act(), Seat::Opponent2);
+    }
+
+    #[test]
+    fn next_hand_rotates_the_button_past_eliminated_seats() {
+        let mut state = GameState::new(Seat::Hero, level());
+        state.start_hand(&mut deck(14)).unwrap();
+        state.eliminated[Seat::Opponent1.index()] = true;
+        state.next_hand(&mut deck(14)).unwrap();
+        assert_eq!(state.button(), Seat::Opponent2);
+    }
+
+    #[test]
+    fn dealing_with_one_active_seat_is_rejected() {
+        let mut state = GameState::new(Seat::Hero, level());
+        state.eliminated[Seat::Opponent1.index()] = true;
+        state.eliminated[Seat::Opponent2.index()] = true;
+        assert!(matches!(
+            state.start_hand(&mut deck(15)),
+            Err(Error::Game(_))
+        ));
     }
 }

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
@@ -45,6 +45,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/", get(index))
         .route("/health", get(health))
         .route("/tournaments", get(tournaments))
+        .route("/tournaments/{id}", get(tournament_detail))
         .route("/ws", get(ws::handler))
         .nest_service("/assets", state.assets.clone())
         .with_state(state)
@@ -126,6 +127,34 @@ pub async fn render_tournaments(
         ));
     }
     Ok(sessions)
+}
+
+/// The single-tournament detail page: one finished session's hand-level
+/// aggregates, EV stats, and decimated chart.
+async fn tournament_detail(State(app): State<Arc<AppState>>, Path(id): Path<i32>) -> Response {
+    let Some(pool) = app.pool.clone() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(json!({ "error": "analytics store is unavailable" })),
+        )
+            .into_response();
+    };
+    match analytics::load_tournament_detail(&pool, id).await {
+        Ok(Some(detail)) => Html(views::tournament_detail_page(&detail)).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            axum::Json(json!({ "error": "tournament not found" })),
+        )
+            .into_response(),
+        Err(error) => {
+            tracing::warn!(%error, tournament_id = id, "tournament detail page failed to render");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(json!({ "error": error.to_string() })),
+            )
+                .into_response()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -234,6 +263,90 @@ mod tests {
         assert!(body.contains(&format!("data-tournament-id=\"{session_id}\"")));
         assert!(body.contains("3 hands"));
         assert!(body.contains("12.5"));
+
+        sqlx::query("DELETE FROM hero_sessions WHERE id = $1")
+            .bind(session_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn tournament_detail_page_renders_one_finished_tournament() {
+        use crate::game::Street;
+
+        let _guard = crate::analytics::DB_TEST_LOCK.lock().await;
+        dotenvy::dotenv().ok();
+        let database_url = match std::env::var("DATABASE_URL") {
+            Ok(url) if !url.is_empty() => url,
+            _ => panic!(
+                "DATABASE_URL is required for database integration tests; start PostgreSQL via pg.ps1"
+            ),
+        };
+        let pool = crate::db::connect(&database_url).await.unwrap();
+        let session_id = analytics::start_session(&pool).await.unwrap();
+        analytics::persist_records(
+            &pool,
+            session_id,
+            &[analytics::PendingDecision {
+                hand_no: 1,
+                street: Street::Preflop,
+                played: "Call".into(),
+                optimal: "Fold".into(),
+                ev_loss: 4.0,
+            }],
+        )
+        .await
+        .unwrap();
+        analytics::persist_hand_results(
+            &pool,
+            session_id,
+            &[analytics::PendingHandResult {
+                hand_no: 1,
+                hero_won: true,
+                hero_all_in: false,
+                hero_busted: false,
+                winner_seat: 0,
+            }],
+        )
+        .await
+        .unwrap();
+        analytics::finalize_session(&pool, session_id, "WIN", 1500)
+            .await
+            .unwrap();
+
+        let state = Arc::new(AppState {
+            assets: default_assets(),
+            mcts: MctsConfig::test(),
+            survival: SurvivalConfig::default(),
+            blunder: BlunderConfig::default(),
+            pool: Some(pool.clone()),
+            snapshot_interval: 100,
+            result_pause_ms: 0,
+        });
+        let (status, body) = get_with(state, &format!("/tournaments/{session_id}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains(&format!(
+            "<title>Poker Trainer — Tournament #{session_id}</title>"
+        )));
+        assert!(body.contains(r#"class="pt-result-badge win">WIN</span>"#));
+        assert!(body.contains("<span>Hands won</span><b>1</b>"));
+        assert!(body.contains("Final stack: 1500 chips"));
+
+        let (missing, _) = get_with(
+            Arc::new(AppState {
+                assets: default_assets(),
+                mcts: MctsConfig::test(),
+                survival: SurvivalConfig::default(),
+                blunder: BlunderConfig::default(),
+                pool: Some(pool.clone()),
+                snapshot_interval: 100,
+                result_pause_ms: 0,
+            }),
+            "/tournaments/999999999",
+        )
+        .await;
+        assert_eq!(missing, StatusCode::NOT_FOUND);
 
         sqlx::query("DELETE FROM hero_sessions WHERE id = $1")
             .bind(session_id)

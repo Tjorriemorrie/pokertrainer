@@ -1,6 +1,6 @@
 use rand::Rng;
 
-use crate::analytics::PendingDecision;
+use crate::analytics::{PendingDecision, PendingHandResult};
 use crate::blunder::{BlunderConfig, Tracker};
 use crate::card::{Card, Deck};
 use crate::decision::{self, AnalyzedDecision, SurvivalConfig, validate_action};
@@ -82,6 +82,18 @@ pub struct PendingInterception {
     action_index: u64,
 }
 
+/// The outcome of a finished tournament: who won, the final stacks, and the
+/// hero's hand-level aggregates for the winner/loser modal and detail page.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TournamentResult {
+    pub won: bool,
+    pub winner: Seat,
+    pub final_stacks: [u32; 3],
+    pub hands: u64,
+    pub hands_won: u64,
+    pub all_ins: u64,
+}
+
 /// A live table session: one game state, a deck, the solver configuration, the
 /// blunder-intervention tracker, a placeholder policy for the two opponents,
 /// and a live HUD tracker fed from that policy. Each WebSocket connection owns
@@ -99,6 +111,11 @@ pub struct TableSession {
     blunder_tracker: Tracker,
     pending: Option<PendingInterception>,
     records: Vec<PendingDecision>,
+    /// Per-hand results (winner, hero all-in, hero bust) queued for
+    /// persistence; the tournament detail page aggregates them.
+    hand_results: Vec<PendingHandResult>,
+    /// Whether the hero selected the all-in action at any point this hand.
+    hero_all_in_this_hand: bool,
     opponents: OpponentTracker,
     /// Sound cues accumulated since the last rendered state update.
     sounds: Vec<Sound>,
@@ -131,6 +148,8 @@ impl TableSession {
             blunder_tracker: Tracker::new(blunder),
             pending: None,
             records: Vec::new(),
+            hand_results: Vec::new(),
+            hero_all_in_this_hand: false,
             opponents: OpponentTracker::default(),
             sounds: Vec::new(),
             pump_actions: Vec::new(),
@@ -160,6 +179,8 @@ impl TableSession {
             blunder_tracker: Tracker::new(blunder),
             pending: None,
             records: Vec::new(),
+            hand_results: Vec::new(),
+            hero_all_in_this_hand: false,
             opponents: OpponentTracker::default(),
             sounds: Vec::new(),
             pump_actions: Vec::new(),
@@ -211,6 +232,36 @@ impl TableSession {
     /// Drains the decisions awaiting a database write.
     pub fn take_records(&mut self) -> Vec<PendingDecision> {
         std::mem::take(&mut self.records)
+    }
+
+    /// Drains the per-hand results awaiting a database write.
+    pub fn take_hand_results(&mut self) -> Vec<PendingHandResult> {
+        std::mem::take(&mut self.hand_results)
+    }
+
+    /// The tournament outcome once only one seat remains, or `None` while the
+    /// tournament is still running. Aggregates the recorded hand results so
+    /// the winner/loser modal and the detail page can be populated.
+    pub fn tournament_result(&self) -> Option<TournamentResult> {
+        let winner = self.state.tournament_winner()?;
+        let hands_won = self
+            .hand_results
+            .iter()
+            .filter(|result| result.hero_won)
+            .count() as u64;
+        let all_ins = self
+            .hand_results
+            .iter()
+            .filter(|result| result.hero_all_in)
+            .count() as u64;
+        Some(TournamentResult {
+            won: winner == Seat::Hero,
+            winner,
+            final_stacks: self.state.stacks(),
+            hands: self.hand_no,
+            hands_won,
+            all_ins,
+        })
     }
 
     /// Drains the sound cues accumulated since the last rendered state
@@ -287,6 +338,7 @@ impl TableSession {
         }
         self.hand_no += 1;
         self.opponents.begin_hand();
+        self.hero_all_in_this_hand = false;
         self.push_sound(Sound::Deal);
         self.log_line(format!(
             "— Hand #{} — blinds {}/{}",
@@ -500,6 +552,9 @@ impl TableSession {
     ) -> Result<Vec<TableEvent>> {
         let call_amount = self.state.legal_actions().call_amount;
         self.log_line(views::describe_action(Seat::Hero, action, call_amount));
+        if action == Action::AllIn {
+            self.hero_all_in_this_hand = true;
+        }
         if let Some(sound) = Self::sound_for(action) {
             self.push_sound(sound);
         }
@@ -543,6 +598,19 @@ impl TableSession {
             return;
         };
         let total: u32 = result.awards.iter().map(|award| award.amount).sum();
+        let hero_won = result.awards.iter().any(|award| award.seat == Seat::Hero);
+        let winner = result
+            .awards
+            .first()
+            .map(|award| award.seat)
+            .unwrap_or(Seat::Hero);
+        self.hand_results.push(PendingHandResult {
+            hand_no: self.hand_no,
+            hero_won,
+            hero_all_in: self.hero_all_in_this_hand,
+            hero_busted: self.state.stack(Seat::Hero) == 0,
+            winner_seat: winner.index() as i32,
+        });
         match result.reason {
             HandEndReason::Fold(winner) => {
                 self.log_line(format!("{winner} win {total} — everyone else folded"));
@@ -1131,7 +1199,7 @@ mod tests {
                 if state.is_hand_over() {
                     assert_eq!(state.stacks().iter().sum::<u32>(), STARTING_STACK * 3);
                     hands += 1;
-                    if hands >= 8 {
+                    if hands >= 8 || state.tournament_winner().is_some() {
                         break;
                     }
                     if deck.remaining() < MIN_DECK_FOR_HAND {
@@ -1151,7 +1219,10 @@ mod tests {
                 }
                 apply_settled(&mut state, &mut deck, action).unwrap();
             }
-            assert_eq!(hands, 8, "self-play hands always terminate for seed {seed}");
+            assert!(
+                hands >= 1,
+                "self-play hands always terminate for seed {seed}"
+            );
             assert!(keeps_folding_faced_with_bet, "acts against bets too");
         }
     }
@@ -1166,7 +1237,7 @@ mod tests {
         loop {
             if state.is_hand_over() {
                 finished += 1;
-                if finished >= 20 {
+                if finished >= 20 || state.tournament_winner().is_some() {
                     break;
                 }
                 if deck.remaining() < MIN_DECK_FOR_HAND {
@@ -1417,5 +1488,58 @@ mod tests {
             Some(Sound::Chip)
         );
         assert_eq!(TableSession::sound_for(Action::AllIn), Some(Sound::Chip));
+    }
+
+    /// A finished hand queues a per-hand result recording the winner and the
+    /// hero's all-in/bust status, and it drains like the decision records.
+    #[test]
+    fn a_finished_hand_queues_a_hand_result() {
+        let state = river_facing_bet();
+        let mut session = TableSession::resume(
+            state,
+            Deck::default(),
+            1,
+            60,
+            probe_config(),
+            survival(),
+            never_intercepts(),
+        );
+        assert!(session.take_hand_results().is_empty());
+        session.submit(Action::Fold).unwrap();
+        assert!(session.state().is_hand_over());
+
+        let results = session.take_hand_results();
+        assert_eq!(results.len(), 1, "one hand result per finished hand");
+        let result = &results[0];
+        assert_eq!(result.hand_no, 1);
+        assert!(!result.hero_won, "the hero folded this hand");
+        assert!(!result.hero_all_in, "the hero did not go all-in");
+        assert!(!result.hero_busted, "the hero still has chips");
+        assert!(
+            result.winner_seat == Seat::Opponent1.index() as i32
+                || result.winner_seat == Seat::Opponent2.index() as i32,
+            "an opponent won the hand: {result:?}"
+        );
+        assert!(
+            session.take_hand_results().is_empty(),
+            "draining empties the hand-result queue"
+        );
+    }
+
+    /// The tournament result is `None` while multiple seats remain and is
+    /// populated once a single seat is left standing.
+    #[test]
+    fn tournament_result_is_none_until_one_seat_remains() {
+        let state = river_facing_bet();
+        let session = TableSession::resume(
+            state,
+            Deck::default(),
+            1,
+            61,
+            probe_config(),
+            survival(),
+            never_intercepts(),
+        );
+        assert_eq!(session.tournament_result(), None);
     }
 }

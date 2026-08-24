@@ -72,6 +72,10 @@ pub enum ServerMessage {
     /// The table was finished (`FINISH_TABLE`); the client navigates to the
     /// given page.
     SessionFinished { url: String },
+    /// The tournament ended naturally (one seat left standing); the client
+    /// shows a winner/loser modal whose Continue button navigates to the
+    /// tournament's detail page.
+    TournamentFinished { won: bool, url: String },
     /// A rejected submission; the connection stays open.
     Error { message: String },
 }
@@ -496,6 +500,15 @@ mod tests {
             .to_json()
             .unwrap(),
             r#"{"type":"SESSION_FINISHED","url":"/tournaments"}"#
+        );
+        assert_eq!(
+            ServerMessage::TournamentFinished {
+                won: true,
+                url: "/tournaments/7".into()
+            }
+            .to_json()
+            .unwrap(),
+            r#"{"type":"TOURNAMENT_FINISHED","won":true,"url":"/tournaments/7"}"#
         );
         assert_eq!(
             ServerMessage::Error {
