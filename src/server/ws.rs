@@ -299,7 +299,13 @@ fn events_to_messages(session: &mut TableSession, events: Vec<TableEvent>) -> Ve
                 hand_no,
                 intercepted,
             } => ServerMessage::TriggerTacticalOverlay {
-                fragment: views::tactical_overlay_fragment(hand_no, &decision, intercepted),
+                fragment: views::tactical_overlay_fragment(
+                    hand_no,
+                    &decision,
+                    intercepted,
+                    &session.opponent_snapshots(),
+                    session.state().blind_level().big_blind,
+                ),
                 intercepted,
             }
             .to_json(),

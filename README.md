@@ -55,6 +55,21 @@ interface and coaches decision-making with a range-based solver.
   simple placeholder policy, runs the survivability solver on your
   decisions, and deals the next hand automatically. Opponent ranges are
   uniform until profile/sequence-node loading is wired into the loop.
+- **Opponent HUD in the coach panel:** every opponent action is fed into a
+  live tracker, so whenever the coach renders a breakdown the panel also
+  shows what it has learned about each opponent — hands dealt, VPIP, PFR,
+  folds-to-bet, and postflop aggression, plus a one-line read (e.g. "Loose
+  passive — plays many hands and calls instead of raising", with a
+  small-sample disclaimer until five hands exist). Each opponent card carries
+  their position badges (BTN / SB / BB), a Folded / All-in / Busted status,
+  and the stack pill with the same `?`/Alt BB reveal as the table.
+- **Plain-language search effort:** the raw solver telemetry (worlds ×
+  iterations, tree depth, nodes, rollout actions) is replaced by a color
+  grade — **Quick**, **Solid**, or **Deep** search — and one everyday
+  sentence such as *"Played out 64 possible opponent hands × 256 evaluations
+  each, thinking up to 4 moves ahead — 30.2k simulated actions"*. A short
+  confidence note explains whether that is a lot or a little, and the raw
+  numbers remain available in the hover tooltip.
 - **Blunder intervention engine:** monitors the hero's rolling error
   rate (EV loss per action, in big blinds so pot size never skews severity)
   and intercepts the worst blunders with a dynamic, calibrated threshold.
@@ -95,8 +110,9 @@ interface and coaches decision-making with a range-based solver.
   seconds, and then the next hand is dealt automatically. Amounts render
   larger: stack pills are as big as the pot pill, and the pot pill and the
   street-bet chips on the felt are one size larger than before. The
-  table sits top-left; the coach feedback panel renders beside it so
-  blunder breakdowns never cover the cards. The action dock lives in its own
+  table sits top-left; meaning the coach panel never hides the cards. The page is fluid: on wide
+  screens the right column stretches and on narrow ones it wraps below the
+  table. The action dock lives in its own
   right-aligned block directly below the oval — steel-blue **Fold**, green
   **Check/Call**, red **Bet/Raise**, sizing chips (Min / ½-pot / ¾-pot / Pot /
   All-in) labelled in **chip values only** — stacks show their chip count

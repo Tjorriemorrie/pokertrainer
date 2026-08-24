@@ -120,15 +120,16 @@ button { font-family: inherit; }
 /* -------------------------------------------------------------- layout */
 
 .pt-main {
-  max-width: 1560px;
+  max-width: none;
   margin: 1.1rem auto;
-  padding: 0 1rem;
+  padding: 0 1.4rem;
 }
 
 .pt-layout {
   display: flex;
   gap: 1.4rem;
   align-items: flex-start;
+  flex-wrap: wrap;
 }
 
 .pt-table-col { flex: 0 0 auto; }
@@ -778,6 +779,137 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
 .pt-overlay-card .action-btn { width: 100%; }
 .pt-confirm { background: linear-gradient(var(--green-1), var(--green-2)); font-weight: 800; }
 .pt-confirm:hover { filter: brightness(1.13); }
+
+/* The full tactical review stacks the opponents' HUD block above the
+   played-vs-optimal card so both stay readable in the right column. */
+.pt-tactical {
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+}
+
+.pt-opp-block { padding: 1.25rem 1.5rem; }
+
+.pt-opp-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 0.9rem;
+}
+
+.pt-opp-card {
+  background: #0a0f16;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.9rem 1rem;
+}
+
+.pt-opp-head {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.pt-opp-name {
+  font-weight: 800;
+  font-size: 0.92rem;
+  color: var(--text);
+}
+
+.pt-opp-head .pt-stack {
+  margin: 0 0 0 auto;
+  font-size: 0.95rem;
+  padding: 1px 10px;
+}
+
+.pt-opp-flag {
+  font-size: 0.58rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+
+.pt-opp-flag.fold { color: #ffb4a2; background: rgba(21, 79, 142, 0.45); }
+.pt-opp-flag.allin { color: #ffd27d; background: rgba(154, 53, 51, 0.5); }
+.pt-opp-flag.bust { color: #9aa5b1; background: rgba(30, 41, 59, 0.7); }
+
+.pt-opp-stats {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 0.5rem;
+  margin-top: 0.8rem;
+  text-align: center;
+}
+
+.pt-opp-stat span {
+  display: block;
+  font-size: 0.58rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #6b7280;
+  margin-bottom: 2px;
+}
+
+.pt-opp-stat b {
+  font-size: 0.95rem;
+  font-weight: 800;
+  color: var(--gold-light);
+}
+
+.pt-opp-read {
+  margin: 0.7rem 0 0;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: #93a1b0;
+  border-top: 1px dashed rgba(31, 41, 55, 0.7);
+  padding-top: 0.6rem;
+}
+
+/* The search-effort line: a colored grade chip, a plain-language caption,
+   and a confidence note. Raw numbers live in the title tooltip. */
+.pt-search-meta {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  background: #0a0f16;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.6rem 0.8rem;
+  margin: 0.2rem 0 1rem;
+}
+
+.pt-search-badge {
+  flex: 0 0 auto;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  border-radius: 999px;
+  padding: 0.2rem 0.7rem;
+}
+
+.pt-search-quick .pt-search-badge { background: #3d4a5c; color: #d7dde6; }
+.pt-search-solid .pt-search-badge { background: #064e3b; color: #86efac; }
+.pt-search-deep .pt-search-badge { background: #78350f; color: #fcd34d; }
+
+.pt-search-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pt-search-caption {
+  font-size: 0.8rem;
+  color: #c7d0da;
+  line-height: 1.45;
+}
+
+.pt-search-note {
+  font-size: 0.72rem;
+  color: #6b7280;
+}
 
 /* -------------------------------------------------------- history page */
 

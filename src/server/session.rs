@@ -8,6 +8,7 @@ use crate::error::{Error, Result};
 use crate::game::blinds::BLIND_SCHEDULE;
 use crate::game::{Action, ActionOutcome, GameState, HandEndReason, Seat, Street};
 use crate::mcts::MctsConfig;
+use crate::opponent::{OpponentSnapshot, OpponentTracker};
 use crate::range::BetSize;
 use crate::range::hands::{HAND_COUNT, Range};
 use crate::rng::SeededRng;
@@ -80,8 +81,9 @@ pub struct PendingInterception {
 }
 
 /// A live table session: one game state, a deck, the solver configuration, the
-/// blunder-intervention tracker, and a placeholder policy for the two
-/// opponents. Each WebSocket connection owns one session.
+/// blunder-intervention tracker, a placeholder policy for the two opponents,
+/// and a live HUD tracker fed from that policy. Each WebSocket connection owns
+/// one session.
 pub struct TableSession {
     state: GameState,
     deck: Deck,
@@ -95,6 +97,7 @@ pub struct TableSession {
     blunder_tracker: Tracker,
     pending: Option<PendingInterception>,
     records: Vec<PendingDecision>,
+    opponents: OpponentTracker,
     /// Sound cues accumulated since the last rendered state update.
     sounds: Vec<Sound>,
 }
@@ -122,6 +125,7 @@ impl TableSession {
             blunder_tracker: Tracker::new(blunder),
             pending: None,
             records: Vec::new(),
+            opponents: OpponentTracker::default(),
             sounds: Vec::new(),
         }
     }
@@ -149,6 +153,7 @@ impl TableSession {
             blunder_tracker: Tracker::new(blunder),
             pending: None,
             records: Vec::new(),
+            opponents: OpponentTracker::default(),
             sounds: Vec::new(),
         }
     }
@@ -163,6 +168,12 @@ impl TableSession {
 
     pub fn log(&self) -> &[String] {
         &self.log
+    }
+
+    /// The live HUD snapshots for both opponents, rendered inside the coach
+    /// feedback panel.
+    pub fn opponent_snapshots(&self) -> Vec<OpponentSnapshot> {
+        self.opponents.snapshots(&self.state)
     }
 
     /// Queues one evaluated hero decision for persistence; the session
@@ -247,6 +258,7 @@ impl TableSession {
             self.state.next_hand(&mut self.deck)?;
         }
         self.hand_no += 1;
+        self.opponents.begin_hand();
         self.push_sound(Sound::Deal);
         self.log_line(format!(
             "— Hand #{} — blinds {}/{}",
@@ -281,8 +293,11 @@ impl TableSession {
                 return Ok(acted);
             }
             let actor = self.state.to_act();
-            let call_amount = self.state.legal_actions().call_amount;
+            let legal = self.state.legal_actions();
+            let call_amount = legal.call_amount;
             let action = placeholder_action(&mut self.rng, &self.state);
+            self.opponents
+                .record(actor, action, self.state.street(), legal.call_amount > 0);
             apply_settled(&mut self.state, &mut self.deck, action)?;
             if let Some(sound) = Self::sound_for(action) {
                 self.push_sound(sound);

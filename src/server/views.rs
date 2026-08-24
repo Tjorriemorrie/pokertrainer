@@ -1,7 +1,8 @@
 use crate::analytics::{ChartPoint, SessionSummary};
 use crate::card::{Card, Suit};
-use crate::decision::AnalyzedDecision;
+use crate::decision::{AnalyzedDecision, SearchReport};
 use crate::game::{Action, GameState, Seat, Street};
+use crate::opponent::OpponentSnapshot;
 use crate::range::BetSize;
 use crate::server::session::Sound;
 
@@ -16,7 +17,7 @@ pub fn index_page() -> String {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Poker Trainer</title>
-<link rel="stylesheet" href="/assets/style.css?v=7">
+<link rel="stylesheet" href="/assets/style.css?v=8">
 </head>
 <body class="pt-body">
   <header class="pt-topwrap">
@@ -36,7 +37,8 @@ pub fn index_page() -> String {
           <div class="pt-feedback-empty">
             <b>No mistakes flagged yet.</b>
             When a decision costs enough equity, the played-vs-optimal breakdown
-            appears here — the table stays fully visible next to it.
+            appears here together with what the coach has learned about your
+            opponents so far — and the table stays fully visible next to it.
           </div>
         </div>
       </aside>
@@ -59,7 +61,7 @@ pub fn tournaments_page(sessions: &[(SessionSummary, Vec<ChartPoint>)]) -> Strin
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Poker Trainer — Tournaments</title>
-<link rel="stylesheet" href="/assets/style.css?v=7">
+<link rel="stylesheet" href="/assets/style.css?v=8">
 </head>
 <body class="pt-body">
 <header class="pt-topwrap">
@@ -496,17 +498,23 @@ fn action_panel(state: &GameState) -> String {
 }
 
 /// The tactical-breakdown fragment rendered into the coach-feedback panel
-/// beside the table: played vs optimal action, the EV given up, and the
-/// survivability-ranked candidate table. Intercepted blunders freeze the
-/// table: the card is titled accordingly and only offers a confirmation that
-/// unlocks the transition.
+/// beside the table: the opponents' live HUD cards first, then the played vs
+/// optimal action comparison and the survivability-ranked candidate table.
+/// Intercepted blunders freeze the table: the card is titled accordingly and
+/// only offers a confirmation that unlocks the transition.
 pub fn tactical_overlay_fragment(
     hand_no: u64,
     decision: &AnalyzedDecision,
     intercepted: bool,
+    opponents: &[OpponentSnapshot],
+    big_blind: u32,
 ) -> String {
     let optimal = decision.optimal;
-    let mut html = String::from(r#"<div id="tactical-overlay" class="pt-feedback-card">"#);
+    let mut html = String::from(r#"<div id="tactical-overlay" class="pt-tactical">"#);
+
+    html.push_str(&opponents_block(opponents, big_blind));
+
+    html.push_str(r#"<section class="pt-feedback-card">"#);
     html.push_str(r#"<div class="pt-overlay-card">"#);
     if intercepted {
         html.push_str(&format!(
@@ -567,16 +575,7 @@ pub fn tactical_overlay_fragment(
     }
     html.push_str("</table>");
 
-    let search = &decision.search;
-    html.push_str(&format!(
-        r#"<div class="pt-search-meta">Search: {} worlds × {} iterations · tree depth {} of {} cap · {} nodes · {} rollout actions</div>"#,
-        search.worlds,
-        search.iterations,
-        search.max_tree_depth,
-        search.max_depth,
-        search.nodes,
-        search.rollout_actions
-    ));
+    html.push_str(&search_effort_html(&decision.search));
 
     if intercepted {
         html.push_str(
@@ -585,8 +584,162 @@ pub fn tactical_overlay_fragment(
     } else {
         html.push_str(r#"<button class="action-btn" data-overlay-close>Continue</button>"#);
     }
-    html.push_str("</div></div>");
+    html.push_str("</div></section>");
+    html.push_str("</div>");
     html
+}
+
+/// The opponents' HUD cards: seat name with position badges and live status,
+/// the stack pill (chips with the `?`/Alt BB reveal), the stat grid, and the
+/// player-friendly read of each opponent's play.
+fn opponents_block(opponents: &[OpponentSnapshot], big_blind: u32) -> String {
+    let mut html = String::from(
+        r#"<section class="pt-feedback-card pt-opp-block"><h2 class="pt-overlay-title">Opponents</h2><div class="pt-opp-grid">"#,
+    );
+    for opponent in opponents {
+        let mut badges = String::new();
+        if opponent.is_button {
+            badges.push_str(r#"<span class="pt-badge btn">BTN</span>"#);
+        }
+        if opponent.is_small_blind {
+            badges.push_str(r#"<span class="pt-badge sb">SB</span>"#);
+        }
+        if opponent.is_big_blind {
+            badges.push_str(r#"<span class="pt-badge bb">BB</span>"#);
+        }
+        let flag = if opponent.folded {
+            r#"<span class="pt-opp-flag fold">Folded</span>"#
+        } else if opponent.all_in {
+            r#"<span class="pt-opp-flag allin">All-in</span>"#
+        } else if opponent.stack == 0 {
+            r#"<span class="pt-opp-flag bust">Busted</span>"#
+        } else {
+            ""
+        };
+
+        let aggression = match (opponent.postflop_bets, opponent.postflop_calls) {
+            (0, 0) => "—".to_string(),
+            (_, 0) => "∞".to_string(),
+            (bets, calls) => format!("{:.1}", bets as f64 / calls as f64),
+        };
+
+        html.push_str(&format!(
+            r#"<article class="pt-opp-card">
+<div class="pt-opp-head"><span class="pt-opp-name">{}{}</span>{}<span class="pt-stack">{}</span></div>
+<div class="pt-opp-stats">
+<div class="pt-opp-stat"><span>Hands</span><b>{}</b></div>
+<div class="pt-opp-stat"><span>VPIP</span><b>{:.0}%</b></div>
+<div class="pt-opp-stat"><span>PFR</span><b>{:.0}%</b></div>
+<div class="pt-opp-stat"><span>Folds to bet</span><b>{:.0}%</b></div>
+<div class="pt-opp-stat"><span>Aggression</span><b>{}</b></div>
+</div>
+<p class="pt-opp-read">{}</p>
+</article>"#,
+            escape(&opponent.seat.to_string()),
+            badges,
+            flag,
+            stack_text(opponent.stack, big_blind),
+            opponent.hands,
+            opponent.vpip_pct,
+            opponent.pfr_pct,
+            opponent.fold_to_bet_pct,
+            aggression,
+            escape(&opponent.read),
+        ));
+    }
+    html.push_str("</div></section>");
+    html
+}
+
+/// A plain-language summary of the search effort behind a decision: a color
+/// grade (how much work the coach did), a caption in everyday words, and a
+/// confidence note. The raw numbers stay available in the tooltip.
+struct SearchEffort {
+    class: &'static str,
+    label: &'static str,
+    caption: String,
+    note: &'static str,
+    tooltip: String,
+}
+
+fn search_effort(search: &SearchReport) -> SearchEffort {
+    let root_visits = search.worlds * search.iterations;
+    let (class, label, note) = if root_visits >= 10_000 {
+        (
+            "pt-search-deep",
+            "Deep search",
+            "Extra thorough — high confidence.",
+        )
+    } else if root_visits >= 3_000 {
+        (
+            "pt-search-solid",
+            "Solid search",
+            "Thorough enough for standard decisions.",
+        )
+    } else {
+        (
+            "pt-search-quick",
+            "Quick search",
+            "A fast read — fine for straightforward spots.",
+        )
+    };
+
+    let depth = if search.max_tree_depth == search.max_depth {
+        format!("thinking up to {} moves ahead", search.max_tree_depth)
+    } else {
+        format!(
+            "thinking up to {} move{} of a planned {}",
+            search.max_tree_depth,
+            if search.max_tree_depth == 1 { "" } else { "s" },
+            search.max_depth
+        )
+    };
+    let caption = format!(
+        "Played out {} possible opponent hands × {} evaluations each, {depth} — {} simulated actions.",
+        search.worlds,
+        search.iterations,
+        human_count(search.rollout_actions)
+    );
+    let tooltip = format!(
+        "worlds = {} · iterations = {} · tree depth {}/{} · nodes = {} · rollout actions = {}",
+        search.worlds,
+        search.iterations,
+        search.max_tree_depth,
+        search.max_depth,
+        search.nodes,
+        search.rollout_actions
+    );
+
+    SearchEffort {
+        class,
+        label,
+        caption,
+        note,
+        tooltip,
+    }
+}
+
+/// Humanizes a big count: `1,240 → 1.2k`, `13,838 → 13.8k`, small counts
+/// unchanged.
+fn human_count(value: u64) -> String {
+    if value >= 1_000_000 {
+        format!("{:.1}M", value as f64 / 1_000_000.0)
+    } else if value >= 1_000 {
+        format!("{:.1}k", value as f64 / 1_000.0)
+    } else {
+        value.to_string()
+    }
+}
+
+fn search_effort_html(search: &SearchReport) -> String {
+    let effort = search_effort(search);
+    format!(
+        r#"<div class="pt-search-meta {}" title="{}">
+<span class="pt-search-badge">{}</span>
+<span class="pt-search-body"><span class="pt-search-caption">{}</span><span class="pt-search-note">{}</span></span>
+</div>"#,
+        effort.class, effort.tooltip, effort.label, effort.caption, effort.note
+    )
 }
 
 #[cfg(test)]
@@ -656,7 +809,7 @@ mod tests {
             "the sound toggle is present"
         );
         assert!(
-            page.contains(r#"/assets/style.css?v=7"#),
+            page.contains(r#"/assets/style.css?v=8"#),
             "the stylesheet link is versioned so browsers drop stale cached CSS"
         );
         assert!(
@@ -1080,7 +1233,8 @@ mod tests {
 
     #[test]
     fn tactical_overlay_compares_played_and_optimal() {
-        let fragment = tactical_overlay_fragment(7, &sample_analysis(), false);
+        let fragment =
+            tactical_overlay_fragment(7, &sample_analysis(), false, &sample_opponents(), 20);
         assert!(fragment.contains("Hand #7 — Decision review"));
         assert!(fragment.contains("You played <b>Call</b>"));
         assert!(fragment.contains("Optimal: <b>Fold</b>"));
@@ -1090,8 +1244,18 @@ mod tests {
         assert!(fragment.contains("<th>Visits</th>"));
         assert!(fragment.contains(r#"data-overlay-close"#));
         assert!(
-            fragment.contains("Search: 16 worlds × 96 iterations"),
-            "the search-effort line is shown: {fragment}"
+            fragment.contains("Quick search"),
+            "the friendly search-effort line replaces the raw jargon: {fragment}"
+        );
+        assert!(
+            fragment.contains(
+                "Played out 16 possible opponent hands × 96 evaluations each, thinking up to 3 moves ahead — 4.1k simulated actions."
+            ),
+            "{fragment}"
+        );
+        assert!(
+            fragment.contains(r#"title="worlds = 16 · iterations = 96"#),
+            "the raw numbers stay reachable in the tooltip: {fragment}"
         );
         assert!(
             fragment.contains(r#"class="pt-feedback-card""#),
@@ -1101,7 +1265,8 @@ mod tests {
 
     #[test]
     fn intercepted_overlay_is_titled_flagged_and_only_confirms() {
-        let fragment = tactical_overlay_fragment(7, &sample_analysis(), true);
+        let fragment =
+            tactical_overlay_fragment(7, &sample_analysis(), true, &sample_opponents(), 20);
         assert!(fragment.contains("Hand #7 — Blunder intercepted"));
         assert!(fragment.contains("The table is paused"));
         assert!(fragment.contains(r#"data-overlay-confirm"#));
@@ -1116,9 +1281,136 @@ mod tests {
     fn tactical_overlay_handles_a_missing_played_action() {
         let mut decision = sample_analysis();
         decision.played = None;
-        let fragment = tactical_overlay_fragment(7, &decision, false);
+        let fragment = tactical_overlay_fragment(7, &decision, false, &[], 20);
         assert!(!fragment.contains("EV lost"));
         assert!(fragment.contains("Optimal: <b>Fold</b>"));
+    }
+
+    #[test]
+    fn opponents_block_renders_stats_statuses_and_reads() {
+        let fragment = opponents_block(&sample_opponents(), 20);
+        assert!(fragment.contains("Opponent 1"));
+        assert!(fragment.contains(r#"<span class="pt-badge btn">BTN</span>"#));
+        assert!(fragment.contains(r#"class="pt-opp-flag allin">All-in</span>"#));
+        assert!(fragment.contains("<span>VPIP</span><b>67%</b>"));
+        assert!(fragment.contains("<span>PFR</span><b>33%</b>"));
+        assert!(fragment.contains("<span>Folds to bet</span><b>25%</b>"));
+        assert!(fragment.contains("<span>Aggression</span><b>1.5</b>"));
+        assert!(fragment.contains("Loose aggressive — in lots of pots and swinging."));
+        assert!(fragment.contains("No hands played yet."), "{fragment}");
+    }
+
+    #[test]
+    fn opponents_block_marks_endless_aggression_as_infinite() {
+        let mut opponents = sample_opponents();
+        opponents[1] = OpponentSnapshot {
+            postflop_bets: 4,
+            postflop_calls: 0,
+            ..opponents[1].clone()
+        };
+        let fragment = opponents_block(&opponents, 20);
+        assert!(fragment.contains("<span>Aggression</span><b>∞</b>"));
+    }
+
+    fn sample_opponents() -> Vec<OpponentSnapshot> {
+        vec![
+            OpponentSnapshot {
+                seat: Seat::Opponent1,
+                hands: 12,
+                vpip_pct: 66.7,
+                pfr_pct: 33.3,
+                fold_to_bet_pct: 25.0,
+                postflop_bets: 6,
+                postflop_calls: 4,
+                read: "Loose aggressive — in lots of pots and swinging.".to_string(),
+                stack: 640,
+                folded: false,
+                all_in: true,
+                is_button: true,
+                is_small_blind: true,
+                is_big_blind: false,
+            },
+            OpponentSnapshot {
+                seat: Seat::Opponent2,
+                hands: 0,
+                vpip_pct: 0.0,
+                pfr_pct: 0.0,
+                fold_to_bet_pct: 0.0,
+                postflop_bets: 0,
+                postflop_calls: 0,
+                read: "No hands played yet.".to_string(),
+                stack: 0,
+                folded: false,
+                all_in: false,
+                is_button: false,
+                is_small_blind: false,
+                is_big_blind: false,
+            },
+        ]
+    }
+
+    #[test]
+    fn human_count_scales_and_keeps_small_counts() {
+        assert_eq!(human_count(0), "0");
+        assert_eq!(human_count(25), "25");
+        assert_eq!(human_count(999), "999");
+        assert_eq!(human_count(1_240), "1.2k");
+        assert_eq!(human_count(9_999), "10.0k");
+        assert_eq!(human_count(10_000), "10.0k");
+        assert_eq!(human_count(13_838), "13.8k");
+        assert_eq!(human_count(120_000), "120.0k");
+        assert_eq!(human_count(1_000_000), "1.0M");
+        assert_eq!(human_count(2_300_000), "2.3M");
+    }
+
+    #[test]
+    fn search_effort_grades_by_root_visits() {
+        assert_eq!(search_effort(&search(32, 62)).class, "pt-search-quick");
+        assert_eq!(search_effort(&search(16, 192)).class, "pt-search-solid");
+        assert_eq!(search_effort(&search(128, 80)).class, "pt-search-deep");
+    }
+
+    /// A baseline report with the uncommon fields fixed; `worlds` and
+    /// `iterations` parameterize the root-visit grade.
+    fn search(worlds: usize, iterations: usize) -> SearchReport {
+        SearchReport {
+            worlds,
+            iterations,
+            max_depth: 3,
+            max_tree_depth: 3,
+            nodes: 100,
+            rollout_actions: 200,
+        }
+    }
+
+    #[test]
+    fn search_effort_mentions_a_fallen_short_depth() {
+        let effort = search_effort(&SearchReport {
+            worlds: 8,
+            iterations: 200,
+            max_depth: 4,
+            max_tree_depth: 1,
+            nodes: 100,
+            rollout_actions: 200,
+        });
+        assert_eq!(
+            effort.caption,
+            "Played out 8 possible opponent hands × 200 evaluations each, thinking up to 1 move of a planned 4 — 200 simulated actions."
+        );
+    }
+
+    #[test]
+    fn search_effort_reached_cap_reads_in_moves() {
+        let effort = search_effort(&SearchReport {
+            worlds: 8,
+            iterations: 200,
+            max_depth: 3,
+            max_tree_depth: 3,
+            nodes: 100,
+            rollout_actions: 12_345,
+        });
+        assert!(effort.caption.contains("thinking up to 3 moves ahead"));
+        assert!(effort.caption.contains("12.3k simulated actions"));
     }
 
     #[test]
