@@ -1,10 +1,10 @@
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use axum::Router;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use serde_json::json;
 use sqlx::PgPool;
@@ -16,14 +16,15 @@ use crate::decision::SurvivalConfig;
 use crate::error::Result;
 use crate::hh;
 use crate::mcts::MctsConfig;
+use crate::opponent_analysis::{self, JobState, job_guard};
 use crate::server::{views, ws};
 
 /// Shared server state injected into handlers: static assets, the solver
 /// configuration used for every table session, the optional analytics store
 /// backing decision persistence and the tournaments page, how many
 /// chart ticks pass between decimated snapshot refreshes, how long the
-/// winner stays on screen before the next hand is dealt, and where the
-/// GGPoker hand-history zips live.
+/// winner stays on screen before the next hand is dealt, where the
+/// GGPoker hand-history zips live, and the shared background-analysis job.
 #[derive(Clone, Debug)]
 pub struct AppState {
     pub assets: ServeDir,
@@ -34,6 +35,7 @@ pub struct AppState {
     pub snapshot_interval: usize,
     pub result_pause_ms: u64,
     pub history_dir: PathBuf,
+    pub analysis: Arc<Mutex<JobState>>,
 }
 
 /// Serves the repository `assets/` directory, anchored at the crate manifest
@@ -54,6 +56,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/history", get(history))
         .route("/history/scan", post(history_scan))
         .route("/history/tournaments/{id}", get(history_tournament_detail))
+        .route("/history/analyze", get(history_analyze_page))
+        .route("/history/analyze-status", get(history_analyze_status))
+        .route(
+            "/history/analyze-opponents",
+            post(history_analyze_opponents),
+        )
+        .route("/history/save-template", post(history_save_template))
+        .route("/history/clear-template", post(history_clear_template))
         .route("/ws", get(ws::handler))
         .nest_service("/assets", state.assets.clone())
         .with_state(state)
@@ -108,8 +118,29 @@ async fn dashboard(State(app): State<Arc<AppState>>) -> Response {
     Html(views::dashboard_page(active.as_ref())).into_response()
 }
 
-async fn play() -> Html<String> {
-    Html(views::play_page())
+async fn play(State(app): State<Arc<AppState>>) -> Response {
+    let (you, bots) = match app.pool.as_ref() {
+        Some(pool) => {
+            let you = match opponent_analysis::hero_skill(pool).await {
+                Ok(skill) => skill,
+                Err(error) => {
+                    tracing::warn!(%error, "hero skill unavailable");
+                    None
+                }
+            };
+            let bots = match opponent_analysis::load_template(pool).await {
+                Ok(Some(template)) => Some(template.skill),
+                Ok(None) => None,
+                Err(error) => {
+                    tracing::warn!(%error, "bot template unavailable");
+                    None
+                }
+            };
+            (you, bots)
+        }
+        None => (None, None),
+    };
+    Html(views::play_page(you, bots)).into_response()
 }
 
 async fn health() -> impl IntoResponse {
@@ -217,13 +248,16 @@ async fn tournament_detail(State(app): State<Arc<AppState>>, Path(id): Path<i32>
 }
 
 /// The GGPoker hand-history page: the scan trigger, lifetime aggregates, and
-/// the imported-tournament listing (newest first).
+/// the imported-tournament listing (newest first), plus the opponent-skill
+/// analyzer entry and the current bot template.
 async fn history(State(app): State<Arc<AppState>>) -> Response {
     let Some(pool) = app.pool.clone() else {
         return unavailable("analytics store is unavailable");
     };
     let page = match history_page_data(&pool).await {
-        Ok((stats, tournaments)) => views::history_page(&stats, &tournaments),
+        Ok((stats, tournaments, template)) => {
+            views::history_page(&stats, &tournaments, template.as_ref())
+        }
         Err(error) => {
             tracing::warn!(%error, "history page failed to render");
             return (
@@ -236,13 +270,19 @@ async fn history(State(app): State<Arc<AppState>>) -> Response {
     Html(page).into_response()
 }
 
-/// Loads the data driving the history page: lifetime stats plus the listing.
+/// Loads the data driving the history page: lifetime stats, the listing, and
+/// the stored bot template.
 async fn history_page_data(
     pool: &PgPool,
-) -> Result<(hh::OverallStats, Vec<hh::TournamentListing>)> {
+) -> Result<(
+    hh::OverallStats,
+    Vec<hh::TournamentListing>,
+    Option<opponent_analysis::DrillTemplate>,
+)> {
     let stats = hh::overall_stats(pool).await?;
     let tournaments = hh::list_tournaments(pool).await?;
-    Ok((stats, tournaments))
+    let template = opponent_analysis::load_template(pool).await?;
+    Ok((stats, tournaments, template))
 }
 
 /// Scans the configured history directory, imports the found hands, and
@@ -271,6 +311,130 @@ fn scan_failure(error: crate::error::Error) -> Response {
         axum::Json(json!({ "error": error.to_string() })),
     )
         .into_response()
+}
+
+/// The opponent-analysis page: a polling shell whose status fragment is
+/// refreshed from `/history/analyze-status`.
+async fn history_analyze_page() -> Response {
+    Html(views::analysis_page()).into_response()
+}
+
+/// One JSON status payload for the analysis page: the job state plus the
+/// rendered HTML fragment to swap in.
+async fn history_analyze_status(State(app): State<Arc<AppState>>) -> Response {
+    let (state, html) = match job_guard(&app.analysis) {
+        Ok(status) => (
+            match &*status {
+                JobState::Idle => "idle",
+                JobState::Running { .. } => "running",
+                JobState::Done(_) => "done",
+            },
+            views::analysis_status_html(&status),
+        ),
+        Err(error) => {
+            tracing::warn!(%error, "analysis status lock poisoned");
+            ("idle", views::analysis_status_html(&JobState::Idle))
+        }
+    };
+    axum::Json(json!({ "state": state, "html": html })).into_response()
+}
+
+/// Starts the background opponent analyzer when no job is running, then
+/// redirects to the analysis page. Only one analysis runs at a time.
+async fn history_analyze_opponents(State(app): State<Arc<AppState>>) -> Response {
+    let Some(pool) = app.pool.clone() else {
+        return unavailable("analytics store is unavailable");
+    };
+    let start = match job_guard(&app.analysis) {
+        Ok(mut status) => {
+            let start = matches!(*status, JobState::Idle);
+            if start {
+                *status = JobState::Running {
+                    hands_done: 0,
+                    hands_total: 0,
+                };
+            }
+            start
+        }
+        Err(error) => {
+            tracing::warn!(%error, "analysis job lock poisoned");
+            false
+        }
+    };
+    if start {
+        tokio::spawn({
+            let analysis = app.analysis.clone();
+            async move {
+                if let Err(error) =
+                    opponent_analysis::run_job(pool, analysis.clone(), MctsConfig::analysis()).await
+                {
+                    tracing::warn!(%error, "opponent analysis job failed");
+                    if let Ok(mut status) = analysis.lock() {
+                        *status = JobState::Idle;
+                    }
+                }
+            }
+        });
+        tracing::info!("opponent analysis job started");
+    }
+    Redirect::to("/history/analyze").into_response()
+}
+
+async fn history_save_template(State(app): State<Arc<AppState>>) -> Response {
+    let Some(pool) = app.pool.clone() else {
+        return unavailable("analytics store is unavailable");
+    };
+    let report = match job_guard(&app.analysis) {
+        Ok(status) => match &*status {
+            JobState::Done(report) => Some(report.clone()),
+            _ => None,
+        },
+        Err(error) => {
+            tracing::warn!(%error, "analysis job lock poisoned");
+            None
+        }
+    };
+    let Some(report) = report else {
+        return (
+            StatusCode::CONFLICT,
+            axum::Json(json!({ "error": "no finished analysis to save — run the analyzer first" })),
+        )
+            .into_response();
+    };
+    let label = format!("Imported field ({} decisions)", report.decisions);
+    match opponent_analysis::save_template(
+        &pool,
+        &label,
+        report.skill,
+        report.avg_ev_loss_bb,
+        report.decisions.min(i64::from(i32::MAX)) as i32,
+    )
+    .await
+    {
+        Ok(()) => Redirect::to("/history").into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(json!({ "error": error.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+async fn history_clear_template(State(app): State<Arc<AppState>>) -> Response {
+    let Some(pool) = app.pool.clone() else {
+        return unavailable("analytics store is unavailable");
+    };
+    match opponent_analysis::clear_template(&pool).await {
+        Ok(()) => Redirect::to("/history").into_response(),
+        Err(error) => {
+            tracing::warn!(%error, "template clear failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(json!({ "error": error.to_string() })),
+            )
+                .into_response()
+        }
+    }
 }
 
 /// One imported tournament's detail: stored summary, aggregates, and hands.
@@ -324,6 +488,7 @@ mod tests {
             snapshot_interval: 100,
             result_pause_ms: 0,
             history_dir: crate::hh::default_history_dir(),
+            analysis: Arc::new(Mutex::new(JobState::Idle)),
         })
     }
 
@@ -404,6 +569,7 @@ mod tests {
             snapshot_interval: 100,
             result_pause_ms: 0,
             history_dir: crate::hh::default_history_dir(),
+            analysis: Arc::new(Mutex::new(JobState::Idle)),
         });
 
         let (status, body) = get_with(state.clone(), "/").await;
@@ -451,6 +617,7 @@ mod tests {
                 hand_no: 6,
                 action_no: 13,
                 log: Vec::new(),
+                template_skill: None,
                 opponents: OpponentCountersSnapshot {
                     hands: [6, 6],
                     vpip: [1, 2],
@@ -530,6 +697,7 @@ mod tests {
             snapshot_interval: 100,
             result_pause_ms: 0,
             history_dir: crate::hh::default_history_dir(),
+            analysis: Arc::new(Mutex::new(JobState::Idle)),
         });
         let (status, body) = get_with(state, "/tournaments").await;
         assert_eq!(status, StatusCode::OK);
@@ -596,6 +764,7 @@ mod tests {
             snapshot_interval: 100,
             result_pause_ms: 0,
             history_dir: crate::hh::default_history_dir(),
+            analysis: Arc::new(Mutex::new(JobState::Idle)),
         });
         let newest_id = *ids.last().unwrap();
         let oldest_id = ids[0];
@@ -696,6 +865,7 @@ mod tests {
             snapshot_interval: 100,
             result_pause_ms: 0,
             history_dir: crate::hh::default_history_dir(),
+            analysis: Arc::new(Mutex::new(JobState::Idle)),
         });
         let (status, body) = get_with(state, &format!("/tournaments/{session_id}")).await;
         assert_eq!(status, StatusCode::OK);
@@ -716,6 +886,7 @@ mod tests {
                 snapshot_interval: 100,
                 result_pause_ms: 0,
                 history_dir: crate::hh::default_history_dir(),
+                analysis: Arc::new(Mutex::new(JobState::Idle)),
             }),
             "/tournaments/999999999",
         )
@@ -896,6 +1067,7 @@ You finished in 1st place.
             snapshot_interval: 100,
             result_pause_ms: 0,
             history_dir: dir.clone(),
+            analysis: Arc::new(Mutex::new(JobState::Idle)),
         });
 
         let (status, body) = get_with(state.clone(), "/history").await;
@@ -1003,6 +1175,7 @@ You finished in 1st place.
             snapshot_interval: 100,
             result_pause_ms: 0,
             history_dir: dir.clone(),
+            analysis: Arc::new(Mutex::new(JobState::Idle)),
         });
 
         let (status, body) = post_with(state, "/history/scan").await;
@@ -1019,5 +1192,252 @@ You finished in 1st place.
             .await
             .unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // ------------------------------------------------------ opponent skill
+
+    #[tokio::test]
+    async fn analysis_endpoints_require_an_analytics_store() {
+        let (status, body) = get("/history/analyze").await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the shell page renders without a DB"
+        );
+        assert!(body.contains("analysis-status"));
+
+        let (status, _) = post_with(test_state(), "/history/analyze-opponents").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+
+        let (status, _) = post_with(test_state(), "/history/save-template").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+
+        let (status, _) = post_with(test_state(), "/history/clear-template").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn analysis_status_reports_idle_and_the_page_polls() {
+        let (status, body) = get("/history/analyze-status").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains(r#""state":"idle""#), "{body}");
+        assert!(body.contains(r#""html""#), "{body}");
+
+        let (status, body) = get("/history/analyze").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("/history/analyze-status"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn analyze_opponents_never_double_spawns_and_redirects() {
+        let _guard = crate::analytics::DB_TEST_LOCK.lock().await;
+        dotenvy::dotenv().ok();
+        let database_url = match std::env::var("DATABASE_URL") {
+            Ok(url) if !url.is_empty() => url,
+            _ => panic!(
+                "DATABASE_URL is required for database integration tests; start PostgreSQL via pg.ps1"
+            ),
+        };
+        let pool = crate::db::connect(&database_url).await.unwrap();
+        let state = Arc::new(AppState {
+            assets: default_assets(),
+            mcts: MctsConfig::test(),
+            survival: SurvivalConfig::default(),
+            blunder: BlunderConfig::default(),
+            pool: Some(pool.clone()),
+            snapshot_interval: 100,
+            result_pause_ms: 0,
+            history_dir: crate::hh::default_history_dir(),
+            analysis: Arc::new(Mutex::new(JobState::Running {
+                hands_done: 4,
+                hands_total: 10,
+            })),
+        });
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/history/analyze-opponents")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        // The pre-seeded progress is untouched: no second job replaced it.
+        let status = state.analysis.lock().unwrap();
+        assert!(matches!(
+            *status,
+            JobState::Running {
+                hands_done: 4,
+                hands_total: 10
+            }
+        ));
+        let _ = response;
+    }
+
+    #[tokio::test]
+    async fn save_and_clear_template_follow_the_finished_job() {
+        let _guard = crate::analytics::DB_TEST_LOCK.lock().await;
+        dotenvy::dotenv().ok();
+        let database_url = match std::env::var("DATABASE_URL") {
+            Ok(url) if !url.is_empty() => url,
+            _ => panic!(
+                "DATABASE_URL is required for database integration tests; start PostgreSQL via pg.ps1"
+            ),
+        };
+        let pool = crate::db::connect(&database_url).await.unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        crate::opponent_analysis::clear_template(&pool)
+            .await
+            .unwrap();
+
+        // Without a finished job the save is refused outright.
+        let idle_state = Arc::new(AppState {
+            assets: default_assets(),
+            mcts: MctsConfig::test(),
+            survival: SurvivalConfig::default(),
+            blunder: BlunderConfig::default(),
+            pool: Some(pool.clone()),
+            snapshot_interval: 100,
+            result_pause_ms: 0,
+            history_dir: crate::hh::default_history_dir(),
+            analysis: Arc::new(Mutex::new(JobState::Idle)),
+        });
+        let (status, _) = post_with(idle_state, "/history/save-template").await;
+        assert_eq!(status, StatusCode::CONFLICT);
+
+        let report = crate::opponent_analysis::FieldReport {
+            hands_total: 40,
+            hands_graded: 39,
+            hands_failed: 1,
+            decisions: 90,
+            avg_ev_loss_bb: 0.35,
+            skill: 0.77,
+            players: Vec::new(),
+            problems: Vec::new(),
+        };
+        let state = Arc::new(AppState {
+            assets: default_assets(),
+            mcts: MctsConfig::test(),
+            survival: SurvivalConfig::default(),
+            blunder: BlunderConfig::default(),
+            pool: Some(pool.clone()),
+            snapshot_interval: 100,
+            result_pause_ms: 0,
+            history_dir: crate::hh::default_history_dir(),
+            analysis: Arc::new(Mutex::new(JobState::Idle)),
+        });
+        {
+            let mut status = state.analysis.lock().unwrap();
+            *status = JobState::Done(report.clone());
+        }
+
+        let (status, _) = post_with(state.clone(), "/history/save-template").await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        let template = crate::opponent_analysis::load_template(&pool)
+            .await
+            .unwrap()
+            .expect("the template row exists");
+        assert_eq!(template.label, "Imported field (90 decisions)");
+        assert!((template.skill - 0.77).abs() < 1e-9);
+        assert_eq!(template.decisions, 90);
+
+        let (status, _) = post_with(state, "/history/clear-template").await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        assert_eq!(
+            crate::opponent_analysis::load_template(&pool)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn play_page_hides_the_skill_chip_without_a_store() {
+        let (status, body) = get("/play").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!body.contains("pt-skill-chip"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn play_page_compares_hero_and_field_skill_from_the_store() {
+        use crate::game::Street;
+
+        let _guard = crate::analytics::DB_TEST_LOCK.lock().await;
+        dotenvy::dotenv().ok();
+        let database_url = match std::env::var("DATABASE_URL") {
+            Ok(url) if !url.is_empty() => url,
+            _ => panic!(
+                "DATABASE_URL is required for database integration tests; start PostgreSQL via pg.ps1"
+            ),
+        };
+        let pool = crate::db::connect(&database_url).await.unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        crate::opponent_analysis::clear_template(&pool)
+            .await
+            .unwrap();
+        crate::opponent_analysis::save_template(
+            &pool,
+            "Imported field (4 decisions)",
+            0.62,
+            0.5,
+            4,
+        )
+        .await
+        .unwrap();
+
+        let state = Arc::new(AppState {
+            assets: default_assets(),
+            mcts: MctsConfig::test(),
+            survival: SurvivalConfig::default(),
+            blunder: BlunderConfig::default(),
+            pool: Some(pool.clone()),
+            snapshot_interval: 100,
+            result_pause_ms: 0,
+            history_dir: crate::hh::default_history_dir(),
+            analysis: Arc::new(Mutex::new(JobState::Idle)),
+        });
+        let (status, body) = get_with(state.clone(), "/play").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("pt-skill-chip"), "{body}");
+        assert!(body.contains("Bots <b>0.62</b>"), "{body}");
+
+        let session = analytics::start_session(&pool).await.unwrap();
+        analytics::persist_records(
+            &pool,
+            session,
+            &[analytics::PendingDecision {
+                hand_no: 1,
+                street: Street::Preflop,
+                played: "Call".into(),
+                optimal: "Raise(60)".into(),
+                ev_loss: 0.2,
+            }],
+        )
+        .await
+        .unwrap();
+        let (status, body) = get_with(state.clone(), "/play").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains("You <b>") && body.contains("· Bots <b>0.62</b>"),
+            "the hero's lifetime skill lands next to the field's: {body}"
+        );
+
+        let (status, body) = get_with(state.clone(), "/history").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains("Bots trained on: Imported field (4 decisions)"),
+            "{body}"
+        );
+
+        crate::opponent_analysis::clear_template(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM hero_sessions WHERE id = $1")
+            .bind(session)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 }

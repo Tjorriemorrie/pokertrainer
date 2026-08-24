@@ -111,8 +111,31 @@ async fn handle_socket(socket: WebSocket, app: Arc<AppState>) {
             }
         }
         None => {
-            let mut session =
-                TableSession::new(rand::random::<u64>(), app.mcts, app.survival, app.blunder);
+            let template = match app.pool.as_ref() {
+                Some(pool) => match crate::opponent_analysis::load_template(pool).await {
+                    Ok(Some(template)) => {
+                        tracing::info!(
+                            skill = template.skill,
+                            decisions = template.decisions,
+                            "bots loaded the saved field template"
+                        );
+                        Some(crate::opponent::OpponentTemplate::new(template.skill))
+                    }
+                    Ok(None) => None,
+                    Err(error) => {
+                        tracing::warn!(%error, "bot template unavailable — playing the placeholder policy");
+                        None
+                    }
+                },
+                None => None,
+            };
+            let mut session = TableSession::new(
+                rand::random::<u64>(),
+                app.mcts,
+                app.survival,
+                app.blunder,
+                template,
+            );
             if let Err(error) = bootstrap(&mut session) {
                 tracing::warn!(%error, "table session bootstrap failed; closing connection");
                 reject_socket(socket, "the table could not be dealt").await;
@@ -966,6 +989,7 @@ mod tests {
             MctsConfig::test(),
             SurvivalConfig::default(),
             BlunderConfig::default(),
+            None,
         );
         bootstrap(&mut session).unwrap();
         session
@@ -1380,6 +1404,7 @@ mod tests {
             MctsConfig::test(),
             SurvivalConfig::default(),
             BlunderConfig::default(),
+            None,
         );
         session.stage_pending_interception(Action::Fold, sample_analysis());
         let _ = handle_client_message(&mut session, r#"{"type":"REVIEW_DONE"}"#, None);
@@ -1407,6 +1432,7 @@ mod tests {
             MctsConfig::test(),
             SurvivalConfig::default(),
             BlunderConfig::default(),
+            None,
         );
         assert!(!session.state().is_hand_over(), "the hero busted mid-hand");
 
@@ -1594,6 +1620,7 @@ mod tests {
             MctsConfig::test(),
             SurvivalConfig::default(),
             BlunderConfig::default(),
+            None,
         );
         assert!(
             session.tournament_result().unwrap().won,
@@ -1781,6 +1808,9 @@ mod tests {
                 snapshot_interval,
                 result_pause_ms,
                 history_dir: crate::hh::default_history_dir(),
+                analysis: Arc::new(std::sync::Mutex::new(
+                    crate::opponent_analysis::JobState::Idle,
+                )),
             }),
         );
         let handle = tokio::spawn(async move {

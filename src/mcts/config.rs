@@ -57,6 +57,33 @@ impl MctsConfig {
         }
     }
 
+    /// Preset for the opponent-skill analysis: deep enough to grade one
+    /// decision, with the wall-clock floors zeroed — batch analysis must not
+    /// idle.
+    pub const fn analysis() -> Self {
+        Self {
+            worlds: 16,
+            iterations: 64,
+            uct_c: 60.0,
+            max_depth: 4,
+            min_duration: Duration::ZERO,
+            max_duration: Duration::ZERO,
+        }
+    }
+
+    /// Preset for bot decisions at the live table: small enough to answer
+    /// inline during a pump without stalling the game.
+    pub const fn bot() -> Self {
+        Self {
+            worlds: 8,
+            iterations: 48,
+            uct_c: 60.0,
+            max_depth: 4,
+            min_duration: Duration::ZERO,
+            max_duration: Duration::ZERO,
+        }
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.worlds == 0 {
             return Err(Error::InvalidConfig(
@@ -149,6 +176,24 @@ mod tests {
             config.max_duration >= config.min_duration,
             "the test wall budget covers the minimum think time"
         );
+    }
+
+    #[test]
+    fn analysis_and_bot_presets_validate_and_idle() {
+        let analysis = MctsConfig::analysis();
+        analysis.validate().unwrap();
+        assert_eq!(analysis.min_duration, Duration::ZERO);
+        assert_eq!(
+            analysis.max_duration,
+            Duration::ZERO,
+            "batch analysis must not wait on wall-clock floors"
+        );
+        assert!(analysis.worlds >= MctsConfig::test().worlds);
+
+        let bot = MctsConfig::bot();
+        bot.validate().unwrap();
+        assert_eq!(bot.min_duration, Duration::ZERO);
+        assert!(bot.worlds <= analysis.worlds);
     }
 
     #[test]

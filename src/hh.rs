@@ -480,6 +480,234 @@ fn parse_cents(text: &str) -> Option<i32> {
     Some((value * 100.0).round() as i32)
 }
 
+// -------------------------------------------------------------- episodes
+
+/// One seat declaration from a hand block (`Seat 2: Hero (525 in chips)`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct EpisodeSeat {
+    pub no: u8,
+    pub name: String,
+    pub stack: Option<i32>,
+}
+
+/// The verb of one action line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum EpisodeVerb {
+    /// A blind or ante post (`posts small blind 20`).
+    Post,
+    Fold,
+    Check,
+    Call,
+    Bet,
+    Raise,
+}
+
+/// One action line: `{name}: posts small blind 20`, `14c11a2a: raises 175 to
+/// 215 and is all-in`, and so on.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EpisodeAction {
+    pub seat_no: u8,
+    pub verb: EpisodeVerb,
+    /// Commit for posts/calls/bets; the raise increment for raises.
+    pub amount: Option<i32>,
+    /// The raise-to amount for raises.
+    pub to: Option<i32>,
+    pub all_in: bool,
+}
+
+/// One hand block reduced to its full action timeline. This is the input for
+/// the opponent-skill replayer: it reconstructs every decision point in the
+/// hand so each opponent action can be graded against the solver.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Episode {
+    pub seats: Vec<EpisodeSeat>,
+    /// Street markers with the board-so-far: `(1 = flop, 2 = turn, 3 = river,
+    /// cumulative cards)`.
+    pub boards: Vec<(u8, Vec<String>)>,
+    pub hero_cards: Option<[String; 2]>,
+    /// Every action including the hero's — the hero's decisions are needed to
+    /// replay the hand but are never graded themselves.
+    pub actions: Vec<EpisodeAction>,
+    /// The declared button seat from `Table '...' Seat #N is the button`,
+    /// when the line is present.
+    pub button: Option<u8>,
+    /// `Board [...]` from the summary, as a fallback when street markers
+    /// carry no board.
+    pub summary_board: Option<Vec<String>>,
+}
+
+/// Splits a hand block into its full action timeline.
+pub fn parse_episode(block: &str) -> Option<Episode> {
+    let mut seats: Vec<EpisodeSeat> = Vec::new();
+    let mut actions: Vec<EpisodeAction> = Vec::new();
+    let mut boards: Vec<(u8, Vec<String>)> = Vec::new();
+    let mut hero_cards = None;
+    let mut button = None;
+    let mut summary_board = None;
+    let mut at_summary = false;
+
+    for (index, line) in block.lines().map(str::trim).enumerate() {
+        // The stored raw blocks drop the `Poker Hand #` prefix: the header is
+        // the first line, with or without it.
+        if line.starts_with("Poker Hand #") {
+            continue;
+        }
+        if index == 0 && line.contains(": Tournament #") {
+            continue;
+        }
+        if line.starts_with("*** SUMMARY ***") {
+            at_summary = true;
+        }
+        if at_summary {
+            if line.starts_with("Board [") {
+                summary_board = Some(cards_in_brackets(line));
+            }
+            continue;
+        }
+        if line.starts_with("Dealt to Hero [") {
+            let cards = cards_in_brackets(line);
+            hero_cards = two_cards(&cards);
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("Seat ") {
+            if let Some(seat) = parse_episode_seat(rest) {
+                seats.push(seat);
+            }
+            continue;
+        }
+        if let Some(seat_no) = parse_button_line(line) {
+            button = Some(seat_no);
+            continue;
+        }
+        if let Some((street, cards)) = parse_street_marker(line) {
+            let card_list = cards_in_brackets(&cards);
+            if !card_list.is_empty() {
+                boards.push((street, card_list));
+            }
+            continue;
+        }
+        if let Some((name, text)) = line.split_once(": ") {
+            let seat_no = seats.iter().find(|seat| seat.name == name)?.no;
+            if let Some(action) = parse_episode_action(text) {
+                actions.push(EpisodeAction { seat_no, ..action });
+            }
+        }
+    }
+
+    if seats.is_empty() {
+        return None;
+    }
+    Some(Episode {
+        seats,
+        boards,
+        hero_cards,
+        actions,
+        button,
+        summary_board,
+    })
+}
+
+/// Parses `Seat 2: Hero (525 in chips)` (the parenthesized stack is
+/// optional).
+fn parse_episode_seat(rest: &str) -> Option<EpisodeSeat> {
+    let (seat_no, rest) = rest.trim_start().split_once(':')?;
+    let no: u8 = seat_no.trim().parse().ok()?;
+    let rest = rest.trim();
+    let name_end = rest.find('(').unwrap_or(rest.len());
+    let name = rest[..name_end].trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let stack = rest[name_end..].split_whitespace().find_map(|word| {
+        word.trim_matches(|c: char| !c.is_ascii_digit())
+            .parse()
+            .ok()
+    });
+    Some(EpisodeSeat { no, name, stack })
+}
+
+/// Parses `Table '39856' 3-max Seat #2 is the button` into its seat number.
+fn parse_button_line(line: &str) -> Option<u8> {
+    let (_, rest) = line.split_once("Seat #")?;
+    rest.split_whitespace().next()?.parse().ok()
+}
+
+/// Parses `*** FLOP *** [Jd 3c 8c]` (and turn/river markers) into the street
+/// index plus the raw bracket tail.
+fn parse_street_marker(line: &str) -> Option<(u8, String)> {
+    let street = if line.starts_with("*** FLOP ***") {
+        1
+    } else if line.starts_with("*** TURN ***") {
+        2
+    } else if line.starts_with("*** RIVER ***") {
+        3
+    } else {
+        return None;
+    };
+    let open = line.find('[')?;
+    Some((street, line[open..].to_string()))
+}
+
+/// All card codes inside `[...]` groups, in reading order.
+fn cards_in_brackets(text: &str) -> Vec<String> {
+    let mut cards = Vec::new();
+    let mut rest = text;
+    while let Some(open) = rest.find('[') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find(']') else { break };
+        for code in after[..close].split_whitespace() {
+            if !code.is_empty() {
+                cards.push(code.to_string());
+            }
+        }
+        rest = &after[close + 1..];
+    }
+    cards
+}
+
+/// The first two cards of a bracket-derived code list, i.e. `[As, Kh]`.
+fn two_cards(cards: &[String]) -> Option<[String; 2]> {
+    Some([cards.first()?.clone(), cards.get(1)?.clone()])
+}
+
+/// Parses the text after `{name}: ` into an action (`posts small blind 20`,
+/// `folds`, `checks`, `calls 20`, `bets 40`, `raises 40 to 80`), with the
+/// trailing `and is all-in` extracted.
+fn parse_episode_action(text: &str) -> Option<EpisodeAction> {
+    let (text, all_in) = match text.strip_suffix(" and is all-in") {
+        Some(stripped) => (stripped, true),
+        None => (text, false),
+    };
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let first = *words.first()?;
+    let integer_at = |index: usize| words.get(index).copied().and_then(parse_i32);
+    let last_integer = || words.iter().rev().copied().find_map(parse_i32);
+
+    let (verb, amount, to) = match first {
+        "posts" => (EpisodeVerb::Post, last_integer(), None),
+        "folds" => (EpisodeVerb::Fold, None, None),
+        "checks" => (EpisodeVerb::Check, None, None),
+        "calls" => (EpisodeVerb::Call, last_integer(), None),
+        "bets" => (EpisodeVerb::Bet, last_integer(), None),
+        "raises" => {
+            let raise_by = words.iter().copied().find_map(parse_i32);
+            let to = words
+                .iter()
+                .position(|word| *word == "to")
+                .and_then(|at| integer_at(at + 1));
+            (EpisodeVerb::Raise, raise_by, to)
+        }
+        _ => return None,
+    };
+    Some(EpisodeAction {
+        seat_no: 0,
+        verb,
+        amount,
+        to,
+        all_in,
+    })
+}
+
 /// Parses a leading integer (`"3"` → 3).
 fn parse_i32_end(text: &str) -> Option<i32> {
     text.trim().parse().ok()
@@ -1235,6 +1463,219 @@ You finished in 1st place.";
                 .collect::<Vec<_>>(),
             vec!["SG4176965290", "SG4176965222", "SG4176963213"]
         );
+    }
+
+    // --------------------------------------------------------- episodes
+
+    #[test]
+    fn episode_parses_seats_button_and_timeline() {
+        let episode = parse_episode(SAMPLE_WIN).expect("sample win has an episode");
+        assert_eq!(
+            episode.seats,
+            vec![
+                EpisodeSeat {
+                    no: 2,
+                    name: "Hero".to_string(),
+                    stack: Some(525),
+                },
+                EpisodeSeat {
+                    no: 3,
+                    name: "14c11a2a".to_string(),
+                    stack: Some(375),
+                },
+            ]
+        );
+        assert_eq!(episode.button, Some(3));
+        assert_eq!(
+            episode.hero_cards,
+            Some(["As".to_string(), "Kh".to_string()])
+        );
+        assert_eq!(
+            episode.boards,
+            vec![
+                (
+                    1,
+                    vec!["Jd".to_string(), "3c".to_string(), "8c".to_string()]
+                ),
+                (
+                    2,
+                    vec![
+                        "Jd".to_string(),
+                        "3c".to_string(),
+                        "8c".to_string(),
+                        "Qd".to_string()
+                    ]
+                ),
+                (
+                    3,
+                    vec![
+                        "Jd".to_string(),
+                        "3c".to_string(),
+                        "8c".to_string(),
+                        "Qd".to_string(),
+                        "7s".to_string()
+                    ]
+                ),
+            ]
+        );
+        assert_eq!(
+            episode.summary_board,
+            Some(vec![
+                "Jd".to_string(),
+                "3c".to_string(),
+                "8c".to_string(),
+                "Qd".to_string(),
+                "7s".to_string()
+            ])
+        );
+        let verbs: Vec<(u8, EpisodeVerb, Option<i32>, Option<i32>, bool)> = episode
+            .actions
+            .iter()
+            .map(|action| {
+                (
+                    action.seat_no,
+                    action.verb,
+                    action.amount,
+                    action.to,
+                    action.all_in,
+                )
+            })
+            .collect();
+        assert_eq!(
+            verbs,
+            vec![
+                (3, EpisodeVerb::Post, Some(20), None, false),
+                (2, EpisodeVerb::Post, Some(40), None, false),
+                (3, EpisodeVerb::Call, Some(20), None, false),
+                (2, EpisodeVerb::Raise, Some(40), Some(80), false),
+                (3, EpisodeVerb::Call, Some(40), None, false),
+                (2, EpisodeVerb::Bet, Some(40), None, false),
+                (3, EpisodeVerb::Call, Some(40), None, false),
+                (2, EpisodeVerb::Bet, Some(40), None, false),
+                (3, EpisodeVerb::Call, Some(40), None, false),
+                (2, EpisodeVerb::Bet, Some(40), None, false),
+                (3, EpisodeVerb::Raise, Some(175), Some(215), true),
+                (2, EpisodeVerb::Call, Some(175), None, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn episode_parses_fold_and_blind_post_hands() {
+        let episode = parse_episode(SAMPLE_FOLD_SB).expect("fold sample has an episode");
+        assert_eq!(episode.button, Some(2));
+        assert_eq!(
+            episode.hero_cards,
+            Some(["6h".to_string(), "8d".to_string()])
+        );
+        assert!(episode.boards.is_empty(), "the hand ended preflop");
+        assert_eq!(episode.summary_board, None);
+        assert_eq!(
+            episode.actions,
+            vec![
+                EpisodeAction {
+                    seat_no: 2,
+                    verb: EpisodeVerb::Post,
+                    amount: Some(15),
+                    to: None,
+                    all_in: false,
+                },
+                EpisodeAction {
+                    seat_no: 3,
+                    verb: EpisodeVerb::Post,
+                    amount: Some(30),
+                    to: None,
+                    all_in: false,
+                },
+                EpisodeAction {
+                    seat_no: 2,
+                    verb: EpisodeVerb::Fold,
+                    amount: None,
+                    to: None,
+                    all_in: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn episode_seats_tolerate_missing_stacks() {
+        let text = "Poker Hand #SG1: Tournament #9, Spin&Gold #1 Hold'em No Limit - Level1(10/20) - 2026/08/21 15:03:55
+Table '1' 2-max Seat #2 is the button
+Seat 2: Hero
+Seat 3: 14c11a2a (310 in chips)
+Hero: posts small blind 10
+14c11a2a: posts big blind 20
+*** HOLE CARDS ***
+Dealt to Hero [As Ks]
+Hero: raises 20 to 40
+14c11a2a: folds
+Uncalled bet (20) returned to Hero
+*** SHOWDOWN ***
+Hero collected 40 from pot
+*** SUMMARY ***
+Seat 2: Hero collected (40)";
+        let episode = parse_episode(text).expect("seat without stack still parses");
+        assert_eq!(episode.seats[0].stack, None);
+        assert_eq!(episode.seats[1].stack, Some(310));
+        assert_eq!(episode.actions.len(), 4);
+    }
+
+    #[test]
+    fn episode_parses_stored_raw_blocks_without_the_prefix() {
+        // `parse_hands` stores every block without the `Poker Hand #`
+        // prefix; the episode parser must accept both shapes.
+        let stripped = SAMPLE_WIN.strip_prefix("Poker Hand #").unwrap();
+        assert!(!stripped.starts_with("Poker Hand #"));
+        let episode = parse_episode(stripped).expect("prefix-less raw parses");
+        assert_eq!(
+            episode.actions.len(),
+            parse_episode(SAMPLE_WIN).unwrap().actions.len()
+        );
+        assert_eq!(episode.button, Some(3));
+        assert_eq!(
+            episode.seats,
+            vec![
+                EpisodeSeat {
+                    no: 2,
+                    name: "Hero".to_string(),
+                    stack: Some(525),
+                },
+                EpisodeSeat {
+                    no: 3,
+                    name: "14c11a2a".to_string(),
+                    stack: Some(375),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn unrecognizable_blocks_have_no_episode() {
+        assert_eq!(parse_episode("garbage"), None);
+    }
+
+    #[test]
+    fn episode_card_helpers_cover_bracket_shapes() {
+        assert_eq!(
+            cards_in_brackets("[Jd 3c 8c] [Qd] [7s]"),
+            vec!["Jd", "3c", "8c", "Qd", "7s"]
+        );
+        assert_eq!(
+            two_cards(&["As".to_string(), "Kh".to_string()]),
+            Some(["As".to_string(), "Kh".to_string()])
+        );
+        assert_eq!(two_cards(&["As".to_string()]), None);
+        assert_eq!(
+            parse_button_line("Table '1' 3-max Seat #2 is the button"),
+            Some(2)
+        );
+        assert_eq!(parse_button_line("no button here"), None);
+        assert_eq!(
+            parse_street_marker("*** FLOP *** [Jd 3c 8c]"),
+            Some((1, "[Jd 3c 8c]".to_string()))
+        );
+        assert_eq!(parse_street_marker("*** HOLE CARDS ***"), None);
     }
 
     #[test]

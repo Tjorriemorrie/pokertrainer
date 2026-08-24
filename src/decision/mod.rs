@@ -262,7 +262,9 @@ pub fn analyze_snapshot(
 }
 
 /// Classifies a played bet/raise amount into a size bucket for feedback.
-fn classify_played(state: &GameState, action: Action) -> Option<BetSize> {
+/// Shared with the opponent-skill analyzer, which grades actions the same
+/// way.
+pub(crate) fn classify_played(state: &GameState, action: Action) -> Option<BetSize> {
     let legal = state.legal_actions();
     let (amount, min_amount) = match action {
         Action::Bet(amount) => (amount, legal.min_bet),

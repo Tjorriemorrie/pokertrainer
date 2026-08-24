@@ -96,6 +96,63 @@ impl WorldSampler {
         }
         Ok(out)
     }
+
+    /// Seat-perspective sampling: every live seat's holding comes from its own
+    /// range (`None` = uniform), and pinned seats keep their exact cards. Dead
+    /// cards are the board plus every pin, so a pinned pair can never land in
+    /// another seat's draw. Weights behave like [`Self::sample`]: a product of
+    /// per-seat draw probabilities framed through blockers, self-normalized
+    /// across the sample. Eliminated seats keep placeholders.
+    pub fn sample_with_pins<R: Rng + ?Sized>(
+        rng: &mut R,
+        state: &GameState,
+        pins: &[Option<[Card; 2]>; NUM_PLAYERS],
+        ranges: &[Option<Range>; NUM_PLAYERS],
+        count: usize,
+    ) -> Result<Vec<World>> {
+        if count == 0 {
+            return Err(Error::Solver("cannot sample zero worlds".into()));
+        }
+
+        let uniform = [1.0 / HAND_COUNT as f32; HAND_COUNT];
+        // Only the board is dead up front: pins are placed (and checked for
+        // consistency) inside `draw_seats`, so they never self-conflict.
+        let dead: Vec<Card> = state.board().to_vec();
+
+        let mut weighted: Vec<([[Card; 2]; NUM_PLAYERS], f64)> = Vec::with_capacity(count);
+        for _ in 0..count {
+            let (hole_cards, weight) = draw_seats(rng, state, pins, ranges, &dead, &uniform)
+                .ok_or_else(|| {
+                    Error::Solver("range leaves no hand consistent with the dead cards".into())
+                })?;
+            weighted.push((hole_cards, weight));
+        }
+
+        let total: f64 = weighted.iter().map(|(_, w)| *w).sum();
+        if total <= 0.0 {
+            return Err(Error::Solver("sampled worlds carry no range mass".into()));
+        }
+
+        let mut out = Vec::with_capacity(count);
+        for (hole_cards, weight) in weighted {
+            let mut dead_hands = dead.clone();
+            for seat in Seat::ALL {
+                if !state.eliminated(seat) {
+                    dead_hands.extend(hole_cards[seat.index()]);
+                }
+            }
+            let mut runout: Vec<Card> = all_cards()
+                .filter(|card| !dead_hands.contains(card))
+                .collect();
+            runout.shuffle(rng);
+            out.push(World {
+                hole_cards,
+                runout,
+                weight: weight / total,
+            });
+        }
+        Ok(out)
+    }
 }
 
 /// Draws one holding per active (non-eliminated) opponent and returns the
@@ -118,6 +175,51 @@ fn draw_opponents<R: Rng + ?Sized>(
             continue;
         }
         let (combo, class_prob) = draw_holding(rng, &ranges[seat.index() - 1], &dead)?;
+        dead.extend_from_slice(&combo);
+        hole_cards[seat.index()] = combo;
+        weight *= f64::from(class_prob);
+    }
+    Some((hole_cards, weight))
+}
+
+/// Draws one holding per live seat for the pin-aware sampler; the pinned
+/// seats' exact cards are placed directly, and every other seat draws from
+/// its own range (uniform when `None`). Returns the joint exact probability.
+/// Eliminated seats keep placeholders and are never sampled.
+fn draw_seats<R: Rng + ?Sized>(
+    rng: &mut R,
+    state: &GameState,
+    pins: &[Option<[Card; 2]>; NUM_PLAYERS],
+    ranges: &[Option<Range>; NUM_PLAYERS],
+    dead: &[Card],
+    uniform: &Range,
+) -> Option<([[Card; 2]; NUM_PLAYERS], f64)> {
+    let placeholder = [Card::new(Rank::Two, Suit::Clubs); 2];
+    let mut dead = dead.to_vec();
+    let mut hole_cards = [placeholder; NUM_PLAYERS];
+    let mut weight = 1.0f64;
+
+    // Place every pin before any draw so a later-seat pin can never clash
+    // with a holding an earlier sampled seat already drew.
+    for seat in Seat::ALL {
+        if state.eliminated(seat) {
+            continue;
+        }
+        let Some(pin) = pins[seat.index()] else {
+            continue;
+        };
+        if pin.iter().any(|card| dead.contains(card)) {
+            return None;
+        }
+        hole_cards[seat.index()] = pin;
+        dead.extend_from_slice(&pin);
+    }
+    for seat in Seat::ALL {
+        if state.eliminated(seat) || pins[seat.index()].is_some() {
+            continue;
+        }
+        let range = ranges[seat.index()].unwrap_or(*uniform);
+        let (combo, class_prob) = draw_holding(rng, &range, &dead)?;
         dead.extend_from_slice(&combo);
         hole_cards[seat.index()] = combo;
         weight *= f64::from(class_prob);
@@ -454,6 +556,123 @@ mod tests {
             WorldSampler::sample(&mut a, &state, &uniform, 16).unwrap(),
             WorldSampler::sample(&mut b, &state, &uniform, 16).unwrap()
         );
+    }
+
+    // ----------------------------------------------------- pin-aware sampler
+
+    #[test]
+    fn pinned_sampling_keeps_exact_cards_and_normalizes_weights() {
+        let state = dealt_state();
+        let aces = [
+            Card::new(Rank::Ace, Suit::Spades),
+            Card::new(Rank::Ace, Suit::Diamonds),
+        ];
+        let kings = [
+            Card::new(Rank::King, Suit::Clubs),
+            Card::new(Rank::King, Suit::Diamonds),
+        ];
+        let mut pins: [Option<[Card; 2]>; NUM_PLAYERS] = [None; NUM_PLAYERS];
+        pins[Seat::Hero.index()] = Some(aces);
+        pins[Seat::Opponent2.index()] = Some(kings);
+        let ranges: [Option<Range>; NUM_PLAYERS] = [None; NUM_PLAYERS];
+        let mut rng = seeded_rng(50);
+        let worlds = WorldSampler::sample_with_pins(&mut rng, &state, &pins, &ranges, 40).unwrap();
+        assert_eq!(worlds.len(), 40);
+        assert_eq!(
+            worlds[0].hole_cards[Seat::Hero.index()],
+            aces,
+            "the hero's pinned cards survive sampling"
+        );
+        assert_eq!(
+            worlds[0].hole_cards[Seat::Opponent2.index()],
+            kings,
+            "every seat keeps its pinned pair"
+        );
+        // The pins are dead cards: the sampled middle seat can never draw
+        // them, and they stay out of every runout.
+        for card in aces.iter().chain(&kings) {
+            assert!(!worlds[0].runout.contains(card));
+            assert!(!worlds[0].hole_cards[Seat::Opponent1.index()].contains(card));
+        }
+        let total: f64 = worlds.iter().map(|w| w.weight).sum();
+        assert!((total - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn impossible_pins_are_rejected() {
+        // Pinning the same concrete card to two seats cannot be dealt.
+        let state = dealt_state();
+        let ace = [
+            Card::new(Rank::Ace, Suit::Spades),
+            Card::new(Rank::Two, Suit::Clubs),
+        ];
+        let mut pins: [Option<[Card; 2]>; NUM_PLAYERS] = [None; NUM_PLAYERS];
+        pins[0] = Some(ace);
+        pins[1] = Some(ace);
+        let ranges: [Option<Range>; NUM_PLAYERS] = [Some(uniform()), Some(uniform()), None];
+        let mut rng = seeded_rng(51);
+        let result = WorldSampler::sample_with_pins(&mut rng, &state, &pins, &ranges, 8);
+        assert!(matches!(result, Err(Error::Solver(_))));
+    }
+
+    #[test]
+    fn pinned_ranges_control_every_seat_draw() {
+        let state = dealt_state();
+        let deuces = Hand::new(Rank::Two, Rank::Two, false);
+        let kings = Hand::new(Rank::King, Rank::King, false);
+        let threes = Hand::new(Rank::Three, Rank::Three, false);
+        let ranges: [Option<Range>; NUM_PLAYERS] = [
+            Some(pinned(threes)),
+            Some(pinned(deuces)),
+            Some(pinned(kings)),
+        ];
+        let mut rng = seeded_rng(52);
+        let worlds =
+            WorldSampler::sample_with_pins(&mut rng, &state, &[None; 3], &ranges, 16).unwrap();
+        for world in &worlds {
+            assert_eq!(
+                Hand::from_cards(world.hole_cards[0][0], world.hole_cards[0][1]),
+                threes
+            );
+            assert_eq!(
+                Hand::from_cards(
+                    world.hole_cards[Seat::Opponent1.index()][0],
+                    world.hole_cards[Seat::Opponent1.index()][1]
+                ),
+                deuces
+            );
+            assert_eq!(
+                Hand::from_cards(
+                    world.hole_cards[Seat::Opponent2.index()][0],
+                    world.hole_cards[Seat::Opponent2.index()][1]
+                ),
+                kings
+            );
+        }
+        let expected = 1.0 / 16.0;
+        for world in &worlds {
+            assert!((world.weight - expected).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn pinned_sampling_is_seed_deterministic() {
+        let state = dealt_state();
+        let ranges: [Option<Range>; NUM_PLAYERS] = [None; NUM_PLAYERS];
+        let mut a = seeded_rng(53);
+        let mut b = seeded_rng(53);
+        assert_eq!(
+            WorldSampler::sample_with_pins(&mut a, &state, &[None; 3], &ranges, 12).unwrap(),
+            WorldSampler::sample_with_pins(&mut b, &state, &[None; 3], &ranges, 12).unwrap()
+        );
+    }
+
+    #[test]
+    fn pinned_sampling_rejects_zero_worlds() {
+        let state = dealt_state();
+        let mut rng = seeded_rng(54);
+        let result = WorldSampler::sample_with_pins(&mut rng, &state, &[None; 3], &[None; 3], 0);
+        assert!(matches!(result, Err(Error::Solver(_))));
     }
 
     #[test]

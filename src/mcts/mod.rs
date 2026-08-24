@@ -10,8 +10,9 @@ pub use world::{World, WorldSampler};
 
 use rand::Rng;
 
+use crate::card::Card;
 use crate::error::{Error, Result};
-use crate::game::{Action, GameState, Seat};
+use crate::game::{Action, GameState, NUM_PLAYERS, Seat};
 use crate::range::BetSize;
 use crate::range::hands::Range;
 
@@ -104,8 +105,70 @@ pub fn solve_with_candidates<R: Rng + ?Sized>(
 
     let budget = config.for_street(state.street());
     let worlds = WorldSampler::sample(rng, state, ranges, budget.worlds)?;
-    let baseline = state.stack(Seat::Hero);
+    let (per_world, nodes, max_tree_depth, rollout_actions) =
+        search_worlds(rng, state, worlds, budget, root_candidates)?;
+    finish_solve(
+        budget,
+        root_candidates,
+        per_world,
+        nodes,
+        max_tree_depth,
+        rollout_actions,
+        budget.worlds,
+    )
+}
 
+/// Solves one decision from an arbitrary seat's perspective.
+///
+/// The acting seat must already occupy the hero role (see
+/// [`GameState::rotated`]) — internally every check treats the hero slot as
+/// the actor. Every live seat's holding is drawn from its own range
+/// ([`WorldSampler::sample_with_pins`]); pins keep exact known cards (the
+/// analyzed hero's cards, or a bot's own deal). EVs are deltas from the
+/// acting seat's stack, exactly like [`solve`]'s are from the hero's.
+pub fn solve_for_seat<R: Rng + ?Sized>(
+    rng: &mut R,
+    state: &GameState,
+    pins: &[Option<[Card; 2]>; NUM_PLAYERS],
+    ranges: &[Option<Range>; NUM_PLAYERS],
+    config: &MctsConfig,
+    root_candidates: &[(Action, Option<BetSize>)],
+) -> Result<SolveResult> {
+    config.validate()?;
+    if state.is_hand_over() {
+        return Err(Error::Solver("cannot solve a hand that is over".into()));
+    }
+    if state.to_act() != Seat::Hero {
+        return Err(Error::Solver(
+            "seat-perspective solver requires the acting seat in the hero role".into(),
+        ));
+    }
+
+    let budget = config.for_street(state.street());
+    let worlds = WorldSampler::sample_with_pins(rng, state, pins, ranges, budget.worlds)?;
+    let (per_world, nodes, max_tree_depth, rollout_actions) =
+        search_worlds(rng, state, worlds, budget, root_candidates)?;
+    finish_solve(
+        budget,
+        root_candidates,
+        per_world,
+        nodes,
+        max_tree_depth,
+        rollout_actions,
+        budget.worlds,
+    )
+}
+
+/// Runs one isolated per-world search for every sampled world and returns the
+/// raw per-world values plus the realized search-effort telemetry.
+fn search_worlds<R: Rng + ?Sized>(
+    rng: &mut R,
+    state: &GameState,
+    worlds: Vec<World>,
+    budget: MctsConfig,
+    root_candidates: &[(Action, Option<BetSize>)],
+) -> Result<(Vec<PerWorld>, usize, usize, u64)> {
+    let baseline = state.stack(Seat::Hero);
     let mut per_world: Vec<PerWorld> = Vec::with_capacity(worlds.len());
     let mut total_nodes = 0usize;
     let mut max_tree_depth = 0usize;
@@ -132,7 +195,26 @@ pub fn solve_with_candidates<R: Rng + ?Sized>(
                 .collect(),
         ));
     }
+    Ok((
+        per_world,
+        total_nodes,
+        max_tree_depth,
+        total_rollout_actions,
+    ))
+}
 
+/// Merges per-world values into the final [`SolveResult`]: the
+/// range-weighted action EVs sorted best-first plus the effort summary.
+#[allow(clippy::too_many_arguments)]
+fn finish_solve(
+    budget: MctsConfig,
+    root_candidates: &[(Action, Option<BetSize>)],
+    per_world: Vec<PerWorld>,
+    nodes: usize,
+    max_tree_depth: usize,
+    rollout_actions: u64,
+    worlds: usize,
+) -> Result<SolveResult> {
     let combined = combine_world_values(&per_world)?;
     let mut actions: Vec<ActionValue> = root_candidates
         .iter()
@@ -154,12 +236,12 @@ pub fn solve_with_candidates<R: Rng + ?Sized>(
     actions.sort_by(|a, b| b.ev.total_cmp(&a.ev));
     Ok(SolveResult {
         actions,
-        worlds: worlds.len(),
+        worlds,
         iterations: budget.iterations,
         max_depth: budget.max_depth,
-        nodes: total_nodes,
+        nodes,
         max_tree_depth,
-        rollout_actions: total_rollout_actions,
+        rollout_actions,
     })
 }
 
@@ -512,6 +594,12 @@ mod tests {
         weights
     }
 
+    fn pinned(hand: Hand) -> Range {
+        let mut weights = [0.0f32; HAND_COUNT];
+        weights[hand.index()] = 1.0;
+        weights
+    }
+
     #[test]
     fn folding_has_zero_risk_and_bust_probability() {
         let state = river_facing_bet([
@@ -556,5 +644,146 @@ mod tests {
             elapsed.as_secs() < 10,
             "solver took {elapsed:?}, exceeds test budget"
         );
+    }
+
+    // ---------------------------------------------------- seat perspective
+
+    #[test]
+    fn solve_for_seat_grades_junk_against_aces_like_the_hero_solver() {
+        // The actor holds a junk 72o range against two pinned-AA ranges on
+        // the river facing a 100-chip bet: calling must lose money.
+        let state = river_facing_bet([
+            card(Rank::Seven, Suit::Diamonds),
+            card(Rank::Two, Suit::Clubs),
+        ]);
+        let junk = Hand::new(Rank::Seven, Rank::Two, false);
+        let ranges: [Option<Range>; NUM_PLAYERS] =
+            [Some(pinned(junk)), Some(pinned_aces()), Some(pinned_aces())];
+        let mut rng = seeded_rng(60);
+        let result = solve_for_seat(
+            &mut rng,
+            &state,
+            &[None; NUM_PLAYERS],
+            &ranges,
+            &MctsConfig::test(),
+            &candidates(&state),
+        )
+        .unwrap();
+        assert!(!result.actions.is_empty());
+        let call = ev_of(&result, Action::Call);
+        let fold = ev_of(&result, Action::Fold);
+        assert!(fold.abs() < 1.0, "folding loses nothing, got {fold}");
+        assert!(
+            call < fold - 50.0,
+            "dead hand must not call: call {call}, fold {fold}"
+        );
+        assert_eq!(
+            result.worlds,
+            MctsConfig::test()
+                .for_street(crate::game::Street::River)
+                .worlds
+        );
+    }
+
+    #[test]
+    fn solve_for_seat_is_seed_deterministic_and_sorted() {
+        let state = river_facing_bet([
+            card(Rank::Seven, Suit::Diamonds),
+            card(Rank::Two, Suit::Clubs),
+        ]);
+        let ranges: [Option<Range>; NUM_PLAYERS] = [None; NUM_PLAYERS];
+        let mut a = seeded_rng(61);
+        let mut b = seeded_rng(61);
+        let result_a = solve_for_seat(
+            &mut a,
+            &state,
+            &[None; NUM_PLAYERS],
+            &ranges,
+            &MctsConfig::test(),
+            &candidates(&state),
+        )
+        .unwrap();
+        let result_b = solve_for_seat(
+            &mut b,
+            &state,
+            &[None; NUM_PLAYERS],
+            &ranges,
+            &MctsConfig::test(),
+            &candidates(&state),
+        )
+        .unwrap();
+        assert_eq!(result_a, result_b);
+        for pair in result_a.actions.windows(2) {
+            assert!(pair[0].ev >= pair[1].ev, "actions not sorted by EV");
+        }
+        assert_eq!(result_a.actions.len(), candidates(&state).len());
+        assert!(result_a.actions.iter().all(|a| a.visits >= 1));
+    }
+
+    #[test]
+    fn solve_for_seat_pins_exact_actor_cards() {
+        // The actor's exact nut straight flush is a pin: every world plays it
+        // and calling must dominate folding.
+        let state = river_facing_bet([
+            card(Rank::Nine, Suit::Hearts),
+            card(Rank::King, Suit::Hearts),
+        ]);
+        let mut pins: [Option<[Card; 2]>; NUM_PLAYERS] = [None; NUM_PLAYERS];
+        pins[0] = Some(state.hero_cards());
+        let ranges: [Option<Range>; NUM_PLAYERS] = [None; NUM_PLAYERS];
+        let mut rng = seeded_rng(62);
+        let result = solve_for_seat(
+            &mut rng,
+            &state,
+            &pins,
+            &ranges,
+            &MctsConfig::test(),
+            &candidates(&state),
+        )
+        .unwrap();
+        let call = ev_of(&result, Action::Call);
+        let fold = ev_of(&result, Action::Fold);
+        assert!(
+            call > fold + 20.0,
+            "nut hand must prefer calling: call {call}, fold {fold}"
+        );
+    }
+
+    #[test]
+    fn solve_for_seat_rejects_non_actor_turns_and_finished_hands() {
+        let mut state = GameState::new(Seat::Opponent1, level());
+        state
+            .start_hand(&mut Deck::shuffled(&mut seeded_rng(63)))
+            .unwrap();
+        assert_eq!(state.to_act(), Seat::Hero, "the hero is first to act");
+        let mut rng = seeded_rng(64);
+        // The hero folds: the decision moves to Opponent 1, a non-hero seat.
+        state.apply_action(Action::Fold).unwrap();
+        assert_eq!(state.to_act(), Seat::Opponent1);
+        assert!(matches!(
+            solve_for_seat(
+                &mut rng,
+                &state,
+                &[None; NUM_PLAYERS],
+                &[None; NUM_PLAYERS],
+                &MctsConfig::test(),
+                &candidates(&state),
+            ),
+            Err(Error::Solver(_))
+        ));
+
+        state.apply_action(Action::Fold).unwrap();
+        assert!(state.is_hand_over());
+        assert!(matches!(
+            solve_for_seat(
+                &mut rng,
+                &state,
+                &[None; NUM_PLAYERS],
+                &[None; NUM_PLAYERS],
+                &MctsConfig::test(),
+                &candidates(&state),
+            ),
+            Err(Error::Solver(_))
+        ));
     }
 }

@@ -179,9 +179,21 @@ interface and coaches decision-making with a range-based solver.
   win ratio, all-ins, total profit, and net chips. Each tournament links to
   its detail page, which shows every hand (time, blinds, position, cards,
   all-in/showdown, invested vs collected chips, result, board) plus the
-  tournament's money outcome. Profit is real money — the buy-in and prize
+  tournament's money outcome. Profit is real money - the buy-in and prize
   come from the tournament-summary files PokerCraft exports next to the
   hands.
+- **Opponent-skill analysis & skill-graded bots:** the hand history page's
+  **Analyze imported opponents** button replays every opponent decision in
+  the last 1,000 imported hands and grades it against a seat-perspective
+  MCTS solve, scoring each played action's big-blind EV loss. The pooled
+  field average becomes one skill level (0..1, anchored at 5 BB lost per
+  decision) with a per-opponent breakdown and a background job with live
+  progress; per-hand results are cached in the database so re-runs are
+  incremental. Saving the **bot template** makes both local bots play via
+  their own MCTS solves with a skill-tempered action spread (skill 1 always
+  takes the solver-best action; weaker skills leak big blinds like the
+  analyzed field), and the table header chip — **You 0.77 · Bots 0.48** —
+  compares your lifetime skill against the field on the same scale.
 - **GGPoker frontend:** a server-rendered GGPoker table skin with the
   Spin and Gold look — dark-teal oval felt on a wooden rail, three fixed seat
   pods (opponents top-left/top-right, hero bottom-center) that stay in place
@@ -324,6 +336,26 @@ hands that were already imported are skipped, so you can re-scan whenever
 new zips arrive. The results page shows the stats of only the hands imported
 by that scan, and the history page keeps a running tournament listing (latest
 first) with your total profit, win ratios, and per-tournament detail pages.
+
+### Analyzing your opponents & training the bots against them
+
+Right next to the scan button sits **Analyze imported opponents**. It replays
+every opponent decision in your last 1,000 imported hands, solves each spot
+from the opponent's perspective with the MCTS solver, and measures how many
+big blinds the played action gave up against the best one. The pooled average
+over both opponent seats becomes a single **field skill** (0 = leaks
+5 BB/decision, 1 = solver-perfect); the analysis page shows the per-opponent
+breakdown, the hands it skipped and why. Because a full pass is solver work,
+the job runs in the background with a live progress counter — already-analyzed
+hands are stored and skipped, so re-running only grades what is new. Press
+**Use field skill … as the bot template** to save it: both local bots now pick
+every decision through an MCTS solve of their own and then choose among the
+candidate EVs with a skill-tempered spread — at skill 1 they always take the
+best-EV action, and lower skills leak big blinds the way the analyzed field
+did. The table header shows both sides on the same scale next to the EV graph:
+**You 0.77 · Bots 0.48** compares your lifetime decision history against the
+stored field template whenever a table is open. Clear the template from the
+hand history page to restore the default placeholder opponents.
 
 ### Running the tests
 

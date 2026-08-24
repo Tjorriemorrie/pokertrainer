@@ -19,7 +19,7 @@ pub fn dashboard_page(active: Option<&ActiveSummary>) -> String {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Poker Trainer</title>
-<link rel="stylesheet" href="/assets/style.css?v=12">
+<link rel="stylesheet" href="/assets/style.css?v=13">
 </head>
 <body class="pt-body">
 <header class="pt-topwrap">
@@ -79,24 +79,27 @@ pub fn dashboard_page(active: Option<&ActiveSummary>) -> String {
     html
 }
 
-/// The full table shell page: GGPoker-dark skin, top-bar lifetime EV chart, the
-/// table controls (finish, tournament history, sound toggle), the table
-/// column docked top-left, and the coach-feedback panel beside it (never
-/// covering the table).
-pub fn play_page() -> String {
-    r#"<!doctype html>
+/// The full table shell page: GGPoker-dark skin, top-bar lifetime EV chart (with
+/// the hero-vs-field skill chip beside it), the table controls (finish,
+/// tournament history, sound toggle), the table column docked top-left, and the
+/// coach-feedback panel beside it (never covering the table).
+pub fn play_page(you: Option<f64>, bots: Option<f64>) -> String {
+    let skill_chip = skill_chip(you, bots);
+    format!(
+        r#"<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Poker Trainer</title>
-<link rel="stylesheet" href="/assets/style.css?v=12">
+<link rel="stylesheet" href="/assets/style.css?v=13">
 </head>
 <body class="pt-body">
   <header class="pt-topwrap">
     <a href="/" class="pt-link">Dashboard</a>
     <div class="pt-brand">Poker Trainer</div>
     <canvas id="ev-chart" width="1200" height="48" class="ev-chart"></canvas>
+    {skill_chip}
     <div id="ws-status" class="status-wait">connecting…</div>
     <button id="sound-toggle" class="pt-icon-btn" type="button" title="Toggle table sounds">🔊</button>
     <a href="/tournaments" class="pt-link">Tournament history</a>
@@ -128,8 +131,34 @@ pub fn play_page() -> String {
   </div>
   <script src="/assets/app.js?v=7"></script>
 </body>
-</html>"#
-        .to_string()
+</html>"#,
+        skill_chip = if skill_chip.is_empty() {
+            String::new()
+        } else {
+            format!("    {skill_chip}\n")
+        }
+    )
+}
+
+/// The top-bar chip comparing the hero's lifetime skill against the bot
+/// template's field skill, on the same 0..1 scale. Empty when the app has no
+/// analytics store to derive either number from.
+fn skill_chip(you: Option<f64>, bots: Option<f64>) -> String {
+    let (you, bots) = match (you, bots) {
+        (None, None) => return String::new(),
+        (you, bots) => (format_skill(you), format_skill(bots)),
+    };
+    format!(
+        r#"<div class="pt-skill-chip" title="Skill on a 0..1 scale: how close your decisions average to the solver vs the imported opponents both bots play like. Generate the field skill under Hand history → Analyze imported opponents.">You <b>{you}</b> · Bots <b>{bots}</b></div>"#
+    )
+}
+
+/// Formats one skill value for the header chip: two decimals, or an em dash
+/// when the value does not exist yet.
+fn format_skill(skill: Option<f64>) -> String {
+    skill
+        .map(|value| format!("{value:.2}"))
+        .unwrap_or_else(|| "—".to_string())
 }
 
 /// The finished-tournament history page: a paginated listing (newest first)
@@ -148,7 +177,7 @@ pub fn tournaments_page(
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Poker Trainer — Tournaments</title>
-<link rel="stylesheet" href="/assets/style.css?v=12">
+<link rel="stylesheet" href="/assets/style.css?v=13">
 </head>
 <body class="pt-body">
 <header class="pt-topwrap">
@@ -278,7 +307,7 @@ pub fn tournament_detail_page(detail: &TournamentDetail) -> String {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Poker Trainer — Tournament #{}</title>
-<link rel="stylesheet" href="/assets/style.css?v=12">
+<link rel="stylesheet" href="/assets/style.css?v=13">
 </head>
 <body class="pt-body">
 <header class="pt-topwrap">
@@ -349,12 +378,14 @@ pub fn tournament_detail_page(detail: &TournamentDetail) -> String {
     )
 }
 
-/// The GGPoker hand-history page: the scan trigger, the lifetime
+/// The GGPoker hand-history page: the scan trigger, the opponent-skill
+/// analyzer entry and the current bot template, the lifetime
 /// profit/win-rate aggregates, and one row per imported tournament (newest
 /// first) linking to its hand-level detail page.
 pub fn history_page(
     stats: &crate::hh::OverallStats,
     tournaments: &[crate::hh::TournamentListing],
+    template: Option<&crate::opponent_analysis::DrillTemplate>,
 ) -> String {
     let tournament_win_ratio = pct(stats.tournaments_won, stats.tournaments);
     let hand_win_ratio = pct(stats.hands_won, stats.hands);
@@ -367,7 +398,7 @@ pub fn history_page(
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Poker Trainer — Hand history</title>
-<link rel="stylesheet" href="/assets/style.css?v=12">
+<link rel="stylesheet" href="/assets/style.css?v=13">
 </head>
 <body class="pt-body">
 <header class="pt-topwrap">
@@ -415,12 +446,21 @@ pub fn history_page(
         r#"<section class="pt-detail">
   <div class="pt-detail-head">
     <h2 class="pt-hh-title">GGPoker hand histories</h2>
-    <form method="post" action="/history/scan">
-      <button class="action-btn pt-confirm" type="submit">Scan for new hand histories</button>
-    </form>
+    <div class="pt-hh-actions">
+      <form method="post" action="/history/scan">
+        <button class="action-btn pt-confirm" type="submit">Scan for new hand histories</button>
+      </form>
+      <form method="post" action="/history/analyze-opponents">
+        <button class="action-btn pt-confirm" type="submit">Analyze imported opponents</button>
+      </form>
+    </div>
   </div>
   <p class="pt-detail-meta">Reads the PokerCraft zip exports in the history/ folder and imports the hands into
   the database. Hands that were already imported are skipped, so re-scanning is always safe.</p>
+  <p class="pt-detail-meta">Analyze imported opponents grades every opponent decision in your last
+  1,000 imported hands against the solver and turns the average big-blind loss into the field skill
+  level both bots play with.</p>
+  {template_html}
   <div class="pt-stat-grid">
     {all_cards}
   </div>
@@ -434,9 +474,29 @@ pub fn history_page(
 </html>"#,
         tournaments_html(tournaments),
         all_cards = all_cards,
+        template_html = template_html(template),
     ));
 
     html
+}
+
+/// The chip showing the stored bot template (and its clear action) when one
+/// exists.
+fn template_html(template: Option<&crate::opponent_analysis::DrillTemplate>) -> String {
+    let Some(template) = template else {
+        return String::new();
+    };
+    format!(
+        r#"<div class="pt-template-chip"><span>Bots trained on: {} — skill <b>{:.2}</b> ({:.2} BB lost/decision over {} decisions)</span>
+  <form method="post" action="/history/clear-template">
+    <button class="pt-link-btn" type="submit">Clear template</button>
+  </form>
+</div>"#,
+        escape(&template.label),
+        template.skill,
+        template.avg_ev_loss_bb,
+        template.decisions,
+    )
 }
 
 /// The tournament listing table: one row per imported tournament, newest
@@ -540,7 +600,7 @@ pub fn history_scan_result_page(outcome: &crate::hh::ImportOutcome) -> String {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Poker Trainer — Scan results</title>
-<link rel="stylesheet" href="/assets/style.css?v=12">
+<link rel="stylesheet" href="/assets/style.css?v=13">
 </head>
 <body class="pt-body">
 <header class="pt-topwrap">
@@ -588,6 +648,137 @@ pub fn history_scan_result_page(outcome: &crate::hh::ImportOutcome) -> String {
     )
 }
 
+/// The opponent-analysis page shell: a polling container filled by
+/// [`analysis_status_html`] fragments fetched from the status endpoint.
+pub fn analysis_page() -> String {
+    r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Poker Trainer — Opponent analysis</title>
+<link rel="stylesheet" href="/assets/style.css?v=13">
+</head>
+<body class="pt-body">
+<header class="pt-topwrap">
+  <h1 class="pt-page-title">Opponent analysis</h1>
+  <a href="/history" class="pt-link">Hand history</a>
+  <a href="/" class="pt-link">Dashboard</a>
+</header>
+<main class="pt-main">
+<section class="pt-detail">
+  <div class="pt-detail-head"><h2 class="pt-hh-title">Field skill</h2></div>
+  <p class="pt-detail-meta">Every opponent decision in your last 1,000 imported hands is replayed and
+  graded against the solver; the pooled average big-blind loss becomes the field skill. Save it as
+  the template the two local bots play with, and compare it against your own lifetime skill in the
+  table header.</p>
+  <div id="analysis-status"><div class="pt-empty">Loading…</div></div>
+</section>
+</main>
+<script>
+(function () {
+  var box = document.getElementById('analysis-status');
+  function poll() {
+    fetch('/history/analyze-status')
+      .then(function (r) { return r.json(); })
+      .then(function (status) {
+        box.innerHTML = status.html;
+        if (status.state === 'running') { setTimeout(poll, 1500); }
+      })
+      .catch(function () { box.innerHTML = '<div class="pt-empty">Status unavailable.</div>'; });
+  }
+  poll();
+})();
+</script>
+</body>
+</html>"#
+        .to_string()
+}
+
+/// The status fragment swapped into the analysis page: idle nudge, live
+/// progress, or the finished report with the save-template action.
+pub fn analysis_status_html(status: &crate::opponent_analysis::JobState) -> String {
+    use crate::opponent_analysis::JobState;
+
+    match status {
+        JobState::Idle => r#"<div class="pt-empty">No analysis running.
+  <a class="pt-link" href="/history">Back to hand history</a> and press
+  <b>Analyze imported opponents</b> to start.</div>"#
+            .to_string(),
+        JobState::Running {
+            hands_done,
+            hands_total,
+        } => {
+            let pct = if *hands_total == 0 {
+                0.0
+            } else {
+                (*hands_done as f64 * 100.0) / (*hands_total as f64)
+            };
+            format!(
+                r#"<div class="pt-status-running">Analyzing opponents — hand {} of {} ({pct:.0}%).
+Grading one decision per possible opponent action is solver work, so a full pass can take a few minutes; already-analyzed hands are skipped.</div>"#,
+                hands_done, hands_total,
+            )
+        }
+        JobState::Done(report) => {
+            let card = |label: &str, value: String| -> String {
+                format!(
+                    r#"<div class="pt-stat-card"><span>{}</span><b>{}</b></div>"#,
+                    label,
+                    escape(&value)
+                )
+            };
+            let mut html = format!(
+                r#"<div class="pt-stat-grid">
+  {hands}{graded}{failed}{decisions}{avg}{skill}
+</div>"#,
+                hands = card("Hands in window", report.hands_total.to_string()),
+                graded = card("Hands graded", report.hands_graded.to_string()),
+                failed = card("Hands skipped", report.hands_failed.to_string()),
+                decisions = card("Opponent decisions", report.decisions.to_string()),
+                avg = card(
+                    "Avg BB lost per decision",
+                    format!("{:.3}", report.avg_ev_loss_bb)
+                ),
+                skill = card("Field skill", format!("{:.2}", report.skill)),
+            );
+            if !report.players.is_empty() {
+                html.push_str(
+                    r#"<table class="pt-hh-table">
+<tr><th>Opponent</th><th>Decisions</th><th>Avg BB lost</th></tr>"#,
+                );
+                for player in &report.players {
+                    html.push_str(&format!(
+                        "<tr><td>{}</td><td>{}</td><td>{:.3}</td></tr>",
+                        escape(&player.name),
+                        player.decisions,
+                        player.avg_ev_loss_bb
+                    ));
+                }
+                html.push_str("</table>");
+            }
+            if !report.problems.is_empty() {
+                html.push_str(r#"<div class="pt-hh-failures">Skipped hands:<ul>"#);
+                for problem in &report.problems {
+                    html.push_str(&format!("<li>{}</li>", escape(problem)));
+                }
+                html.push_str("</ul></div>");
+            }
+            if report.decisions > 0 {
+                html.push_str(&format!(
+                    r#"<form method="post" action="/history/save-template" class="pt-save-template">
+  <button class="action-btn pt-confirm" type="submit">Use field skill {:.2} as the bot template</button>
+</form>
+<p class="pt-detail-meta">Both local bots will make their decisions at this skill level — press
+<b>Start tournament</b> on the dashboard and the header chip shows how you compare.</p>"#,
+                    report.skill
+                ));
+            }
+            html
+        }
+    }
+}
+
 /// One imported tournament's detail page: the stored summary, its aggregate
 /// stats, and every hand newest first.
 pub fn history_tournament_detail_page(detail: &crate::hh::TournamentDetail) -> String {
@@ -613,7 +804,7 @@ pub fn history_tournament_detail_page(detail: &crate::hh::TournamentDetail) -> S
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Poker Trainer — {}</title>
-<link rel="stylesheet" href="/assets/style.css?v=12">
+<link rel="stylesheet" href="/assets/style.css?v=13">
 </head>
 <body class="pt-body">
 <header class="pt-topwrap">
@@ -1480,7 +1671,7 @@ mod tests {
 
     #[test]
     fn play_page_shell_points_at_the_ws_client() {
-        let page = play_page();
+        let page = play_page(None, None);
         assert!(page.contains("<title>Poker Trainer</title>"));
         assert!(page.contains(r#"<div id="table"></div>"#));
         assert!(page.contains(r#"<div id="feedback">"#));
@@ -1502,7 +1693,7 @@ mod tests {
             "the solver depth badge lives in the action dock, not the header shell"
         );
         assert!(
-            page.contains(r#"/assets/style.css?v=12"#),
+            page.contains(r#"/assets/style.css?v=13"#),
             "the stylesheet link is versioned so browsers drop stale cached CSS"
         );
         assert!(
@@ -2520,7 +2711,7 @@ mod tests {
 
     #[test]
     fn history_page_renders_the_scan_button_stats_and_listing() {
-        let page = history_page(&hh_stats(), &hh_listing());
+        let page = history_page(&hh_stats(), &hh_listing(), None);
         assert!(page.contains("<title>Poker Trainer — Hand history</title>"));
         assert!(
             page.contains(r#"action="/history/scan""#)
@@ -2542,7 +2733,7 @@ mod tests {
 
     #[test]
     fn history_page_has_an_empty_state_without_tournaments() {
-        let page = history_page(&hh_stats(), &[]);
+        let page = history_page(&hh_stats(), &[], None);
         assert!(page.contains("No imported hand histories yet"));
         assert!(!page.contains("pt-hh-table"));
     }
@@ -2553,7 +2744,7 @@ mod tests {
         stats.net_chips = -15;
         let mut listing = hh_listing();
         listing[0].tournament.name = r#"<script>"evil"</script>"#.to_string();
-        let page = history_page(&stats, &listing);
+        let page = history_page(&stats, &listing, None);
         assert!(!page.contains(r#"<script>"evil""#));
         assert!(page.contains("&lt;script&gt;"));
     }
@@ -2701,5 +2892,106 @@ mod tests {
         assert_eq!(round1(66.666), 66.7);
         assert_eq!(yes_no(true), "yes");
         assert_eq!(yes_no(false), "—");
+    }
+
+    // ------------------------------------------------------- opponent skill
+
+    fn template_fixture() -> crate::opponent_analysis::DrillTemplate {
+        crate::opponent_analysis::DrillTemplate {
+            label: "Imported field (132 decisions)".to_string(),
+            skill: 0.62,
+            avg_ev_loss_bb: 0.4,
+            decisions: 132,
+        }
+    }
+
+    #[test]
+    fn play_page_shows_the_hero_vs_field_skill_chip() {
+        let page = play_page(Some(0.71), Some(0.62));
+        assert!(page.contains("pt-skill-chip"), "{page}");
+        assert!(
+            page.contains("You <b>0.71</b> · Bots <b>0.62</b>"),
+            "{page}"
+        );
+
+        let missing = play_page(None, Some(0.62));
+        assert!(
+            missing.contains("You <b>—</b> · Bots <b>0.62</b>"),
+            "{missing}"
+        );
+
+        let none = play_page(None, None);
+        assert!(!none.contains("pt-skill-chip"), "no store, no chip: {none}");
+    }
+
+    #[test]
+    fn history_page_offers_the_analyzer_and_the_current_template() {
+        let page = history_page(&hh_stats(), &hh_listing(), None);
+        assert!(
+            page.contains(r#"action="/history/analyze-opponents""#)
+                && page.contains("Analyze imported opponents"),
+            "the analyzer button sits next to the scan button: {page}"
+        );
+        assert!(
+            !page.contains("pt-template-chip"),
+            "no template means no chip: {page}"
+        );
+
+        let template = template_fixture();
+        let page = history_page(&hh_stats(), &[], Some(&template));
+        assert!(page.contains("Bots trained on: Imported field (132 decisions)"));
+        assert!(page.contains("skill <b>0.62</b>"), "{page}");
+        assert!(page.contains(r#"action="/history/clear-template""#));
+    }
+
+    fn report_fixture() -> crate::opponent_analysis::FieldReport {
+        crate::opponent_analysis::FieldReport {
+            hands_total: 100,
+            hands_graded: 95,
+            hands_failed: 5,
+            decisions: 212,
+            avg_ev_loss_bb: 0.4,
+            skill: 0.62,
+            players: vec![crate::opponent_analysis::PlayerRow {
+                name: "14c11a2a".to_string(),
+                decisions: 120,
+                avg_ev_loss_bb: 0.3,
+            }],
+            problems: vec!["hand SG1: engine call amount 40 differs from the real 20".to_string()],
+        }
+    }
+
+    #[test]
+    fn analysis_page_shell_polls_the_status_endpoint() {
+        let page = analysis_page();
+        assert!(page.contains("<title>Poker Trainer — Opponent analysis</title>"));
+        assert!(page.contains("/history/analyze-status"));
+        assert!(page.contains("id=\"analysis-status\""), "{page}");
+    }
+
+    #[test]
+    fn analysis_status_html_covers_every_job_state() {
+        use crate::opponent_analysis::{FieldReport, JobState};
+
+        let idle = analysis_status_html(&JobState::Idle);
+        assert!(idle.contains("Analyze imported opponents"), "{idle}");
+
+        let running = analysis_status_html(&JobState::Running {
+            hands_done: 30,
+            hands_total: 100,
+        });
+        assert!(running.contains("hand 30 of 100"), "{running}");
+
+        let done = analysis_status_html(&JobState::Done(report_fixture()));
+        assert!(done.contains("Hands in window</span><b>100</b>"), "{done}");
+        assert!(done.contains("Field skill</span><b>0.62</b>"), "{done}");
+        assert!(done.contains("14c11a2a"), "{done}");
+        assert!(done.contains("0.300"), "{done}");
+        assert!(done.contains(r#"action="/history/save-template""#));
+        assert!(done.contains("engine call amount 40 differs"), "{done}");
+
+        // A report without graded decisions never offers a save action.
+        let empty = analysis_status_html(&JobState::Done(FieldReport::empty()));
+        assert!(!empty.contains("save-template"), "{empty}");
     }
 }

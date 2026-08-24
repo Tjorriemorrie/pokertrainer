@@ -215,6 +215,7 @@ mod tests {
             hand_no: 1,
             action_no: 0,
             log: vec!["— Hand #1 — blinds 10/20".into()],
+            template_skill: None,
             opponents: crate::snapshot::OpponentCountersSnapshot {
                 hands: [1, 1],
                 vpip: [0, 0],

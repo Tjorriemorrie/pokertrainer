@@ -1,11 +1,149 @@
+use rand::Rng;
+
 use crate::game::{Action, GameState, Seat, Street};
+use crate::mcts::{self, MctsConfig};
+use crate::range::BetSize;
 
 /// Number of opponent seats (everyone but the hero).
-const NUM_OPPONENTS: usize = 2;
+pub const NUM_OPPONENTS: usize = 2;
 
 /// Completed hands needed before the read graduates from the small-sample
 /// disclaimer to an actual profile.
-const MIN_HANDS_FOR_READ: usize = 5;
+pub const MIN_HANDS_FOR_READ: usize = 5;
+
+/// The field skill template the two bots play with: a single 0..1 level
+/// score where 1 plays solver-perfect and 0 leaks big blinds on nearly every
+/// decision. Derived from the opponent-skill analysis of the imported hands.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct OpponentTemplate {
+    pub skill: f64,
+}
+
+impl OpponentTemplate {
+    /// Clamps a measured field skill into the valid 0..1 band.
+    pub fn new(skill: f64) -> Self {
+        Self {
+            skill: skill.clamp(0.0, 1.0),
+        }
+    }
+}
+
+/// How many chips of EV spread separate the good and the bad action at
+/// skill 0.5 — the softmax temperature scale for the skill-graded template.
+const SKILL_TAU_CHIPS: f64 = 20.0;
+
+/// Picks the bot's action at skill `template.skill`: one MCTS solve from the
+/// bot's seat, then a softmax over the candidate EVs whose temperature
+/// shrinks with skill — skill 1 plays the solver-best action, skill 0 is
+/// nearly uniform across the legal candidates. Solve failures fall back to
+/// the plain [`placeholder_action`] heuristic.
+pub fn template_action<R: Rng + ?Sized>(
+    rng: &mut R,
+    state: &GameState,
+    seat: Seat,
+    config: &MctsConfig,
+    template: &OpponentTemplate,
+) -> Action {
+    let rotated = state.rotated(seat);
+    let skill = template.skill.clamp(0.0, 1.0);
+    let solve = mcts::solve_for_seat(
+        rng,
+        &rotated,
+        &[None; crate::game::NUM_PLAYERS],
+        &[None; crate::game::NUM_PLAYERS],
+        config,
+        &mcts::candidates(&rotated),
+    );
+    let Ok(result) = solve else {
+        return placeholder_action(rng, state);
+    };
+    let selected = skill_selection(rng, &result.actions, skill);
+    selected.unwrap_or_else(|| placeholder_action(rng, state))
+}
+
+/// Weighted choice among the solver's candidate actions: EV-scaled softmax
+/// with a skill temperature. High skill concentrates mass on the best EV;
+/// low skill flattens into a near-uniform lottery (the BBs leak out exactly
+/// the way a weaker field plays).
+fn skill_selection<R: Rng + ?Sized>(
+    rng: &mut R,
+    values: &[crate::mcts::ActionValue],
+    skill: f64,
+) -> Option<Action> {
+    let first = values.first()?;
+    let tau = ((1.0 - skill) / skill * SKILL_TAU_CHIPS).clamp(1e-3, 1e6);
+    let max_ev = values
+        .iter()
+        .map(|value| value.ev)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let weights: Vec<f32> = values
+        .iter()
+        .map(|value| (((value.ev - max_ev) / tau).exp()) as f32)
+        .collect();
+    let index = crate::rng::weighted_index(rng, &weights).unwrap_or(0);
+    Some(values.get(index).unwrap_or(first).action)
+}
+
+/// Placeholder policy for the opponents: checks any free option, otherwise
+/// mostly calls, occasionally folds, and rarely min-raises; bets the minimum
+/// (sometimes half pot) when first in. Busted (zero-stack) seats always take
+/// the only actions available to them. Legality is guaranteed by construction.
+pub fn placeholder_action<R: Rng + ?Sized>(rng: &mut R, state: &GameState) -> Action {
+    let legal = state.legal_actions();
+    let seat = state.to_act();
+    let stack = state.stack(seat);
+
+    if stack == 0 {
+        return if legal.can_check {
+            Action::Check
+        } else {
+            Action::Fold
+        };
+    }
+
+    let roll: u32 = rng.random_range(0..100);
+
+    if legal.can_check {
+        if legal.can_bet && roll >= 85 {
+            let amount = if roll >= 93 {
+                BetSize::HalfPot.to_raise_to(
+                    state.total_pot(),
+                    0,
+                    state.blind_level().big_blind,
+                    legal.min_bet,
+                    state.stack(seat),
+                )
+            } else {
+                legal.min_bet
+            };
+            return if amount >= state.stack(seat) {
+                Action::AllIn
+            } else {
+                Action::Bet(amount)
+            };
+        }
+        return Action::Check;
+    }
+
+    let min_raise_to = legal.min_raise_to;
+    if roll < 15 {
+        return Action::Fold;
+    }
+    if roll < 75 || !legal.can_raise {
+        return if legal.can_call {
+            Action::Call
+        } else {
+            Action::AllIn
+        };
+    }
+    if legal.allows(Action::Raise(min_raise_to)) {
+        Action::Raise(min_raise_to)
+    } else if legal.can_all_in {
+        Action::AllIn
+    } else {
+        Action::Call
+    }
+}
 
 /// One opponent's session stats plus a point-in-time table snapshot, ready to
 /// render in the coach-feedback panel.
@@ -248,7 +386,9 @@ fn read(hands: usize, vpip_pct: f64, aggression: Option<f64>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::card::Deck;
     use crate::game::blinds::BlindLevel;
+    use crate::rng::seeded_rng;
 
     fn level() -> BlindLevel {
         BlindLevel::new(10, 20)
@@ -478,6 +618,112 @@ mod tests {
         assert_eq!(
             read(20, 80.0, Some(f64::INFINITY)),
             "Loose aggressive — in lots of pots and swinging."
+        );
+    }
+
+    // ------------------------------------------------------ field template
+
+    fn value(action: Action, ev: f64) -> crate::mcts::ActionValue {
+        crate::mcts::ActionValue {
+            action,
+            bucket: None,
+            ev,
+            variance: 0.0,
+            bust_prob: 0.0,
+            visits: 100,
+        }
+    }
+
+    fn dealt_state() -> GameState {
+        let mut state = GameState::new(Seat::Opponent1, BlindLevel::new(10, 20));
+        state
+            .start_hand(&mut Deck::shuffled(&mut seeded_rng(3)))
+            .unwrap();
+        state
+    }
+
+    #[test]
+    fn template_skill_is_clamped_into_the_band() {
+        assert_eq!(OpponentTemplate::new(0.62).skill, 0.62);
+        assert_eq!(OpponentTemplate::new(1.7).skill, 1.0);
+        assert_eq!(OpponentTemplate::new(-0.4).skill, 0.0);
+    }
+
+    #[test]
+    fn skill_selection_concentrates_on_the_best_ev_as_skill_grows() {
+        let values = vec![
+            value(Action::Call, 50.0),
+            value(Action::Fold, 0.0),
+            value(Action::AllIn, -50.0),
+        ];
+        let mut rng = seeded_rng(1);
+        for _ in 0..64 {
+            assert_eq!(
+                skill_selection(&mut rng, &values, 1.0),
+                Some(Action::Call),
+                "skill 1 always takes the solver-best action"
+            );
+        }
+        let mut seen: Vec<Action> = Vec::new();
+        for seed in 0..256u64 {
+            let mut rng = seeded_rng(seed);
+            let action = skill_selection(&mut rng, &values, 0.0).unwrap();
+            if !seen.contains(&action) {
+                seen.push(action);
+            }
+        }
+        assert_eq!(
+            seen.len(),
+            3,
+            "skill 0 scatters across every legal candidate: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn skill_selection_tolerates_empty_candidates() {
+        let mut rng = seeded_rng(2);
+        assert_eq!(skill_selection(&mut rng, &[], 0.5), None);
+    }
+
+    #[test]
+    fn template_action_is_always_legal_and_skill_graded() {
+        let state = dealt_state();
+        let config = MctsConfig::test();
+        for skill in [0.0, 0.3, 0.62, 1.0] {
+            let template = OpponentTemplate::new(skill);
+            for seed in 0..6u64 {
+                let mut rng = seeded_rng(seed);
+                let seat = state.to_act();
+                let action = template_action(&mut rng, &state, seat, &config, &template);
+                assert!(
+                    state.legal_actions().allows(action),
+                    "skill {skill} seed {seed} produced illegal {action:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn template_action_is_seed_deterministic() {
+        let state = dealt_state();
+        let template = OpponentTemplate::new(0.62);
+        let mut a = seeded_rng(7);
+        let mut b = seeded_rng(7);
+        assert_eq!(
+            template_action(
+                &mut a,
+                &state,
+                state.to_act(),
+                &MctsConfig::test(),
+                &template
+            ),
+            template_action(
+                &mut b,
+                &state,
+                state.to_act(),
+                &MctsConfig::test(),
+                &template
+            )
         );
     }
 }

@@ -43,6 +43,11 @@ pub struct HandResult {
     pub revealed: Vec<(Seat, [Card; 2], HandClass)>,
 }
 
+/// Reorders a three-slot array so new slot `n` takes old slot `order[n]`.
+fn shifted<T: Copy>(values: &[T; NUM_PLAYERS], order: &[usize; NUM_PLAYERS]) -> [T; NUM_PLAYERS] {
+    [values[order[0]], values[order[1]], values[order[2]]]
+}
+
 /// The full 3-max Spin and Gold game state, modeled from the hero's
 /// perspective: the hero's hole cards are always known, opponents' cards are
 /// hidden until showdown.
@@ -564,6 +569,39 @@ impl GameState {
         let mut state = self.clone_without_result();
         state.hole_cards = hole_cards;
         state.revealed = [true; NUM_PLAYERS];
+        state
+    }
+
+    /// A copy of the state re-labeled so `new_hero` occupies the hero seat,
+    /// preserving the acting order. The seat-perspective solver evaluates
+    /// another seat's decision by rotating it into the hero role; pots,
+    /// contributions, and betting flow are untouched.
+    pub fn rotated(&self, new_hero: Seat) -> GameState {
+        if new_hero == Seat::Hero {
+            return self.clone_without_result();
+        }
+        let offset = new_hero.index();
+        let order = [
+            offset,
+            (offset + 1) % NUM_PLAYERS,
+            (offset + 2) % NUM_PLAYERS,
+        ];
+        let shift = |old: usize| (old + NUM_PLAYERS - offset) % NUM_PLAYERS;
+        let mut state = self.clone_without_result();
+        state.stacks = shifted(&self.stacks, &order);
+        state.street_contrib = shifted(&self.street_contrib, &order);
+        state.total_contrib = shifted(&self.total_contrib, &order);
+        state.folded = shifted(&self.folded, &order);
+        state.all_in = shifted(&self.all_in, &order);
+        state.eliminated = shifted(&self.eliminated, &order);
+        state.acted = shifted(&self.acted, &order);
+        state.hole_cards = shifted(&self.hole_cards, &order);
+        state.revealed = shifted(&self.revealed, &order);
+        state.button = Seat::ALL[shift(self.button.index())];
+        state.to_act = Seat::ALL[shift(self.to_act.index())];
+        state.last_full_raise = self
+            .last_full_raise
+            .map(|seat| Seat::ALL[shift(seat.index())]);
         state
     }
 

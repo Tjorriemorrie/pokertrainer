@@ -77,6 +77,9 @@ pub async fn serve(config: ServerConfig, pool: Option<PgPool>) -> Result<()> {
         snapshot_interval: config.snapshot_interval,
         result_pause_ms: config.result_pause_ms,
         history_dir: crate::hh::default_history_dir(),
+        analysis: Arc::new(std::sync::Mutex::new(
+            crate::opponent_analysis::JobState::Idle,
+        )),
     });
     http::serve(config.bind, state).await
 }

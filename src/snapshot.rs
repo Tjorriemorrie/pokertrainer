@@ -89,8 +89,8 @@ pub struct OpponentCountersSnapshot {
 }
 
 /// Everything a resuming table needs: the game state, the remainder of the
-/// deck in dealing order, the hand/action counters, the action log, and the
-/// opponent HUD counters.
+/// deck in dealing order, the hand/action counters, the action log, the
+/// opponent HUD counters, and the bot skill template the opponents play with.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TournamentSnapshot {
     pub state: StateSnapshot,
@@ -99,6 +99,10 @@ pub struct TournamentSnapshot {
     pub action_no: u64,
     pub log: Vec<String>,
     pub opponents: OpponentCountersSnapshot,
+    /// The field skill template both bots use; `None` (old snapshots) keeps
+    /// the plain placeholder policy.
+    #[serde(default)]
+    pub template_skill: Option<f64>,
 }
 
 impl TournamentSnapshot {
@@ -259,6 +263,7 @@ mod tests {
             hand_no: 4,
             action_no: 7,
             log: vec!["You raise to 60".into()],
+            template_skill: None,
             opponents: OpponentCountersSnapshot {
                 hands: [4, 4],
                 vpip: [1, 2],
@@ -322,6 +327,74 @@ mod tests {
     }
 
     #[test]
+    fn old_snapshots_without_a_template_skill_still_deserialize() {
+        let json = r#"{"state":{"stacks":[500,480,500],"button":0,"blind_small":10,"blind_big":20,"street":0,"board":[],"hole_cards":[["As","Kd"],["2c","2h"],["7s","8s"]],"revealed":[true,false,false],"street_contrib":[10,20,0],"total_contrib":[10,20,0],"current_bet":20,"min_raise":20,"last_full_raise":null,"acted":[false,false,false],"folded":[false,false,false],"all_in":[false,false,false],"eliminated":[false,false,false],"to_act":0,"hand_over":false,"hand_result":null},"deck":[],"hand_no":1,"action_no":0,"log":[],"opponents":{"hands":[1,1],"vpip":[0,0],"pfr":[0,0],"faced_bet":[0,0],"folded_to_bet":[0,0],"postflop_bets":[0,0],"postflop_calls":[0,0],"vpip_seen":[false,false],"pfr_seen":[false,false]}}"#;
+        let snapshot: TournamentSnapshot = serde_json::from_str(json).unwrap();
+        assert_eq!(snapshot.template_skill, None);
+        assert_eq!(snapshot.hand_no, 1);
+
+        snapshot.to_json().unwrap();
+    }
+
+    #[test]
+    fn template_skill_survives_the_json_round_trip() {
+        let mut snapshot = TournamentSnapshot {
+            state: StateSnapshot {
+                stacks: [500, 480, 500],
+                button: 0,
+                blind_small: 10,
+                blind_big: 20,
+                street: 0,
+                board: Vec::new(),
+                hole_cards: vec![
+                    ["As".into(), "Kd".into()],
+                    ["2c".into(), "2h".into()],
+                    ["7s".into(), "8s".into()],
+                ],
+                revealed: [true, false, false],
+                street_contrib: [10, 20, 0],
+                total_contrib: [10, 20, 0],
+                current_bet: 20,
+                min_raise: 20,
+                last_full_raise: None,
+                acted: [false, false, false],
+                folded: [false, false, false],
+                all_in: [false, false, false],
+                eliminated: [false, false, false],
+                to_act: 0,
+                hand_over: false,
+                hand_result: None,
+            },
+            deck: Vec::new(),
+            hand_no: 3,
+            action_no: 0,
+            log: Vec::new(),
+            opponents: OpponentCountersSnapshot {
+                hands: [1, 1],
+                vpip: [0, 0],
+                pfr: [0, 0],
+                faced_bet: [0, 0],
+                folded_to_bet: [0, 0],
+                postflop_bets: [0, 0],
+                postflop_calls: [0, 0],
+                vpip_seen: [false, false],
+                pfr_seen: [false, false],
+            },
+            template_skill: Some(0.62),
+        };
+        let json = snapshot.to_json().unwrap();
+        let back = TournamentSnapshot::from_json(&json).unwrap();
+        assert_eq!(back.template_skill, Some(0.62));
+
+        // A corrupt `all_in` marker must not deserialize silently.
+        let bad = json.replace(
+            r#""all_in":[false,false,false]"#,
+            r#""all_in":[false,false,"x"]"#,
+        );
+        assert!(TournamentSnapshot::from_json(&bad).is_err());
+    }
+
+    #[test]
     fn summaries_surface_the_dashboard_facts() {
         let snapshot = TournamentSnapshot {
             state: StateSnapshot {
@@ -354,6 +427,7 @@ mod tests {
             hand_no: 12,
             action_no: 9,
             log: Vec::new(),
+            template_skill: None,
             opponents: OpponentCountersSnapshot {
                 hands: [12, 12],
                 vpip: [1, 2],

@@ -1220,3 +1220,58 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
 
 .pt-hh-failures ul { margin: 0.4rem 0 0.2rem; padding-left: 1.2rem; }
 .pt-hh-failures li { margin: 0.15rem 0; word-break: break-all; }
+
+.pt-hh-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.pt-template-chip {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  margin: 0.6rem 0;
+  padding: 0.5rem 0.9rem;
+  background: #1c1917;
+  border: 1px solid #44403c;
+  border-radius: 8px;
+  color: #d6d3d1;
+  font-size: 0.85rem;
+}
+
+.pt-template-chip b { color: #fbbf24; }
+
+.pt-link-btn {
+  background: none;
+  border: none;
+  color: #fca5a5;
+  text-decoration: underline;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.pt-skill-chip {
+  white-space: nowrap;
+  padding: 0.15rem 0.6rem;
+  border: 1px solid #57534e;
+  border-radius: 999px;
+  color: #d6d3d1;
+  font-size: 0.8rem;
+}
+
+.pt-skill-chip b { color: #fbbf24; }
+
+.pt-status-running {
+  padding: 0.75rem 1rem;
+  background: #1c1917;
+  border: 1px solid #44403c;
+  border-radius: 8px;
+  color: #fde68a;
+}
+
+.pt-save-template {
+  margin: 0.8rem 0 0;
+}

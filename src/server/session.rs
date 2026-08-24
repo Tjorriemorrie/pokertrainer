@@ -1,5 +1,3 @@
-use rand::Rng;
-
 use crate::analytics::{PendingDecision, PendingHandResult};
 use crate::blunder::{BlunderConfig, Tracker};
 use crate::card::{Card, Deck};
@@ -8,8 +6,9 @@ use crate::error::{Error, Result};
 use crate::game::blinds::BLIND_SCHEDULE;
 use crate::game::{Action, ActionOutcome, GameState, HandEndReason, Seat, Street};
 use crate::mcts::MctsConfig;
-use crate::opponent::{OpponentSnapshot, OpponentTracker};
-use crate::range::BetSize;
+use crate::opponent::{
+    OpponentSnapshot, OpponentTemplate, OpponentTracker, placeholder_action, template_action,
+};
 use crate::range::hands::{HAND_COUNT, Range};
 use crate::rng::SeededRng;
 use crate::server::views;
@@ -104,6 +103,9 @@ pub struct TableSession {
     mcts: MctsConfig,
     survival: SurvivalConfig,
     ranges: [Range; 2],
+    /// The field skill template the two bots play with; `None` falls back to
+    /// the placeholder heuristic.
+    template: Option<OpponentTemplate>,
     hand_no: u64,
     action_no: u64,
     log: Vec<String>,
@@ -132,6 +134,7 @@ impl TableSession {
         mcts: MctsConfig,
         survival: SurvivalConfig,
         blunder: BlunderConfig,
+        template: Option<OpponentTemplate>,
     ) -> Self {
         let mut rng = crate::rng::seeded_rng(seed);
         let deck = Deck::shuffled(&mut rng);
@@ -141,6 +144,7 @@ impl TableSession {
             mcts,
             survival,
             ranges: uniform_ranges(),
+            template,
             hand_no: 0,
             action_no: 0,
             log: Vec::new(),
@@ -157,6 +161,7 @@ impl TableSession {
     }
 
     /// Continues a session from an already-dealt state (used by tests).
+    #[allow(clippy::too_many_arguments)]
     pub fn resume(
         state: GameState,
         deck: Deck,
@@ -165,6 +170,7 @@ impl TableSession {
         mcts: MctsConfig,
         survival: SurvivalConfig,
         blunder: BlunderConfig,
+        template: Option<OpponentTemplate>,
     ) -> Self {
         Self {
             state,
@@ -172,6 +178,7 @@ impl TableSession {
             mcts,
             survival,
             ranges: uniform_ranges(),
+            template,
             hand_no,
             action_no: 0,
             log: Vec::new(),
@@ -218,6 +225,7 @@ impl TableSession {
             mcts,
             survival,
             ranges: uniform_ranges(),
+            template: snapshot.template_skill.map(OpponentTemplate::new),
             hand_no: snapshot.hand_no,
             action_no: snapshot.action_no,
             log,
@@ -254,6 +262,7 @@ impl TableSession {
             action_no: self.action_no,
             log: self.log.clone(),
             opponents: self.opponents.to_snapshot(),
+            template_skill: self.template.map(|template| template.skill),
         }
     }
 
@@ -518,7 +527,12 @@ impl TableSession {
             let actor = self.state.to_act();
             let legal = self.state.legal_actions();
             let call_amount = legal.call_amount;
-            let action = placeholder_action(&mut self.rng, &self.state);
+            let action = match self.template {
+                Some(template) => {
+                    template_action(&mut self.rng, &self.state, actor, &self.mcts, &template)
+                }
+                None => placeholder_action(&mut self.rng, &self.state),
+            };
             self.opponents
                 .record(actor, action, self.state.street(), legal.call_amount > 0);
             self.pump_actions.push(action);
@@ -862,67 +876,6 @@ pub fn apply_settled(
     Ok(outcome)
 }
 
-/// Placeholder policy for the opponents: checks any free option, otherwise
-/// mostly calls, occasionally folds, and rarely min-raises; bets the minimum
-/// (sometimes half pot) when first in. Busted (zero-stack) seats always take
-/// the only actions available to them. Legality is guaranteed by construction.
-pub fn placeholder_action<R: Rng + ?Sized>(rng: &mut R, state: &GameState) -> Action {
-    let legal = state.legal_actions();
-    let seat = state.to_act();
-    let stack = state.stack(seat);
-
-    if stack == 0 {
-        return if legal.can_check {
-            Action::Check
-        } else {
-            Action::Fold
-        };
-    }
-
-    let roll: u32 = rng.random_range(0..100);
-
-    if legal.can_check {
-        if legal.can_bet && roll >= 85 {
-            let amount = if roll >= 93 {
-                BetSize::HalfPot.to_raise_to(
-                    state.total_pot(),
-                    0,
-                    state.blind_level().big_blind,
-                    legal.min_bet,
-                    state.stack(seat),
-                )
-            } else {
-                legal.min_bet
-            };
-            return if amount >= state.stack(seat) {
-                Action::AllIn
-            } else {
-                Action::Bet(amount)
-            };
-        }
-        return Action::Check;
-    }
-
-    let min_raise_to = legal.min_raise_to;
-    if roll < 15 {
-        return Action::Fold;
-    }
-    if roll < 75 || !legal.can_raise {
-        return if legal.can_call {
-            Action::Call
-        } else {
-            Action::AllIn
-        };
-    }
-    if legal.allows(Action::Raise(min_raise_to)) {
-        Action::Raise(min_raise_to)
-    } else if legal.can_all_in {
-        Action::AllIn
-    } else {
-        Action::Call
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1045,7 +998,8 @@ mod tests {
 
     #[test]
     fn dealing_and_pumping_reach_the_hero() {
-        let mut session = TableSession::new(41, probe_config(), survival(), never_intercepts());
+        let mut session =
+            TableSession::new(41, probe_config(), survival(), never_intercepts(), None);
         session.deal_next_hand().unwrap();
         session.pump().unwrap();
         assert_eq!(session.state().to_act(), Seat::Hero);
@@ -1057,7 +1011,8 @@ mod tests {
     /// log shows exactly what every seat committed before any action.
     #[test]
     fn deals_log_the_button_and_the_blind_posts() {
-        let mut session = TableSession::new(41, probe_config(), survival(), never_intercepts());
+        let mut session =
+            TableSession::new(41, probe_config(), survival(), never_intercepts(), None);
         session.deal_next_hand().unwrap();
         let log = session.log();
         assert!(
@@ -1082,6 +1037,7 @@ mod tests {
             probe_config(),
             survival(),
             never_intercepts(),
+            None,
         );
         session.submit(Action::Fold).unwrap();
         session.advance_after_result().unwrap();
@@ -1122,6 +1078,7 @@ mod tests {
             probe_config(),
             survival(),
             never_intercepts(),
+            None,
         );
 
         // Preflop closes on the hero's bet: it is a "raise to" total, so the
@@ -1184,6 +1141,7 @@ mod tests {
             probe_config(),
             survival(),
             never_intercepts(),
+            None,
         );
         // Drive an all-in snowball deterministically: hero, Opponent 2, then
         // Opponent 1 all shove; the hand ends at showdown with 5 board cards.
@@ -1214,6 +1172,7 @@ mod tests {
             probe_config(),
             survival(),
             never_intercepts(),
+            None,
         );
         assert!(!session.pump().unwrap());
         assert_eq!(session.state().to_act(), Seat::Hero);
@@ -1231,6 +1190,7 @@ mod tests {
             probe_config(),
             survival(),
             never_intercepts(),
+            None,
         );
         assert_eq!(session.action_no(), 0);
         assert_eq!(
@@ -1266,6 +1226,7 @@ mod tests {
             probe_config(),
             survival(),
             never_intercepts(),
+            None,
         );
         let events = session.submit(Action::Fold).unwrap();
         assert!(
@@ -1307,6 +1268,7 @@ mod tests {
             probe_config(),
             survival(),
             never_intercepts(),
+            None,
         );
         session.submit(Action::Fold).unwrap();
 
@@ -1357,6 +1319,7 @@ mod tests {
             probe_config(),
             survival(),
             never_intercepts(),
+            None,
         );
         let events = session.submit(alternative).unwrap();
         assert!(
@@ -1405,6 +1368,7 @@ mod tests {
             probe_config(),
             survival(),
             always_intercepts(),
+            None,
         );
         session.prime_blunder_history(&[5.0]);
 
@@ -1520,6 +1484,7 @@ mod tests {
             probe_config(),
             survival(),
             always_intercepts(),
+            None,
         );
         session.prime_blunder_history(&[5.0]);
         let events = session.submit(probed.optimal.action).unwrap();
@@ -1546,6 +1511,7 @@ mod tests {
             probe_config(),
             survival(),
             never_intercepts(),
+            None,
         );
         // Snapshot what the session looked like before the rejected action.
         let to_act = session.state().to_act();
@@ -1633,6 +1599,7 @@ mod tests {
             probe_config(),
             survival(),
             never_intercepts(),
+            None,
         );
         let events = session.submit(Action::Call).unwrap();
         assert!(!events.is_empty());
@@ -1665,6 +1632,7 @@ mod tests {
             probe_config(),
             survival(),
             never_intercepts(),
+            None,
         );
         let events = session
             .submit_with_snapshot(Action::Fold, &snapshot)
@@ -1709,6 +1677,7 @@ mod tests {
             probe_config(),
             survival(),
             never_intercepts(),
+            None,
         );
         let events = session.submit_with_snapshot(played, &snapshot).unwrap();
         assert!(
@@ -1739,6 +1708,7 @@ mod tests {
             probe_config(),
             survival(),
             never_intercepts(),
+            None,
         );
         assert!(session.take_pump_actions().is_empty());
         session.submit(Action::Fold).unwrap();
@@ -1767,7 +1737,8 @@ mod tests {
 
     #[test]
     fn action_log_is_appended_and_trimmed() {
-        let mut session = TableSession::new(48, probe_config(), survival(), never_intercepts());
+        let mut session =
+            TableSession::new(48, probe_config(), survival(), never_intercepts(), None);
         session.deal_next_hand().unwrap();
         for _ in 0..40 {
             session.log_line("filler line".to_string());
@@ -1793,6 +1764,7 @@ mod tests {
             probe_config(),
             survival(),
             never_intercepts(),
+            None,
         );
         session.submit(Action::Call).unwrap();
         let log = session.log();
@@ -1843,6 +1815,7 @@ mod tests {
             probe_config(),
             survival(),
             never_intercepts(),
+            None,
         );
         session.submit(Action::Fold).unwrap();
         let log = session.log();
@@ -1867,6 +1840,7 @@ mod tests {
             probe_config(),
             survival(),
             never_intercepts(),
+            None,
         );
         session.submit(Action::Fold).unwrap();
 
@@ -1922,6 +1896,7 @@ mod tests {
             probe_config(),
             survival(),
             never_intercepts(),
+            None,
         );
         assert!(session.take_hand_results().is_empty());
         session.submit(Action::Fold).unwrap();
@@ -1958,6 +1933,7 @@ mod tests {
             probe_config(),
             survival(),
             never_intercepts(),
+            None,
         );
         assert_eq!(session.tournament_result(), None);
     }
@@ -1980,6 +1956,7 @@ mod tests {
             probe_config(),
             survival(),
             never_intercepts(),
+            None,
         );
         let result = session
             .tournament_result()
@@ -2005,6 +1982,7 @@ mod tests {
             probe_config(),
             survival(),
             never_intercepts(),
+            None,
         );
         assert!(
             matches!(session.advance_after_result(), Err(Error::Game(_))),
@@ -2029,6 +2007,7 @@ mod tests {
             probe_config(),
             survival(),
             never_intercepts(),
+            None,
         );
         assert_eq!(session.tournament_result(), None, "the hero is still in");
     }
@@ -2058,6 +2037,7 @@ mod tests {
             probe_config(),
             survival(),
             never_intercepts(),
+            None,
         );
         session.action_no = 15; // pinned via the test hook so the decision token round-trips
         session.log_line("You bet 40".to_string());
@@ -2141,6 +2121,7 @@ mod tests {
             probe_config(),
             survival(),
             never_intercepts(),
+            None,
         );
         session.submit(Action::Fold).unwrap();
         assert!(session.state().is_hand_over());
@@ -2189,6 +2170,7 @@ mod tests {
             probe_config(),
             survival(),
             never_intercepts(),
+            None,
         );
         session.hydrate_blunder(&[(1, 0.0), (1, 3.0), (2, 1.5)]);
         assert_eq!(session.blunder_tracker.recorded_actions(), 3);
@@ -2207,6 +2189,7 @@ mod tests {
             probe_config(),
             survival(),
             never_intercepts(),
+            None,
         );
         let mut snapshot = session.to_snapshot();
         snapshot.deck = vec!["Xx".to_string()];
