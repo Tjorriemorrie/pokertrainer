@@ -546,18 +546,8 @@ mod tests {
 
     // Database integration tests share `hero_sessions`/`hero_decisions`, so
     // they run one at a time to keep window-ordinal assertions deterministic.
-    fn database_url() -> String {
-        dotenvy::dotenv().ok();
-        match std::env::var("DATABASE_URL") {
-            Ok(url) if !url.is_empty() => url,
-            _ => panic!(
-                "DATABASE_URL is required for database integration tests; start PostgreSQL via pg.ps1"
-            ),
-        }
-    }
-
     async fn test_pool() -> PgPool {
-        crate::db::connect(&database_url()).await.unwrap()
+        crate::db::test_pool().await
     }
 
     async fn delete_sessions(pool: &PgPool, ids: &[i32]) {

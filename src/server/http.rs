@@ -545,14 +545,7 @@ mod tests {
         use crate::snapshot::{OpponentCountersSnapshot, StateSnapshot, TournamentSnapshot};
 
         let _guard = crate::analytics::DB_TEST_LOCK.lock().await;
-        dotenvy::dotenv().ok();
-        let database_url = match std::env::var("DATABASE_URL") {
-            Ok(url) if !url.is_empty() => url,
-            _ => panic!(
-                "DATABASE_URL is required for database integration tests; start PostgreSQL via pg.ps1"
-            ),
-        };
-        let pool = crate::db::connect(&database_url).await.unwrap();
+        let pool = crate::db::test_pool().await;
 
         // Free any pre-existing active row so the dashboard state is known.
         sqlx::query("DELETE FROM active_tournament WHERE single = TRUE")
@@ -664,14 +657,7 @@ mod tests {
         use crate::game::Street;
 
         let _guard = crate::analytics::DB_TEST_LOCK.lock().await;
-        dotenvy::dotenv().ok();
-        let database_url = match std::env::var("DATABASE_URL") {
-            Ok(url) if !url.is_empty() => url,
-            _ => panic!(
-                "DATABASE_URL is required for database integration tests; start PostgreSQL via pg.ps1"
-            ),
-        };
-        let pool = crate::db::connect(&database_url).await.unwrap();
+        let pool = crate::db::test_pool().await;
         let session_id = analytics::start_session(&pool).await.unwrap();
         analytics::persist_records(
             &pool,
@@ -718,14 +704,7 @@ mod tests {
         use crate::game::Street;
 
         let _guard = crate::analytics::DB_TEST_LOCK.lock().await;
-        dotenvy::dotenv().ok();
-        let database_url = match std::env::var("DATABASE_URL") {
-            Ok(url) if !url.is_empty() => url,
-            _ => panic!(
-                "DATABASE_URL is required for database integration tests; start PostgreSQL via pg.ps1"
-            ),
-        };
-        let pool = crate::db::connect(&database_url).await.unwrap();
+        let pool = crate::db::test_pool().await;
         // Real (or older) finished sessions may already exist; the listing
         // must stay newest-first, so the page math is derived relative to
         // them instead of assuming an empty database.
@@ -817,14 +796,7 @@ mod tests {
         use crate::game::Street;
 
         let _guard = crate::analytics::DB_TEST_LOCK.lock().await;
-        dotenvy::dotenv().ok();
-        let database_url = match std::env::var("DATABASE_URL") {
-            Ok(url) if !url.is_empty() => url,
-            _ => panic!(
-                "DATABASE_URL is required for database integration tests; start PostgreSQL via pg.ps1"
-            ),
-        };
-        let pool = crate::db::connect(&database_url).await.unwrap();
+        let pool = crate::db::test_pool().await;
         let session_id = analytics::start_session(&pool).await.unwrap();
         analytics::persist_records(
             &pool,
@@ -994,14 +966,7 @@ mod tests {
         use zip::write::SimpleFileOptions;
 
         let _guard = crate::analytics::DB_TEST_LOCK.lock().await;
-        dotenvy::dotenv().ok();
-        let database_url = match std::env::var("DATABASE_URL") {
-            Ok(url) if !url.is_empty() => url,
-            _ => panic!(
-                "DATABASE_URL is required for database integration tests; start PostgreSQL via pg.ps1"
-            ),
-        };
-        let pool = crate::db::connect(&database_url).await.unwrap();
+        let pool = crate::db::test_pool().await;
 
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1121,14 +1086,7 @@ You finished in 1st place.
         use zip::write::SimpleFileOptions;
 
         let _guard = crate::analytics::DB_TEST_LOCK.lock().await;
-        dotenvy::dotenv().ok();
-        let database_url = match std::env::var("DATABASE_URL") {
-            Ok(url) if !url.is_empty() => url,
-            _ => panic!(
-                "DATABASE_URL is required for database integration tests; start PostgreSQL via pg.ps1"
-            ),
-        };
-        let pool = crate::db::connect(&database_url).await.unwrap();
+        let pool = crate::db::test_pool().await;
 
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1231,14 +1189,7 @@ You finished in 1st place.
     #[tokio::test]
     async fn analyze_opponents_never_double_spawns_and_redirects() {
         let _guard = crate::analytics::DB_TEST_LOCK.lock().await;
-        dotenvy::dotenv().ok();
-        let database_url = match std::env::var("DATABASE_URL") {
-            Ok(url) if !url.is_empty() => url,
-            _ => panic!(
-                "DATABASE_URL is required for database integration tests; start PostgreSQL via pg.ps1"
-            ),
-        };
-        let pool = crate::db::connect(&database_url).await.unwrap();
+        let pool = crate::db::test_pool().await;
         let state = Arc::new(AppState {
             assets: default_assets(),
             mcts: MctsConfig::test(),
@@ -1279,14 +1230,7 @@ You finished in 1st place.
     #[tokio::test]
     async fn save_and_clear_template_follow_the_finished_job() {
         let _guard = crate::analytics::DB_TEST_LOCK.lock().await;
-        dotenvy::dotenv().ok();
-        let database_url = match std::env::var("DATABASE_URL") {
-            Ok(url) if !url.is_empty() => url,
-            _ => panic!(
-                "DATABASE_URL is required for database integration tests; start PostgreSQL via pg.ps1"
-            ),
-        };
-        let pool = crate::db::connect(&database_url).await.unwrap();
+        let pool = crate::db::test_pool().await;
         crate::db::run_migrations(&pool).await.unwrap();
         crate::opponent_analysis::clear_template(&pool)
             .await
@@ -1365,14 +1309,7 @@ You finished in 1st place.
         use crate::game::Street;
 
         let _guard = crate::analytics::DB_TEST_LOCK.lock().await;
-        dotenvy::dotenv().ok();
-        let database_url = match std::env::var("DATABASE_URL") {
-            Ok(url) if !url.is_empty() => url,
-            _ => panic!(
-                "DATABASE_URL is required for database integration tests; start PostgreSQL via pg.ps1"
-            ),
-        };
-        let pool = crate::db::connect(&database_url).await.unwrap();
+        let pool = crate::db::test_pool().await;
         crate::db::run_migrations(&pool).await.unwrap();
         crate::opponent_analysis::clear_template(&pool)
             .await

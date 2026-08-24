@@ -1935,18 +1935,8 @@ Seat 3: 14c11a2a collected";
 
     // ----------------------------------------------------- database tests
 
-    fn database_url() -> String {
-        dotenvy::dotenv().ok();
-        match std::env::var("DATABASE_URL") {
-            Ok(url) if !url.is_empty() => url,
-            _ => panic!(
-                "DATABASE_URL is required for database integration tests; start PostgreSQL via pg.ps1"
-            ),
-        }
-    }
-
     async fn test_pool() -> PgPool {
-        crate::db::connect(&database_url()).await.unwrap()
+        crate::db::test_pool().await
     }
 
     fn unique_id(prefix: &str) -> String {

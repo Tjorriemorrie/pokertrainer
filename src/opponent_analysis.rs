@@ -1373,20 +1373,8 @@ Seat 3: 14c11a2a (small blind) showed [Qs Ad] and won (600) with a pair of Queen
 
     // ---------------------------------------------------- database tests
 
-    fn database_url() -> String {
-        dotenvy::dotenv().ok();
-        match std::env::var("DATABASE_URL") {
-            Ok(url) if !url.is_empty() => url,
-            _ => panic!(
-                "DATABASE_URL is required for database integration tests; start PostgreSQL via pg.ps1"
-            ),
-        }
-    }
-
     async fn test_pool() -> PgPool {
-        let pool = crate::db::connect(&database_url()).await.unwrap();
-        crate::db::run_migrations(&pool).await.unwrap();
-        pool
+        crate::db::test_pool().await
     }
 
     fn unique(prefix: &str) -> String {

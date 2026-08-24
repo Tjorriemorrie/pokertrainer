@@ -29,6 +29,34 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
         .map_err(|e| Error::Migration(e.to_string()))
 }
 
+/// The database URL integration tests use: the configured database name with
+/// `_test` appended, so tests never touch real data.
+#[cfg(test)]
+pub fn test_database_url() -> String {
+    dotenvy::dotenv().ok();
+    let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+        panic!(
+            "DATABASE_URL is required for database integration tests; start PostgreSQL via pg.ps1"
+        )
+    });
+    let (base, db) = url
+        .rsplit_once('/')
+        .expect("DATABASE_URL must end in /<database>");
+    format!("{base}/{db}_test")
+}
+
+/// A pool to the test database with migrations applied.
+#[cfg(test)]
+pub async fn test_pool() -> PgPool {
+    let pool = connect(&test_database_url())
+        .await
+        .expect("connect to the test database");
+    run_migrations(&pool)
+        .await
+        .expect("run migrations on the test database");
+    pool
+}
+
 pub async fn load_contextual_range(
     pool: &PgPool,
     profile_id: i32,
@@ -110,16 +138,6 @@ mod tests {
 
     use super::*;
 
-    fn database_url() -> String {
-        dotenvy::dotenv().ok();
-        match std::env::var("DATABASE_URL") {
-            Ok(url) if !url.is_empty() => url,
-            _ => panic!(
-                "DATABASE_URL is required for database integration tests; start PostgreSQL via pg.ps1"
-            ),
-        }
-    }
-
     fn unique(prefix: &str) -> String {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let nanos = SystemTime::now()
@@ -130,10 +148,6 @@ mod tests {
             "{prefix}_{nanos}_{}",
             COUNTER.fetch_add(1, Ordering::Relaxed)
         )
-    }
-
-    async fn test_pool() -> PgPool {
-        connect(&database_url()).await.unwrap()
     }
 
     fn stored(weights: Range, sample_count: u32) -> StoredRange {

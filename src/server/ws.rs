@@ -1548,14 +1548,7 @@ mod tests {
     #[tokio::test]
     async fn finalize_tournament_persists_results_and_finalizes_the_session() {
         let _guard = crate::analytics::DB_TEST_LOCK.lock().await;
-        dotenvy::dotenv().ok();
-        let database_url = match std::env::var("DATABASE_URL") {
-            Ok(url) if !url.is_empty() => url,
-            _ => panic!(
-                "DATABASE_URL is required for database integration tests; start PostgreSQL via pg.ps1"
-            ),
-        };
-        let pool = crate::db::connect(&database_url).await.unwrap();
+        let pool = crate::db::test_pool().await;
         let session_id = analytics::start_session(&pool).await.unwrap();
         analytics::persist_records(
             &pool,
@@ -2026,14 +2019,7 @@ mod tests {
     #[tokio::test]
     async fn pooled_connection_persists_decisions_and_snapshots_history() {
         let _guard = crate::analytics::DB_TEST_LOCK.lock().await;
-        dotenvy::dotenv().ok();
-        let database_url = match std::env::var("DATABASE_URL") {
-            Ok(url) if !url.is_empty() => url,
-            _ => panic!(
-                "DATABASE_URL is required for database integration tests; start PostgreSQL via pg.ps1"
-            ),
-        };
-        let pool = crate::db::connect(&database_url).await.unwrap();
+        let pool = crate::db::test_pool().await;
         let sessions_before: Option<i32> = sqlx::query_scalar("SELECT max(id) FROM hero_sessions")
             .fetch_one(&pool)
             .await
@@ -2166,14 +2152,7 @@ mod tests {
     #[tokio::test]
     async fn reconnect_resumes_the_tournament_where_it_left_off() {
         let _guard = crate::analytics::DB_TEST_LOCK.lock().await;
-        dotenvy::dotenv().ok();
-        let database_url = match std::env::var("DATABASE_URL") {
-            Ok(url) if !url.is_empty() => url,
-            _ => panic!(
-                "DATABASE_URL is required for database integration tests; start PostgreSQL via pg.ps1"
-            ),
-        };
-        let pool = crate::db::connect(&database_url).await.unwrap();
+        let pool = crate::db::test_pool().await;
         sqlx::query("DELETE FROM active_tournament WHERE single = TRUE")
             .execute(&pool)
             .await
@@ -2300,14 +2279,7 @@ mod tests {
     #[tokio::test]
     async fn a_second_connection_is_sent_back_to_the_dashboard() {
         let _guard = crate::analytics::DB_TEST_LOCK.lock().await;
-        dotenvy::dotenv().ok();
-        let database_url = match std::env::var("DATABASE_URL") {
-            Ok(url) if !url.is_empty() => url,
-            _ => panic!(
-                "DATABASE_URL is required for database integration tests; start PostgreSQL via pg.ps1"
-            ),
-        };
-        let pool = crate::db::connect(&database_url).await.unwrap();
+        let pool = crate::db::test_pool().await;
         sqlx::query("DELETE FROM active_tournament WHERE single = TRUE")
             .execute(&pool)
             .await
@@ -2364,14 +2336,7 @@ mod tests {
     #[tokio::test]
     async fn corrupted_snapshots_reject_the_connection() {
         let _guard = crate::analytics::DB_TEST_LOCK.lock().await;
-        dotenvy::dotenv().ok();
-        let database_url = match std::env::var("DATABASE_URL") {
-            Ok(url) if !url.is_empty() => url,
-            _ => panic!(
-                "DATABASE_URL is required for database integration tests; start PostgreSQL via pg.ps1"
-            ),
-        };
-        let pool = crate::db::connect(&database_url).await.unwrap();
+        let pool = crate::db::test_pool().await;
         sqlx::query("DELETE FROM active_tournament WHERE single = TRUE")
             .execute(&pool)
             .await

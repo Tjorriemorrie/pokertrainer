@@ -364,4 +364,5 @@ cargo test
 ```
 
 Database integration tests need the local PostgreSQL instance running
-(`.\pg.ps1`).
+(`.\pg.ps1`). They run against a separate `pokertrainer_test` database (created
+by `pg.ps1`), so they never touch your real data.

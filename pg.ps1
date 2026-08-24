@@ -111,6 +111,16 @@ function Create-DB-And-User {
         Write-Host "Database '$dbName' already exists."
     }
 
+    $testDbName = "$dbName`_test"
+    Write-Host "Ensuring test database '$testDbName' exists..."
+    $testDbExists = & "$pgBin\psql.exe" -U postgres -h localhost -p $dbPort -t -c "SELECT 1 FROM pg_database WHERE datname='$testDbName';" 2>&1
+    if (-not $testDbExists -or -not "$testDbExists".Trim()) {
+        & "$pgBin\psql.exe" -U postgres -h localhost -p $dbPort -c "CREATE DATABASE $testDbName OWNER $dbUser ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0;"
+        Write-Host "Test database '$testDbName' created."
+    } else {
+        Write-Host "Test database '$testDbName' already exists."
+    }
+
     Write-Host "Database and user are ready."
 }
 
