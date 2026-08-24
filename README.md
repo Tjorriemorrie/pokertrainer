@@ -213,13 +213,16 @@ gracefully — the table keeps dealing.
 
 ### Table events in the logs
 
-Every meaningful table event is also written to the server log (run with
-`RUST_LOG=info`, or `RUST_LOG=debug` for inbound client frames too): hand
-deals (button, blinds, stacks, your hole cards), each applied hero and
-opponent action (with street, pot, and acting seat), blunder interceptions
-(with the EV loss and threshold), review confirmations (played blunder vs
-applied correction), and hand results. If something misbehaves, send the
-relevant log lines and the bug report will land with full context.
+Every meaningful table event is written to the console **and** to a rolling
+log file at `data/app.log` (run with `RUST_LOG=info`, or `RUST_LOG=debug` for
+inbound client frames too): hand deals (button, blinds, stacks, your hole
+cards), each applied hero and opponent action (with street, pot, and acting
+seat), every action submission as it is resolved or rejected (rejections log
+the reason plus the full legal-action set, so a "stuck" click is traceable),
+blunder interceptions (with the EV loss and threshold), review confirmations
+(played blunder vs applied correction), and hand results. If something
+misbehaves, send the relevant lines from `data/app.log` and the bug report
+will land with full context.
 
 When you're done with a table, click **Finish table** in the top bar (or just
 close the tab): your session is stored, and the **Tournament history** link

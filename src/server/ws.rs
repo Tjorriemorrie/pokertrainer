@@ -480,25 +480,70 @@ fn handle_client_message(
 
     match client_message {
         ClientMessage::ActionSubmit { action } => {
+            let hand_no = session.hand_no();
+            let street = session.state().street();
+            let to_act = session.state().to_act();
             match protocol::resolve_action(&action, session.state()) {
                 Ok(resolved) => {
+                    tracing::info!(
+                        hand_no,
+                        street = %street,
+                        to_act = %to_act,
+                        submitted = ?action,
+                        resolved = ?resolved,
+                        "action submission resolved"
+                    );
                     let submitted = match snapshot {
                         Some(snapshot) => session.submit_with_snapshot(resolved, snapshot),
                         None => session.submit(resolved),
                     };
                     match submitted {
                         Ok(events) => outcome(session, events, Some(resolved)),
-                        Err(error) => error_outcome(&error.to_string()),
+                        Err(error) => {
+                            tracing::warn!(
+                                hand_no,
+                                street = %street,
+                                to_act = %to_act,
+                                submitted = ?action,
+                                %error,
+                                "action submission failed"
+                            );
+                            error_outcome(&error.to_string())
+                        }
                     }
                 }
-                Err(error) => error_outcome(&error.to_string()),
+                Err(error) => {
+                    let legal = session.state().legal_actions();
+                    tracing::warn!(
+                        hand_no,
+                        street = %street,
+                        to_act = %to_act,
+                        legal = ?legal,
+                        submitted = ?action,
+                        %error,
+                        "action submission rejected"
+                    );
+                    error_outcome(&error.to_string())
+                }
             }
         }
         ClientMessage::ReviewDone => {
             let hero_action = session.resolving_action();
             match session.confirm_review() {
                 Ok(events) => outcome(session, events, hero_action),
-                Err(error) => error_outcome(&error.to_string()),
+                Err(error) => {
+                    let hand_no = session.hand_no();
+                    let street = session.state().street();
+                    let to_act = session.state().to_act();
+                    tracing::warn!(
+                        hand_no,
+                        street = %street,
+                        to_act = %to_act,
+                        %error,
+                        "review confirmation failed"
+                    );
+                    error_outcome(&error.to_string())
+                }
             }
         }
         ClientMessage::FinishTable => FrameOutcome {
@@ -945,6 +990,26 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("no blunder interception")
+        );
+    }
+
+    #[test]
+    fn submissions_are_rejected_while_a_review_is_pending() {
+        let mut session = make_session();
+        session.stage_pending_interception(Action::Fold, sample_analysis());
+
+        let outcome = handle_client_message(
+            &mut session,
+            r#"{"type":"ACTION_SUBMIT","action":{"kind":"call"}}"#,
+            None,
+        );
+        assert_eq!(outcome.messages.len(), 1);
+        let json = parse(&outcome.messages[0]);
+        assert_eq!(json["type"], "ERROR");
+        assert!(json["message"].as_str().unwrap().contains("pending review"));
+        assert!(
+            session.has_pending_interception(),
+            "the interception is still awaiting review"
         );
     }
 
