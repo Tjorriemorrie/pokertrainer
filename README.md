@@ -210,11 +210,15 @@ interface and coaches decision-making with a range-based solver.
   calls, bets, raises, the dealt board (each street's cards are logged as
   they land — `Flop 2c 7h Kd`, `Turn 4s`, `River Jd`), and results are
   appended below earlier entries and the
-  panel auto-scrolls to the newest line. At showdown the full board is logged
-  (`Board 2c 7h Kd 4s Jd`), then every player's revealed
-  cards (with their hand class) are logged, followed by a line stating who
-  won (name, amount, and the winning hand class) or how the pot was split,
-  so the log tells the whole story of the hand. When a hand ends, no centre
+panel auto-scrolls to the newest line. At showdown the full board is logged
+(`Board 2c 7h Kd 4s Jd`), then every player's revealed
+cards (with their hand class) are logged, followed by a line stating who
+won (name, amount, and the winning hand class) or how the pot was split,
+so the log tells the whole story of the hand. Uncalled portions of a bet
+are returned first — `Uncalled bet (5) returned to Opponent 2` — and are
+never counted as wins: they do not trigger a split line, a WIN ribbon, or
+a tournament win record (a player can lose the pot yet have chips handed
+back). When a hand ends, no centre
   banner
   appears: a gold **WIN** ribbon drops over the winner's seat showing the
   exact amount they took down (and the win jingle plays), stays for about two

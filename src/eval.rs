@@ -283,6 +283,22 @@ mod tests {
         ties("Ah Ad Kh Kd Qc 5c 2s", "As Ac Ks Kc Qh 5d 2h");
     }
 
+    /// Live-fire regression: hero's Aces-and-Threes two pair (the Threes are
+    /// shared on the board) beats the opponent's lone board-pair of Threes —
+    /// the shared pair must not make the hands look equal.
+    #[test]
+    fn two_pair_beats_the_shared_board_pair() {
+        beats("As 2s 3c Ac 9d 3h 8d", "Qs 6d 3c Ac 9d 3h 8d");
+        assert_eq!(
+            evaluate(&cards("As 2s 3c Ac 9d 3h 8d")).class(),
+            HandClass::TwoPair
+        );
+        assert_eq!(
+            evaluate(&cards("Qs 6d 3c Ac 9d 3h 8d")).class(),
+            HandClass::Pair
+        );
+    }
+
     #[test]
     fn hand_class_names() {
         assert_eq!(

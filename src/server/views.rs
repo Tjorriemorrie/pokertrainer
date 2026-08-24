@@ -2726,6 +2726,59 @@ mod tests {
         );
     }
 
+    /// An uncalled bet portion handed back after a showdown is not a win: the
+    /// true winner carries the WIN badge and the returned seat does not.
+    #[test]
+    fn returned_uncalled_bets_do_not_mark_a_winner() {
+        let snapshot = crate::snapshot::StateSnapshot {
+            stacks: [710, 300, 315],
+            button: 0,
+            blind_small: 10,
+            blind_big: 20,
+            street: 3,
+            board: vec![
+                "3c".into(),
+                "Ac".into(),
+                "9d".into(),
+                "3h".into(),
+                "8d".into(),
+            ],
+            hole_cards: vec![
+                ["As".into(), "2s".into()],
+                ["7h".into(), "7d".into()],
+                ["Qs".into(), "6d".into()],
+            ],
+            revealed: [true, true, true],
+            street_contrib: [0, 0, 0],
+            total_contrib: [210, 10, 215],
+            current_bet: 0,
+            min_raise: 20,
+            last_full_raise: None,
+            acted: [false, false, false],
+            folded: [false, true, false],
+            all_in: [true, false, true],
+            eliminated: [false, false, false],
+            to_act: 0,
+            hand_over: true,
+            hand_result: Some(crate::snapshot::HandResultSnapshot {
+                reason: "showdown".into(),
+                awards: vec![(0, 430)],
+                returns: vec![(2, 5)],
+            }),
+        };
+        let state = GameState::from_snapshot(&snapshot).unwrap();
+        let fragment = table_fragment(&state, 1, 0, &[], &[]);
+        assert!(
+            fragment.contains(r#"class="pt-win"><b>WIN</b><span>+430</span>"#),
+            "the real winner carries the WIN badge: {fragment}"
+        );
+        assert!(
+            !fragment.contains("+5</span>"),
+            "an uncalled return is not rendered as a win: {fragment}"
+        );
+        assert_eq!(fragment.matches("pt-winner").count(), 1);
+    }
+
     // ------------------------------------------------------- hand history
 
     fn hh_stats() -> crate::hh::OverallStats {

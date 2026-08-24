@@ -38,7 +38,12 @@ pub struct PotAward {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HandResult {
     pub reason: HandEndReason,
+    /// Contested pot shares won: what a seat actually took from the pot(s).
+    /// Uncalled portions of a bet are *not* wins — they go in `returns`.
     pub awards: Vec<PotAward>,
+    /// Uncalled bet portions handed back at showdown. These are not wins:
+    /// a seat receiving one did not take anything from the pot.
+    pub returns: Vec<PotAward>,
     pub pots: Vec<Pot>,
     pub revealed: Vec<(Seat, [Card; 2], HandClass)>,
 }
@@ -353,6 +358,7 @@ impl GameState {
 
         let pots = compute_pots(&self.total_contrib, &self.folded, &self.eliminated);
         let mut awards: Vec<PotAward> = Vec::new();
+        let mut returns: Vec<PotAward> = Vec::new();
         let mut revealed = Vec::new();
 
         for seat in Seat::ALL {
@@ -363,6 +369,22 @@ impl GameState {
         }
 
         for pot in &pots {
+            // A pot only one seat is eligible for is an uncalled bet portion
+            // being handed back — it is returned, never "won".
+            if pot.eligible.len() == 1
+                && let Some(&seat) = pot.eligible.first()
+            {
+                self.stacks[seat.index()] += pot.amount;
+                if let Some(award) = returns.iter_mut().find(|a| a.seat == seat) {
+                    award.amount += pot.amount;
+                } else {
+                    returns.push(PotAward {
+                        seat,
+                        amount: pot.amount,
+                    });
+                }
+                continue;
+            }
             let mut best: Option<(Eval, Vec<Seat>)> = None;
             for &seat in &pot.eligible {
                 let eval = self.best_hand(seat);
@@ -398,6 +420,7 @@ impl GameState {
         let result = HandResult {
             reason: HandEndReason::Showdown,
             awards,
+            returns,
             pots,
             revealed,
         };
@@ -625,7 +648,16 @@ impl GameState {
                 .iter()
                 .map(|award| (award.seat.index() as u8, award.amount))
                 .collect();
-            HandResultSnapshot { reason, awards }
+            let returns = result
+                .returns
+                .iter()
+                .map(|award| (award.seat.index() as u8, award.amount))
+                .collect();
+            HandResultSnapshot {
+                reason,
+                awards,
+                returns,
+            }
         });
         StateSnapshot {
             stacks: self.stacks,
@@ -851,6 +883,7 @@ impl GameState {
                 seat: winner,
                 amount: total,
             }],
+            returns: Vec::new(),
             pots,
             revealed: Vec::new(),
         });
@@ -1293,6 +1326,80 @@ mod tests {
             },]
         );
         assert_eq!(state.stack(Seat::Hero), 550);
+    }
+
+    /// The reported regression: hero's two pair (Aces + board Threes) beats an
+    /// opponent's lone pair of board Threes. The opponent's uncalled 5 chips
+    /// are returned, never mixed into the awards as a split.
+    #[test]
+    fn uncalled_excess_is_returned_not_split() {
+        let mut state = GameState::new(Seat::Hero, level());
+        state.hole_cards = [
+            [card("As"), card("2s")],
+            [card("7h"), card("7d")],
+            [card("Qs"), card("6d")],
+        ];
+        state.board = vec![card("3c"), card("Ac"), card("9d"), card("3h"), card("8d")];
+        state.total_contrib = [210, 10, 215];
+        state.folded = [false, true, false];
+
+        let result = state.showdown(&mut Deck::new()).unwrap();
+        assert_eq!(
+            result.awards,
+            vec![PotAward {
+                seat: Seat::Hero,
+                amount: 430
+            }]
+        );
+        assert_eq!(
+            result.returns,
+            vec![PotAward {
+                seat: Seat::Opponent2,
+                amount: 5
+            }]
+        );
+        let hero_class = result
+            .revealed
+            .iter()
+            .find(|(seat, _, _)| *seat == Seat::Hero)
+            .map(|(_, _, class)| *class)
+            .unwrap();
+        assert_eq!(hero_class, HandClass::TwoPair);
+        assert_eq!(state.stack(Seat::Hero), 730);
+        assert_eq!(state.stack(Seat::Opponent2), 305);
+    }
+
+    /// A seat that loses the pot but put in the most chips still gets its
+    /// uncalled excess back — and it is not an award, so a lost hand never
+    /// counts as a win.
+    #[test]
+    fn loser_gets_uncalled_chips_back_but_no_award() {
+        let mut state = GameState::new(Seat::Hero, level());
+        state.hole_cards = [
+            [card("2d"), card("3d")],
+            [card("5s"), card("5c")],
+            [card("Kh"), card("Kd")],
+        ];
+        state.board = vec![card("4c"), card("4s"), card("9h"), card("Jd"), card("Ac")];
+        state.total_contrib = [300, 10, 295];
+        state.folded = [false, true, false];
+
+        let result = state.showdown(&mut Deck::new()).unwrap();
+        assert_eq!(
+            result.awards,
+            vec![PotAward {
+                seat: Seat::Opponent2,
+                amount: 600
+            }]
+        );
+        assert_eq!(
+            result.returns,
+            vec![PotAward {
+                seat: Seat::Hero,
+                amount: 5
+            }]
+        );
+        assert_eq!(state.stack(Seat::Hero), 305);
     }
 
     #[test]

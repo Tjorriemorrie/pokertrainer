@@ -801,6 +801,12 @@ impl TableSession {
                 for (seat, cards, class) in &result.revealed {
                     self.log_line(format!("{seat} shows {} {} ({class})", cards[0], cards[1]));
                 }
+                for r in &result.returns {
+                    self.log_line(format!(
+                        "Uncalled bet ({}) returned to {}",
+                        r.amount, r.seat
+                    ));
+                }
                 if let [award] = result.awards.as_slice() {
                     let class_text = result
                         .revealed
@@ -821,6 +827,7 @@ impl TableSession {
                     hand_no = self.hand_no,
                     pot = total,
                     awards = ?result.awards,
+                    returns = ?result.returns,
                     stacks = ?self.state.stacks(),
                     "hand finished — showdown awarded"
                 );
@@ -1837,6 +1844,76 @@ mod tests {
                 .any(|line| line.contains(" wins ") || line.starts_with("Split pot")),
             "who won or how the pot was shared is logged at showdown: {log:?}"
         );
+    }
+
+    /// The lived bug: hero's Aces-and-board-Threes two pair beats the
+    /// opponent's lone board pair, and the opponent's uncalled 5 chips come
+    /// back — the log crowns the hero alone and states the return. An
+    /// uncalled return is never logged as a split.
+    #[test]
+    fn uncalled_excess_is_logged_as_a_return_not_a_split() {
+        let custom: Vec<Card> = deck_with([
+            card(Rank::Three, Suit::Spades),
+            card(Rank::Ace, Suit::Clubs),
+            card(Rank::Nine, Suit::Diamonds),
+            card(Rank::Three, Suit::Hearts),
+            card(Rank::Eight, Suit::Diamonds),
+        ]);
+        let mut deck = Deck::try_from_remaining(custom).unwrap();
+        let mut state = GameState::new(Seat::Opponent2, level());
+        state.set_stack(Seat::Hero, 210);
+        state.set_stack(Seat::Opponent1, 130);
+        state.set_stack(Seat::Opponent2, 215);
+        state.start_hand(&mut deck).unwrap();
+        state.set_hole_cards(
+            Seat::Hero,
+            [card(Rank::Ace, Suit::Spades), card(Rank::Two, Suit::Spades)],
+        );
+        state.set_hole_cards(
+            Seat::Opponent2,
+            [
+                card(Rank::Queen, Suit::Spades),
+                card(Rank::Six, Suit::Diamonds),
+            ],
+        );
+
+        // Button is Opponent 2, so preflop runs Opponent 1 -> Opponent 2 ->
+        // Hero. Opponent 1 folds without investing; Opponent 2 pushes all-in.
+        assert_eq!(state.to_act(), Seat::Opponent1);
+        state.apply_action(Action::Fold).unwrap();
+        state.apply_action(Action::AllIn).unwrap();
+        assert_eq!(state.to_act(), Seat::Hero);
+
+        let mut session = TableSession::resume(
+            state,
+            deck,
+            1,
+            50,
+            probe_config(),
+            survival(),
+            never_intercepts(),
+            None,
+        );
+        // The hero calls all-in for 210 short of the 215 bet: the missing 5
+        // is an uncalled portion of Opponent 2's bet, returned at showdown.
+        session.submit(Action::AllIn).unwrap();
+        assert!(session.state().is_hand_over());
+        let log = session.log();
+        assert!(
+            log.iter()
+                .any(|line| line == "Uncalled bet (5) returned to Opponent 2"),
+            "the uncalled chips are logged as a return: {log:?}"
+        );
+        assert!(
+            log.iter().any(|line| line.starts_with("Hero wins 420")),
+            "the hero is crowned the sole winner: {log:?}"
+        );
+        assert!(
+            !log.iter().any(|line| line.starts_with("Split pot")),
+            "an uncalled return is not a split: {log:?}"
+        );
+        assert_eq!(session.hand_results.len(), 1);
+        assert!(session.hand_results[0].hero_won);
     }
 
     /// A fold-out hand states who won in the log, so every hand ends with an

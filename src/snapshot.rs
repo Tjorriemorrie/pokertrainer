@@ -39,8 +39,13 @@ fn street_from_index(index: u8) -> Option<Street> {
 pub struct HandResultSnapshot {
     /// `"fold"` (with the winning seat index) or `"showdown"`.
     pub reason: String,
-    /// `(seat_index, chips)` pairs, one per awarded seat.
+    /// `(seat_index, chips)` pairs, one per seat that won contested pot chips.
     pub awards: Vec<(u8, u32)>,
+    /// `(seat_index, chips)` pairs of uncalled bet portions handed back —
+    /// not wins. `#[serde(default)]` keeps snapshots from before this field
+    /// existed loadable.
+    #[serde(default)]
+    pub returns: Vec<(u8, u32)>,
 }
 
 /// The wire form of a full [`GameState`]: every private field the engine
@@ -198,9 +203,22 @@ pub fn reconstruct_hand_result(
                 .ok_or_else(|| Error::Game(format!("invalid award seat index {index}")))
         })
         .collect::<Result<Vec<_>>>()?;
+    let returns = snapshot
+        .returns
+        .iter()
+        .map(|(index, amount)| {
+            seat_from_index(*index)
+                .map(|seat| PotAward {
+                    seat,
+                    amount: *amount,
+                })
+                .ok_or_else(|| Error::Game(format!("invalid return seat index {index}")))
+        })
+        .collect::<Result<Vec<_>>>()?;
     Ok(crate::game::HandResult {
         reason,
         awards,
+        returns,
         pots: state.pots(),
         revealed: Vec::new(),
     })
@@ -285,6 +303,7 @@ mod tests {
         let snapshot = HandResultSnapshot {
             reason: "fold".into(),
             awards: vec![(0, 30)],
+            returns: Vec::new(),
         };
         assert_eq!(snapshot.reason_seat(), Some(Seat::Hero));
         let state = GameState::new(Seat::Hero, crate::game::blinds::BlindLevel::new(10, 20));
@@ -297,6 +316,7 @@ mod tests {
                 amount: 30
             }]
         );
+        assert!(result.returns.is_empty());
     }
 
     #[test]
@@ -304,6 +324,7 @@ mod tests {
         let bad = HandResultSnapshot {
             reason: "fold".into(),
             awards: Vec::new(),
+            returns: Vec::new(),
         };
         assert_eq!(bad.reason_seat(), None);
         let state = GameState::new(Seat::Hero, crate::game::blinds::BlindLevel::new(10, 20));
@@ -318,12 +339,47 @@ mod tests {
         let bad = HandResultSnapshot {
             reason: "photo finish".into(),
             awards: vec![(1, 10)],
+            returns: Vec::new(),
         };
         let state = GameState::new(Seat::Hero, crate::game::blinds::BlindLevel::new(10, 20));
         assert!(matches!(
             reconstruct_hand_result(&state, &bad),
             Err(Error::Game(_))
         ));
+    }
+
+    #[test]
+    fn showdown_snapshots_keep_uncalled_returns_apart_from_awards() {
+        let snapshot = HandResultSnapshot {
+            reason: "showdown".into(),
+            awards: vec![(0, 410)],
+            returns: vec![(2, 5)],
+        };
+        let state = GameState::new(Seat::Hero, crate::game::blinds::BlindLevel::new(10, 20));
+        let result = reconstruct_hand_result(&state, &snapshot).unwrap();
+        assert_eq!(result.reason, HandEndReason::Showdown);
+        assert_eq!(
+            result.awards,
+            vec![PotAward {
+                seat: Seat::Hero,
+                amount: 410
+            }]
+        );
+        assert_eq!(
+            result.returns,
+            vec![PotAward {
+                seat: Seat::Opponent2,
+                amount: 5
+            }]
+        );
+    }
+
+    #[test]
+    fn old_hand_result_snapshots_without_returns_still_deserialize() {
+        let json = r#"{"reason":"showdown","awards":[[0,300]]}"#;
+        let snapshot: HandResultSnapshot = serde_json::from_str(json).unwrap();
+        assert_eq!(snapshot.returns, Vec::<(u8, u32)>::new());
+        serde_json::to_string(&snapshot).unwrap();
     }
 
     #[test]
