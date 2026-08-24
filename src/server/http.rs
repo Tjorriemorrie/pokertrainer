@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
@@ -90,9 +90,30 @@ async fn health() -> impl IntoResponse {
     (StatusCode::OK, axum::Json(json!({ "status": "ok" })))
 }
 
-/// The finished-tournament history page: one decimated EV chart per
-/// finished session. Without a database this endpoint cannot render anything.
-async fn tournaments(State(app): State<Arc<AppState>>) -> Response {
+/// How many finished tournaments render per page of the history listing.
+pub const TOURNAMENTS_PAGE_SIZE: i64 = 25;
+
+/// The parsed `?page=` query parameter of `/tournaments`.
+#[derive(Clone, Copy, Debug, serde::Deserialize)]
+pub struct TournamentsParams {
+    pub page: Option<u32>,
+}
+
+/// One rendered page of the tournament history.
+#[derive(Clone, Debug)]
+pub struct TournamentsPage {
+    pub sessions: Vec<(analytics::SessionSummary, Vec<analytics::ChartPoint>)>,
+    pub page: u32,
+    pub pages: u32,
+}
+
+/// The finished-tournament history page: a paginated listing (25 per page,
+/// newest first) of one decimated EV chart per finished session. Without a
+/// database this endpoint cannot render anything.
+async fn tournaments(
+    State(app): State<Arc<AppState>>,
+    Query(params): Query<TournamentsParams>,
+) -> Response {
     let Some(pool) = app.pool.clone() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -100,10 +121,16 @@ async fn tournaments(State(app): State<Arc<AppState>>) -> Response {
         )
             .into_response();
     };
-    match render_tournaments(&pool).await {
-        Ok(sessions) => Html(views::tournaments_page(&sessions)).into_response(),
+    let page = params.page.unwrap_or(1).max(1);
+    match render_tournaments(&pool, page).await {
+        Ok(pageview) => Html(views::tournaments_page(
+            &pageview.sessions,
+            pageview.page,
+            pageview.pages,
+        ))
+        .into_response(),
         Err(error) => {
-            tracing::warn!(%error, "tournaments page failed to render");
+            tracing::warn!(%error, page, "tournaments page failed to render");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 axum::Json(json!({ "error": error.to_string() })),
@@ -113,11 +140,13 @@ async fn tournaments(State(app): State<Arc<AppState>>) -> Response {
     }
 }
 
-/// Loads every finished session plus its decimated chart dataset.
-pub async fn render_tournaments(
-    pool: &PgPool,
-) -> Result<Vec<(analytics::SessionSummary, Vec<analytics::ChartPoint>)>> {
-    let summaries = analytics::list_finished_sessions(pool, 500).await?;
+/// Loads one page of finished sessions (newest first) plus their decimated
+/// chart datasets.
+pub async fn render_tournaments(pool: &PgPool, page: u32) -> Result<TournamentsPage> {
+    let total = analytics::count_finished_sessions(pool).await?;
+    let pages = (((total + TOURNAMENTS_PAGE_SIZE - 1) / TOURNAMENTS_PAGE_SIZE) as u32).max(1);
+    let offset = (page - 1) as i64 * TOURNAMENTS_PAGE_SIZE;
+    let summaries = analytics::list_finished_sessions(pool, TOURNAMENTS_PAGE_SIZE, offset).await?;
     let mut sessions = Vec::with_capacity(summaries.len());
     for summary in summaries {
         let points = analytics::load_session(pool, summary.id, analytics::CHART_WINDOW).await?;
@@ -126,7 +155,11 @@ pub async fn render_tournaments(
             analytics::decimate(&points, analytics::DECIMATED_POINTS),
         ));
     }
-    Ok(sessions)
+    Ok(TournamentsPage {
+        sessions,
+        page,
+        pages,
+    })
 }
 
 /// The single-tournament detail page: one finished session's hand-level
@@ -266,6 +299,103 @@ mod tests {
 
         sqlx::query("DELETE FROM hero_sessions WHERE id = $1")
             .bind(session_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn tournaments_page_paginates_newest_first() {
+        use crate::game::Street;
+
+        let _guard = crate::analytics::DB_TEST_LOCK.lock().await;
+        dotenvy::dotenv().ok();
+        let database_url = match std::env::var("DATABASE_URL") {
+            Ok(url) if !url.is_empty() => url,
+            _ => panic!(
+                "DATABASE_URL is required for database integration tests; start PostgreSQL via pg.ps1"
+            ),
+        };
+        let pool = crate::db::connect(&database_url).await.unwrap();
+        // Real (or older) finished sessions may already exist; the listing
+        // must stay newest-first, so the page math is derived relative to
+        // them instead of assuming an empty database.
+        let prior = analytics::count_finished_sessions(&pool).await.unwrap();
+
+        // One page plus a spill-over, finished in ascending-id order.
+        let mut ids = Vec::new();
+        for hand in 1..=TOURNAMENTS_PAGE_SIZE + 4 {
+            let id = analytics::start_session(&pool).await.unwrap();
+            analytics::persist_records(
+                &pool,
+                id,
+                &[analytics::PendingDecision {
+                    hand_no: hand as u64,
+                    street: Street::Preflop,
+                    played: "Call".into(),
+                    optimal: "Fold".into(),
+                    ev_loss: 1.0,
+                }],
+            )
+            .await
+            .unwrap();
+            analytics::finish_session(&pool, id).await.unwrap();
+            ids.push(id);
+        }
+
+        let total = prior + ids.len() as i64;
+        let pages = (((total + TOURNAMENTS_PAGE_SIZE - 1) / TOURNAMENTS_PAGE_SIZE) as u32).max(1);
+
+        let state = Arc::new(AppState {
+            assets: default_assets(),
+            mcts: MctsConfig::test(),
+            survival: SurvivalConfig::default(),
+            blunder: BlunderConfig::default(),
+            pool: Some(pool.clone()),
+            snapshot_interval: 100,
+            result_pause_ms: 0,
+        });
+        let newest_id = *ids.last().unwrap();
+        let oldest_id = ids[0];
+        let second_page_first = ids[ids.len() - TOURNAMENTS_PAGE_SIZE as usize - 1];
+
+        let (status, first) = get_with(state.clone(), "/tournaments").await;
+        assert_eq!(status, StatusCode::OK);
+        let newest_marker = format!("data-tournament-id=\"{newest_id}\"");
+        let oldest_marker = format!("data-tournament-id=\"{oldest_id}\"");
+        assert!(
+            first.contains(&newest_marker),
+            "page 1 leads with the latest tournament: missing {newest_marker}"
+        );
+        let newest_at = first.find(&newest_marker);
+        let second_at = first.find(&format!("data-tournament-id=\"{}\"", ids[ids.len() - 2]));
+        assert!(
+            newest_at.is_some() && second_at.is_some() && newest_at.unwrap() < second_at.unwrap(),
+            "the listing runs latest-first"
+        );
+        assert!(!first.contains(&oldest_marker));
+        assert!(first.contains(&format!("Page 1 of {pages}")));
+
+        let (status, second) = get_with(state.clone(), "/tournaments?page=2").await;
+        assert_eq!(status, StatusCode::OK);
+        let spill_marker = format!("data-tournament-id=\"{second_page_first}\"");
+        assert!(
+            second.contains(&spill_marker),
+            "page 2 starts where page 1 left off: missing {spill_marker}"
+        );
+        assert!(!second.contains(&format!("data-tournament-id=\"{newest_id}\"")));
+        assert!(second.contains(&format!("Page 2 of {pages}")));
+
+        let (status, beyond) = get_with(state.clone(), "/tournaments?page=999").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !beyond.contains("data-tournament-id"),
+            "pages past the last one are empty: {beyond}"
+        );
+        assert!(beyond.contains(&format!("Page 999 of {pages}")), "{beyond}");
+
+        sqlx::query("DELETE FROM hero_sessions WHERE id = ANY($1)")
+            .bind(&ids)
             .execute(&pool)
             .await
             .unwrap();

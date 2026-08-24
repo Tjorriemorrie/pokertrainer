@@ -121,13 +121,17 @@ interface and coaches decision-making with a range-based solver.
   in the top bar or just close the tab — the session is finalized, and the
   **Tournament history** link (or `/tournaments`) shows one such graph per
   finished tournament with its hands/actions and average EV loss in BB.
-  Sessions
+  The listing is **paginated** (25 per page, newest first) with
+  **← Newer / Older →** controls driven by `?page=`, so the whole history
+  stays browsable no matter how many tables you have played. Sessions
   without any stored decision never appear.
 - **Tournament completion & detail page:** a tournament ends the moment only
   one seat is left standing. Busted opponents are **out** — they stop being
   dealt cards, stop posting blinds, and are skipped in the action order, with
-  an **OUT** badge over their seat. When the tournament ends, a winner/loser
-  modal appears (gold for a win, red for a loss) and its **Continue** button
+  an **OUT** badge over their seat. When the tournament ends, the table
+  **stops**: no further hand is dealt, the connection does not restart, and a
+  winner/loser
+  modal appears (gold for a win, red for a loss) whose **Continue** button
   takes you to that tournament's detail page (`/tournaments/{id}`), which
   shows the outcome and final stack, hands played, hands won/lost, win rate,
   all-in frequency, average/total EV loss, and the biggest blunder — for any
@@ -239,10 +243,13 @@ will land with full context.
 When you're done with a table, click **Finish table** in the top bar (or just
 close the tab): your session is stored, and the **Tournament history** link
 in the top bar takes you to <http://127.0.0.1:8744/tournaments>, where every
-finished tournament shows the same action-EV graph as the live top bar. Click
+finished tournament shows the same action-EV graph as the live top bar in a
+paginated list — 25 per page, newest first, with **← Newer** / **Older →**
+navigation. Click
 a tournament to open its detail page with the full stat breakdown. When a
-tournament ends naturally (one seat left standing), a winner/loser modal
-appears and its **Continue** button jumps straight to that tournament's
+tournament ends naturally (one seat left standing), dealing stops, a
+winner/loser modal
+appears, and its **Continue** button jumps straight to that tournament's
 detail page.
 
 ### Running the tests

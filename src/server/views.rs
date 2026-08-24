@@ -51,16 +51,21 @@ pub fn index_page() -> String {
       <button id="tournament-modal-continue" class="action-btn pt-confirm" type="button">Continue</button>
     </div>
   </div>
-  <script src="/assets/app.js?v=5"></script>
+  <script src="/assets/app.js?v=6"></script>
 </body>
 </html>"#
         .to_string()
 }
 
-/// The finished-tournament history page: one server-rendered card per
-/// finished session whose decimated EV dataset is drawn client-side with the
-/// same canvas style as the live top-bar chart.
-pub fn tournaments_page(sessions: &[(SessionSummary, Vec<ChartPoint>)]) -> String {
+/// The finished-tournament history page: a paginated listing (newest first)
+/// of one server-rendered card per finished session whose decimated EV
+/// dataset is drawn client-side with the same canvas style as the live
+/// top-bar chart. `page`/`pages` drive the Newer/Older navigation.
+pub fn tournaments_page(
+    sessions: &[(SessionSummary, Vec<ChartPoint>)],
+    page: u32,
+    pages: u32,
+) -> String {
     let mut html = String::from(
         r#"<!doctype html>
 <html lang="en">
@@ -78,6 +83,8 @@ pub fn tournaments_page(sessions: &[(SessionSummary, Vec<ChartPoint>)]) -> Strin
 <main class="pt-main">
 "#,
     );
+
+    html.push_str(&pagination_nav(page, pages));
 
     if sessions.is_empty() {
         html.push_str(
@@ -140,6 +147,31 @@ pub fn tournaments_page(sessions: &[(SessionSummary, Vec<ChartPoint>)]) -> Strin
 
     html.push_str("</main>\n</body>\n</html>\n");
     html
+}
+
+/// The Newer/Older pagination bar of the tournaments page: links navigate
+/// between pages while the current page's position is spelled out. Disabled
+/// edges render as inert spans.
+fn pagination_nav(page: u32, pages: u32) -> String {
+    let newer = if page > 1 {
+        format!(
+            r#"<a class="pt-pagination-link" href="/tournaments?page={}">← Newer</a>"#,
+            page - 1
+        )
+    } else {
+        r#"<span class="pt-pagination-link is-disabled">← Newer</span>"#.to_string()
+    };
+    let older = if page < pages {
+        format!(
+            r#"<a class="pt-pagination-link" href="/tournaments?page={}">Older →</a>"#,
+            page + 1
+        )
+    } else {
+        r#"<span class="pt-pagination-link is-disabled">Older →</span>"#.to_string()
+    };
+    format!(
+        r#"<nav class="pt-pagination">{newer}<span class="pt-pagination-page">Page {page} of {pages}</span>{older}</nav>"#
+    )
 }
 
 /// The single-tournament detail page: the outcome, hand-level aggregates
@@ -1013,7 +1045,7 @@ mod tests {
     #[test]
     fn tournaments_page_has_an_empty_state() {
         let empty: Vec<(SessionSummary, Vec<ChartPoint>)> = Vec::new();
-        let page = tournaments_page(&empty);
+        let page = tournaments_page(&empty, 1, 1);
         assert!(page.contains("<title>Poker Trainer — Tournaments</title>"));
         assert!(page.contains("No finished tournaments yet"));
         assert!(
@@ -1048,7 +1080,7 @@ mod tests {
                 vec![(1, 4.5), (2, 0.0)],
             ),
         ];
-        let page = tournaments_page(&sessions);
+        let page = tournaments_page(&sessions, 1, 1);
         assert!(page.contains(r#"data-tournament-id="7""#));
         assert!(page.contains("Tournament #7"));
         assert!(
@@ -1072,9 +1104,44 @@ mod tests {
             summary(1, r#"<script>"evil"</script>"#, "end", 1, 1, 0.0),
             vec![(1, 0.0)],
         )];
-        let page = tournaments_page(&sessions);
+        let page = tournaments_page(&sessions, 1, 1);
         assert!(!page.contains(r#"<script>"evil""#));
         assert!(page.contains("&lt;script&gt;"));
+    }
+
+    #[test]
+    fn tournaments_page_renders_pagination_controls() {
+        let empty: Vec<(SessionSummary, Vec<ChartPoint>)> = Vec::new();
+
+        let first = tournaments_page(&empty, 1, 1);
+        assert!(first.contains(r#"class="pt-pagination""#));
+        assert!(first.contains("Page 1 of 1"));
+        assert!(
+            first.contains(r#"<span class="pt-pagination-link is-disabled">← Newer</span>"#),
+            "the first page has no newer page: {first}"
+        );
+        assert!(
+            first.contains(r#"<span class="pt-pagination-link is-disabled">Older →</span>"#),
+            "a single page has no older page: {first}"
+        );
+
+        let middle = tournaments_page(&empty, 2, 3);
+        assert!(middle.contains("Page 2 of 3"));
+        assert!(
+            middle.contains(r#"href="/tournaments?page=1"#),
+            "the newer link points at the previous page: {middle}"
+        );
+        assert!(
+            middle.contains(r#"href="/tournaments?page=3"#),
+            "the older link points at the next page: {middle}"
+        );
+
+        let last = tournaments_page(&empty, 3, 3);
+        assert!(last.contains(r#"href="/tournaments?page=2"#));
+        assert!(
+            last.contains(r#"<span class="pt-pagination-link is-disabled">Older →</span>"#),
+            "the last page has no older page: {last}"
+        );
     }
 
     fn detail(id: i32, result: Option<&str>, final_stack: Option<i32>) -> TournamentDetail {

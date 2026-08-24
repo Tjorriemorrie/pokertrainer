@@ -261,9 +261,27 @@ pub async fn load_session(pool: &PgPool, session_id: i32, limit: usize) -> Resul
     Ok(points)
 }
 
+/// The number of finished sessions shown on the tournaments page (every
+/// session with at least one recorded decision).
+pub async fn count_finished_sessions(pool: &PgPool) -> Result<i64> {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM hero_sessions s
+         WHERE s.session_end IS NOT NULL
+           AND EXISTS (SELECT 1 FROM hero_decisions d WHERE d.session_id = s.id)",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(Into::into)
+}
+
 /// Finished sessions (each with at least one recorded decision), newest
-/// first, for the tournaments page.
-pub async fn list_finished_sessions(pool: &PgPool, limit: i64) -> Result<Vec<SessionSummary>> {
+/// first, for one page of the tournaments page. `offset` skips the first
+/// pages worth of sessions.
+pub async fn list_finished_sessions(
+    pool: &PgPool,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<SessionSummary>> {
     let rows: Vec<SummaryRow> = sqlx::query_as(
         "SELECT
                  s.id,
@@ -279,9 +297,10 @@ pub async fn list_finished_sessions(pool: &PgPool, limit: i64) -> Result<Vec<Ses
              WHERE s.session_end IS NOT NULL
              GROUP BY s.id
              ORDER BY s.session_end DESC, s.id DESC
-             LIMIT $1",
+             LIMIT $1 OFFSET $2",
     )
     .bind(limit)
+    .bind(offset)
     .fetch_all(pool)
     .await?;
 
@@ -569,7 +588,7 @@ mod tests {
         assert!(tail.windows(2).all(|pair| pair[0].0 + 1 == pair[1].0));
 
         assert!(
-            !list_finished_sessions(&pool, 10)
+            !list_finished_sessions(&pool, 10, 0)
                 .await
                 .unwrap()
                 .iter()
@@ -587,7 +606,7 @@ mod tests {
             "idempotent"
         );
 
-        let finished = list_finished_sessions(&pool, 10).await.unwrap();
+        let finished = list_finished_sessions(&pool, 10, 0).await.unwrap();
         let summary = finished
             .into_iter()
             .find(|summary| summary.id == session_id)
@@ -721,7 +740,7 @@ mod tests {
         assert!(finish_session(&pool, empty_session).await.unwrap());
 
         assert!(
-            !list_finished_sessions(&pool, 10_000)
+            !list_finished_sessions(&pool, 10_000, 0)
                 .await
                 .unwrap()
                 .iter()
@@ -730,6 +749,60 @@ mod tests {
         );
 
         delete_sessions(&pool, &[empty_session]).await;
+    }
+
+    #[tokio::test]
+    async fn finished_session_count_and_paging_track_the_listing() {
+        let _guard = DB_TEST_LOCK.lock().await;
+        let pool = test_pool().await;
+
+        let mut ids = Vec::new();
+        for _ in 0..7 {
+            let id = start_session(&pool).await.unwrap();
+            persist_records(&pool, id, &[decision(1, Street::Preflop, 1.0)])
+                .await
+                .unwrap();
+            finish_session(&pool, id).await.unwrap();
+            ids.push(id);
+        }
+
+        let all = list_finished_sessions(&pool, 1_000_000, 0).await.unwrap();
+        assert_eq!(
+            all.len() as i64,
+            count_finished_sessions(&pool).await.unwrap(),
+            "the count matches the full listing"
+        );
+        assert!(
+            all.iter().any(|summary| summary.id == ids[6]),
+            "the freshly finished sessions are listed"
+        );
+        let newest: Vec<i32> = all.iter().take(7).map(|summary| summary.id).collect();
+        assert_eq!(
+            newest,
+            ids.iter().rev().copied().collect::<Vec<_>>(),
+            "sessions created now lead the listing, newest (highest id) first"
+        );
+
+        let page1 = list_finished_sessions(&pool, 3, 0).await.unwrap();
+        let page2 = list_finished_sessions(&pool, 3, 3).await.unwrap();
+        let page3 = list_finished_sessions(&pool, 3, 6).await.unwrap();
+        assert_eq!(
+            page1.iter().map(|summary| summary.id).collect::<Vec<_>>(),
+            vec![ids[6], ids[5], ids[4]],
+            "page one carries the newest sessions"
+        );
+        assert_eq!(
+            page2.iter().map(|summary| summary.id).collect::<Vec<_>>(),
+            vec![ids[3], ids[2], ids[1]],
+            "the offset advances the page window"
+        );
+        assert_eq!(
+            page3.first().map(|summary| summary.id),
+            Some(ids[0]),
+            "older, pre-existing sessions trail the freshly finished ones"
+        );
+
+        delete_sessions(&pool, &ids).await;
     }
 
     #[tokio::test]
@@ -760,7 +833,8 @@ mod tests {
             .map(|_| ()),
             load_recent(&mirror, 10).await.map(|_| ()),
             load_session(&mirror, 1, 10).await.map(|_| ()),
-            list_finished_sessions(&mirror, 10).await.map(|_| ()),
+            count_finished_sessions(&mirror).await.map(|_| ()),
+            list_finished_sessions(&mirror, 10, 0).await.map(|_| ()),
             load_tournament_detail(&mirror, 1).await.map(|_| ()),
         ] {
             assert!(matches!(result, Err(Error::Sqlx(_))));

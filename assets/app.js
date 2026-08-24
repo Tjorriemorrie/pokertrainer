@@ -8,6 +8,7 @@
   const chartData = [];
   let ws = null;
   let retryTimer = null;
+  let finished = false;
 
   /* ------------------------------------------------------------- audio */
 
@@ -405,9 +406,11 @@ case "CHART_SNAPSHOT":
         setSolverStatus(msg);
         break;
       case "TOURNAMENT_FINISHED":
+        finished = true;
         showTournamentModal(msg.won, msg.url);
         break;
       case "SESSION_FINISHED":
+        finished = true;
         window.location.href = msg.url;
         break;
       case "ERROR":
@@ -425,8 +428,12 @@ case "CHART_SNAPSHOT":
     ws.onopen = () => setStatus("connected", "status-ok");
     ws.onmessage = handleMessage;
 ws.onclose = () => {
-      setStatus("disconnected — retrying…", "status-bad");
       resetSolverStatus();
+      if (finished) {
+        setStatus("table finished", "status-ok");
+        return;
+      }
+      setStatus("disconnected — retrying…", "status-bad");
       clearTimeout(retryTimer);
       retryTimer = setTimeout(connect, 1500);
     };

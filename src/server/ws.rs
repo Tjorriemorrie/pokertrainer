@@ -118,20 +118,13 @@ async fn handle_socket(socket: WebSocket, app: Arc<AppState>) {
                 // persist the hand results, finalize the session with the
                 // outcome, and hand the client a winner/loser modal instead of
                 // dealing another hand.
-                if let Some(result) = session.tournament_result() {
+                if let Some(frame) =
+                    tournament_over_frame(&mut session, app.pool.as_ref(), session_id).await
+                {
                     let _ = command_tx.send(SearchCommand::Stop);
-                    let hand_results = session.take_hand_results();
-                    let frame = finalize_tournament(
-                        app.pool.as_ref(),
-                        session_id,
-                        &result,
-                        hand_results,
-                    )
-                    .await;
                     if sender.send(Message::Text(frame.into())).await.is_err() {
                         return;
                     }
-                    close_session(app.pool.as_ref(), session_id).await;
                     return;
                 }
 
@@ -178,6 +171,19 @@ async fn handle_socket(socket: WebSocket, app: Arc<AppState>) {
                         path: None,
                         hand_no: session.hand_no(),
                     });
+                    // The freshly dealt hand can play itself out entirely when
+                    // the hero is out (the opponents keep acting), so the
+                    // tournament may end here too — stop and show the modal
+                    // instead of dealing on.
+                    if let Some(frame) =
+                        tournament_over_frame(&mut session, app.pool.as_ref(), session_id).await
+                    {
+                        let _ = command_tx.send(SearchCommand::Stop);
+                        if sender.send(Message::Text(frame.into())).await.is_err() {
+                            return;
+                        }
+                        return;
+                    }
                 }
 
                 if ticks_since_snapshot >= app.snapshot_interval.max(1) {
@@ -489,6 +495,21 @@ async fn finalize_tournament(
     };
     tournament_finished_message(result.won, &url)
         .unwrap_or_else(|| error_message("serialization failure"))
+}
+
+/// When the tournament just ended, finalizes the session (persisting the
+/// queued hand results and outcome) and returns the winner/loser modal frame;
+/// `None` while it is still running.
+async fn tournament_over_frame(
+    session: &mut TableSession,
+    pool: Option<&PgPool>,
+    session_id: Option<i32>,
+) -> Option<String> {
+    let result = session.tournament_result()?;
+    let hand_results = session.take_hand_results();
+    let frame = finalize_tournament(pool, session_id, &result, hand_results).await;
+    close_session(pool, session_id).await;
+    Some(frame)
 }
 
 /// Deals the first hand and drives opponents until the hero must act.
@@ -1239,6 +1260,45 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn tournament_over_frame_matches_the_session_outcome() {
+        let mut state = hero_decision_state();
+        state.set_stack(Seat::Opponent1, 0);
+        state.set_stack(Seat::Opponent2, 0);
+        state.set_eliminated(Seat::Opponent1, true);
+        state.set_eliminated(Seat::Opponent2, true);
+        let mut session = TableSession::resume(
+            state,
+            crate::card::Deck::default(),
+            9,
+            99,
+            MctsConfig::test(),
+            SurvivalConfig::default(),
+            BlunderConfig::default(),
+        );
+        assert!(
+            session.tournament_result().unwrap().won,
+            "the hero is the only seat left"
+        );
+
+        let frame = tournament_over_frame(&mut session, None, Some(7)).await;
+        assert_eq!(
+            parse(&frame.unwrap()),
+            json!({"type": "TOURNAMENT_FINISHED", "won": true, "url": "/tournaments/7"})
+        );
+        assert!(
+            session.take_hand_results().is_empty(),
+            "finalization drains the queued hand results"
+        );
+    }
+
+    #[tokio::test]
+    async fn tournament_over_frame_is_none_while_the_tournament_runs() {
+        let mut session = make_session();
+        let frame = tournament_over_frame(&mut session, None, Some(9)).await;
+        assert_eq!(frame, None, "a live table has no final modal yet");
     }
 
     #[test]

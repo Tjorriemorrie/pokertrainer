@@ -966,6 +966,35 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
 .pt-result-badge.win { background: #064e3b; color: #86efac; }
 .pt-result-badge.loss { background: #7f1d1d; color: #fecaca; }
 
+.pt-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  margin-bottom: 1rem;
+  font-size: 0.85rem;
+}
+
+.pt-pagination-link {
+  color: #93c5fd;
+  text-decoration: none;
+  padding: 0.35rem 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.pt-pagination-link:hover { border-color: var(--gold); color: var(--gold); }
+
+.pt-pagination-link.is-disabled {
+  color: #4b5563;
+  border-color: #1f2937;
+  background: transparent;
+  pointer-events: none;
+}
+
+.pt-pagination-page { color: #9ca3af; }
+
 /* --------------------------------------------------- tournament detail */
 
 .pt-detail {
