@@ -4,7 +4,6 @@
   const table = document.getElementById("table");
   const feedback = document.getElementById("feedback");
   const statusEl = document.getElementById("ws-status");
-  const mctsEl = document.getElementById("mcts-status");
   const soundBtn = document.getElementById("sound-toggle");
   const chartData = [];
   let ws = null;
@@ -183,6 +182,7 @@ function setStatus(text, cls) {
   }
 
   function setSolverStatus(msg) {
+    const mctsEl = document.getElementById("mcts-status");
     if (!mctsEl) return;
     const depth = `d${msg.tree_depth}/${msg.max_depth}`;
     const text = `${depth} · ${formatK(msg.iterations_done)}`;
@@ -199,6 +199,7 @@ function setStatus(text, cls) {
   }
 
   function resetSolverStatus() {
+    const mctsEl = document.getElementById("mcts-status");
     if (!mctsEl) return;
     mctsEl.textContent = "solver idle";
     mctsEl.className = "mcts-status status-bad";

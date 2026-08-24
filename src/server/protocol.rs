@@ -59,8 +59,8 @@ pub enum ServerMessage {
     ChartSnapshot { points: Vec<ChartPoint> },
     /// The background solver's live progress for the current hero decision:
     /// how many of the street-scaled iterations are done and how deep the
-    /// tree has grown, so the header can show a depth badge that turns green
-    /// as the search approaches its budget.
+    /// tree has grown, so the action dock can show a depth badge that turns
+    /// green as the search approaches its budget.
     SearchStatus {
         iterations_done: u64,
         target_iterations: u64,

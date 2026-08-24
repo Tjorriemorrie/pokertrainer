@@ -871,6 +871,104 @@ mod tests {
         run_searcher(command_rx, update_tx, MctsConfig::test(), dead_ranges).await;
     }
 
+    #[tokio::test]
+    async fn searcher_task_picks_up_a_command_arriving_while_it_waits() {
+        let (command_tx, command_rx) = mpsc::unbounded_channel();
+        let (update_tx, mut update_rx) = mpsc::unbounded_channel();
+        let state = hero_decision_state();
+        let task = tokio::spawn(run_searcher(
+            command_rx,
+            update_tx,
+            MctsConfig::test(),
+            uniform_ranges(),
+        ));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        command_tx
+            .send(SearchCommand::Reshape {
+                state: Box::new(observable_clone(&state)),
+                path: None,
+                hand_no: 1,
+            })
+            .unwrap();
+        let status = tokio::time::timeout(Duration::from_secs(5), update_rx.recv())
+            .await
+            .expect("a command sent while the worker is parked still starts the search")
+            .expect("the solver stays alive");
+        assert!(!status.result.actions.is_empty());
+        command_tx.send(SearchCommand::Stop).unwrap();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn searcher_task_reshapes_while_idle_between_budgets() {
+        let (command_tx, command_rx) = mpsc::unbounded_channel();
+        let (update_tx, mut update_rx) = mpsc::unbounded_channel();
+        let state = hero_decision_state();
+        command_tx
+            .send(SearchCommand::Reshape {
+                state: Box::new(observable_clone(&state)),
+                path: None,
+                hand_no: 1,
+            })
+            .unwrap();
+        let task = tokio::spawn(run_searcher(
+            command_rx,
+            update_tx,
+            MctsConfig::test(),
+            uniform_ranges(),
+        ));
+        let mut status = tokio::time::timeout(Duration::from_secs(5), update_rx.recv())
+            .await
+            .expect("the solver publishes a status")
+            .expect("the solver stays alive");
+        while status.phase != SearcherPhase::Ready {
+            status = tokio::time::timeout(Duration::from_secs(5), update_rx.recv())
+                .await
+                .expect("the solver keeps publishing")
+                .expect("the solver stays alive");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        command_tx
+            .send(SearchCommand::Reshape {
+                state: Box::new(observable_clone(&state)),
+                path: None,
+                hand_no: 2,
+            })
+            .unwrap();
+        let status = tokio::time::timeout(Duration::from_secs(5), update_rx.recv())
+            .await
+            .expect("an idle solver wakes up and publishes on the reshaped tree")
+            .expect("the solver stays alive");
+        assert!(!status.result.actions.is_empty());
+        command_tx.send(SearchCommand::Stop).unwrap();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn analytics_failures_log_but_never_block_the_table() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_millis(300))
+            .connect_lazy("postgres://user:pass@127.0.0.1:1/nope")
+            .expect("a lazy pool builds without touching the network");
+        assert!(
+            open_session(Some(&pool)).await.is_none(),
+            "an unreachable database yields no analytics session"
+        );
+        close_session(Some(&pool), Some(17)).await;
+        let mut session = make_session();
+        let _ = handle_client_message(
+            &mut session,
+            r#"{"type":"ACTION_SUBMIT","action":{"kind":"call"}}"#,
+            None,
+        );
+        persist_records(Some(&pool), Some(17), &mut session).await;
+        assert!(
+            session.take_records().is_empty(),
+            "records are drained even when persistence fails"
+        );
+    }
+
     fn parse(text: &str) -> Value {
         serde_json::from_str(text).unwrap()
     }

@@ -66,7 +66,7 @@ impl SearcherPhase {
 }
 
 /// The latest combined snapshot plus the progress the client renders in the
-/// header. Published after every work chunk.
+/// action dock's solver-depth badge. Published after every work chunk.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SearcherStatus {
     pub result: SolveResult,

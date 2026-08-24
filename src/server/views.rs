@@ -17,14 +17,13 @@ pub fn index_page() -> String {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Poker Trainer</title>
-<link rel="stylesheet" href="/assets/style.css?v=10">
+<link rel="stylesheet" href="/assets/style.css?v=11">
 </head>
 <body class="pt-body">
   <header class="pt-topwrap">
     <div class="pt-brand">Poker Trainer</div>
     <canvas id="ev-chart" width="1200" height="48" class="ev-chart"></canvas>
     <div id="ws-status" class="status-wait">connecting…</div>
-    <div id="mcts-status" class="mcts-status status-bad">solver idle</div>
     <button id="sound-toggle" class="pt-icon-btn" type="button" title="Toggle table sounds">🔊</button>
     <a href="/tournaments" class="pt-link">Tournament history</a>
     <button id="finish-table" class="action-btn" type="button">Finish table</button>
@@ -52,7 +51,7 @@ pub fn index_page() -> String {
       <button id="tournament-modal-continue" class="action-btn pt-confirm" type="button">Continue</button>
     </div>
   </div>
-  <script src="/assets/app.js?v=4"></script>
+  <script src="/assets/app.js?v=5"></script>
 </body>
 </html>"#
         .to_string()
@@ -69,7 +68,7 @@ pub fn tournaments_page(sessions: &[(SessionSummary, Vec<ChartPoint>)]) -> Strin
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Poker Trainer — Tournaments</title>
-<link rel="stylesheet" href="/assets/style.css?v=10">
+<link rel="stylesheet" href="/assets/style.css?v=11">
 </head>
 <body class="pt-body">
 <header class="pt-topwrap">
@@ -172,7 +171,7 @@ pub fn tournament_detail_page(detail: &TournamentDetail) -> String {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Poker Trainer — Tournament #{}</title>
-<link rel="stylesheet" href="/assets/style.css?v=10">
+<link rel="stylesheet" href="/assets/style.css?v=11">
 </head>
 <body class="pt-body">
 <header class="pt-topwrap">
@@ -327,8 +326,9 @@ fn stack_text(stack: u32, big_blind: u32) -> String {
 /// The raw table-state HTML fragment swapped into the DOM on every state
 /// change: a GGPoker-style oval felt with fixed seat positions (folded and
 /// busted players stay seated), the board, the pot, the action dock in its
-/// own right-aligned block below the oval (never covering the hero's cards),
-/// and an always-visible action log docked to the left of the oval, exactly
+/// own right-aligned block below the oval (never covering the hero's cards)
+/// with the live solver-depth badge docked top-left of the same block, and
+/// an always-visible action log docked to the left of the oval, exactly
 /// as tall as the table. `sounds` carries the WebAudio cues the client
 /// synthesizes for this update.
 pub fn table_fragment(state: &GameState, hand_no: u64, log: &[String], sounds: &[Sound]) -> String {
@@ -380,6 +380,7 @@ pub fn table_fragment(state: &GameState, hand_no: u64, log: &[String], sounds: &
 
     if !state.is_hand_over() && state.to_act() == Seat::Hero {
         html.push_str(r#"<div class="pt-action-block">"#);
+        html.push_str(r#"<div id="mcts-status" class="mcts-status status-bad">solver idle</div>"#);
         html.push_str(&action_panel(state));
         html.push_str("</div>");
     }
@@ -976,11 +977,11 @@ mod tests {
             "the sound toggle is present"
         );
         assert!(
-            page.contains(r#"id="mcts-status""#),
-            "the solver depth badge is present"
+            !page.contains(r#"id="mcts-status""#),
+            "the solver depth badge lives in the action dock, not the header shell"
         );
         assert!(
-            page.contains(r#"/assets/style.css?v=10"#),
+            page.contains(r#"/assets/style.css?v=11"#),
             "the stylesheet link is versioned so browsers drop stale cached CSS"
         );
         assert!(
@@ -1164,6 +1165,13 @@ mod tests {
             "{fragment}"
         );
         assert!(fragment.contains(r#"data-kind="fold"#));
+        assert!(
+            fragment.contains(r#"class="pt-action-block">"#)
+                && fragment.contains(
+                    r#"id="mcts-status" class="mcts-status status-bad">solver idle</div>"#
+                ),
+            "the solver depth badge sits in the action dock while the hero acts: {fragment}"
+        );
         assert!(fragment.contains("You check"), "log lines are shown");
         let hero_cards = state.hero_cards();
         for card in hero_cards {
@@ -1339,8 +1347,9 @@ mod tests {
             "the action panel renders in its own block below the oval: {fragment}"
         );
         assert!(
-            fragment.contains(r#"<div class="pt-action-block"><div id="action-panel""#),
-            "{fragment}"
+            fragment.contains(r#"<div class="pt-action-block"><div id="mcts-status""#)
+                && dock > fragment.find(r#"id="mcts-status""#).unwrap(),
+            "the depth badge leads the action block and the panel stays under the oval: {fragment}"
         );
     }
 
