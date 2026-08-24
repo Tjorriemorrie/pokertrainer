@@ -121,7 +121,10 @@ interface and coaches decision-making with a range-based solver.
   as the betting round closes. An **action log** is docked to the left of the
   oval, exactly as tall as the table, always visible: hand deals, folds,
   calls, bets, raises and results are appended below earlier entries and the
-  panel auto-scrolls to the newest line. When a hand ends, no centre banner
+  panel auto-scrolls to the newest line. At showdown every player's revealed
+  cards (with their hand class) are logged, followed by the winner's payout,
+  so the log tells the whole story of the hand. When a hand ends, no centre
+  banner
   appears: a gold **WIN** ribbon drops over the winner's seat showing the
   exact amount they took down (and the win jingle plays), stays for about two
   seconds, and then the next hand is dealt automatically. Amounts render

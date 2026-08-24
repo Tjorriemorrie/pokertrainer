@@ -490,7 +490,7 @@ impl TableSession {
 
     fn log_hand_result(&mut self) {
         self.push_sound(Sound::Win);
-        let Some(result) = self.state.hand_result() else {
+        let Some(result) = self.state.hand_result().cloned() else {
             return;
         };
         let total: u32 = result.awards.iter().map(|award| award.amount).sum();
@@ -499,6 +499,9 @@ impl TableSession {
                 self.log_line(format!("{winner} win {total} — everyone else folded"));
             }
             HandEndReason::Showdown => {
+                for (seat, cards, class) in &result.revealed {
+                    self.log_line(format!("{seat} shows {} {} ({class})", cards[0], cards[1]));
+                }
                 let winners: Vec<String> = result
                     .awards
                     .iter()
@@ -1243,6 +1246,31 @@ mod tests {
         session.log_line("final".to_string());
         assert_eq!(session.log().len(), MAX_LOG_LINES);
         assert_eq!(session.log().last().unwrap(), "final");
+    }
+
+    /// At showdown every revealed hand is logged, followed by the winner's
+    /// payout, so the action log tells the whole story of the hand.
+    #[test]
+    fn showdown_logs_revealed_cards_and_winner_amount() {
+        let mut session = TableSession::resume(
+            river_facing_bet(),
+            Deck::default(),
+            1,
+            50,
+            probe_config(),
+            survival(),
+            never_intercepts(),
+        );
+        session.submit(Action::Call).unwrap();
+        let log = session.log();
+        assert!(
+            log.iter().any(|line| line.contains("shows")),
+            "revealed cards are logged at showdown: {log:?}"
+        );
+        assert!(
+            log.iter().any(|line| line.starts_with("Showdown ·")),
+            "the winner's payout is logged at showdown: {log:?}"
+        );
     }
 
     /// Sound cues accumulate with the actions they describe and are
