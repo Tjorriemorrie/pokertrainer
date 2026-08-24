@@ -140,7 +140,9 @@ interface and coaches decision-making with a range-based solver.
   front of their pod — hero included — and is swept into the pot pill as soon
   as the betting round closes. An **action log** is docked to the left of the
   oval, exactly as tall as the table, always visible: hand deals, folds,
-  calls, bets, raises and results are appended below earlier entries and the
+  calls, bets, raises, the dealt board (each street's cards are logged as
+  they land — `Flop 2c 7h Kd`, `Turn 4s`, `River Jd`), and results are
+  appended below earlier entries and the
   panel auto-scrolls to the newest line. At showdown every player's revealed
   cards (with their hand class) are logged, followed by a line stating who
   won (name, amount, and the winning hand class) or how the pot was split,

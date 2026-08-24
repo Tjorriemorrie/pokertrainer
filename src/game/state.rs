@@ -181,8 +181,15 @@ impl GameState {
         let call_amount = to_call.min(stack);
 
         let can_bet = to_call == 0 && stack > 0;
-        let min_bet = self.blind_level.big_blind.min(stack);
-        let max_bet = stack;
+        // A "bet" is a raise-to amount, so when the street already has chips
+        // in (the big blind playing its option) the minimum is a real
+        // minimum raise, never a bet back down to the current amount.
+        let min_bet = self
+            .current_bet
+            .saturating_add(self.min_raise)
+            .max(self.blind_level.big_blind)
+            .min(self.street_contrib[seat.index()] + stack);
+        let max_bet = self.street_contrib[seat.index()] + stack;
 
         let can_raise = to_call > 0 && stack > to_call && self.last_full_raise != Some(seat);
         let min_raise_to = self.current_bet + self.min_raise;
@@ -232,9 +239,13 @@ impl GameState {
                 self.acted[seat.index()] = true;
             }
             Action::Bet(amount) => {
-                self.commit(seat, amount);
+                let previous_bet = self.current_bet;
+                self.commit(
+                    seat,
+                    amount.saturating_sub(self.street_contrib[seat.index()]),
+                );
                 self.current_bet = amount;
-                self.min_raise = amount;
+                self.min_raise = amount.saturating_sub(previous_bet);
                 self.last_full_raise = Some(seat);
                 self.acted[seat.index()] = true;
             }
@@ -808,8 +819,58 @@ mod tests {
         assert!(legal.can_check);
         assert!(!legal.can_call);
         assert!(legal.can_bet);
-        assert_eq!(legal.min_bet, 20);
+        // A "bet" is a raise-to amount, so the BB's option begins at a true
+        // minimum raise: 20 in the pot plus the 20 minimum raise.
+        assert_eq!(legal.min_bet, 40);
         assert!(legal.can_all_in);
+    }
+
+    #[test]
+    fn big_blind_bet_closes_the_round_cleanly() {
+        // Regression: hero is the BB (button on Opponent 2, Hand #3 layout),
+        // both opponents limp, and the hero bets (raise-to) 60. The posted
+        // blind must count toward that total — committing the full 60 again
+        // left the hero at 80 while the opponents sat at 60, which wedged
+        // `round_complete` and stranded the hand preflop with no flop.
+        let mut state = GameState::new(Seat::Opponent2, level());
+        state.start_hand(&mut deck(16)).unwrap();
+        assert_eq!(state.to_act(), Seat::Opponent1);
+        state.apply_action(Action::Call).unwrap();
+        assert_eq!(state.to_act(), Seat::Opponent2);
+        state.apply_action(Action::Call).unwrap();
+        assert_eq!(state.to_act(), Seat::Hero);
+
+        let legal = state.legal_actions();
+        assert!(legal.can_bet);
+        assert_eq!(legal.min_bet, 40, "the BB's rebet is at least a min raise");
+        assert!(legal.allows(Action::Bet(60)));
+
+        assert_eq!(state.street_contribution(Seat::Hero), 20);
+        state.apply_action(Action::Bet(60)).unwrap();
+        assert_eq!(
+            state.street_contribution(Seat::Hero),
+            60,
+            "the posted blind counts toward the bet total"
+        );
+        assert_eq!(state.current_bet(), 60);
+        assert_eq!(state.stack(Seat::Hero), 440);
+
+        assert_eq!(
+            state.apply_action(Action::Call).unwrap(),
+            ActionOutcome::Continue
+        );
+        assert_eq!(
+            state.apply_action(Action::Call).unwrap(),
+            ActionOutcome::StreetEnded,
+            "both calls close the round, so the flop can be dealt"
+        );
+        for seat in Seat::ALL {
+            assert_eq!(state.street_contribution(seat), 60, "{seat}");
+        }
+
+        state.advance_street(&mut Deck::default()).unwrap();
+        assert_eq!(state.street(), Street::Flop);
+        assert_eq!(state.board().len(), 3);
     }
 
     #[test]

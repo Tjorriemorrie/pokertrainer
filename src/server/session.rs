@@ -392,7 +392,7 @@ impl TableSession {
             self.opponents
                 .record(actor, action, self.state.street(), legal.call_amount > 0);
             self.pump_actions.push(action);
-            let outcome = apply_settled(&mut self.state, &mut self.deck, action)?;
+            let outcome = self.settle_action(action)?;
             tracing::info!(
                 hand_no = self.hand_no,
                 seat = %actor,
@@ -558,7 +558,7 @@ impl TableSession {
         if let Some(sound) = Self::sound_for(action) {
             self.push_sound(sound);
         }
-        let outcome = apply_settled(&mut self.state, &mut self.deck, action)?;
+        let outcome = self.settle_action(action)?;
         tracing::info!(
             hand_no = self.hand_no,
             action_index,
@@ -583,6 +583,28 @@ impl TableSession {
             },
             TableEvent::State,
         ])
+    }
+
+    /// Applies one action and settles the street/hand boundaries it creates,
+    /// appending action-log lines for any board cards that were dealt as a
+    /// result (flop/turn/river — showdown run-outs narrate all three).
+    fn settle_action(&mut self, action: Action) -> Result<ActionOutcome> {
+        let board_before = self.state.board().len();
+        let outcome = apply_settled(&mut self.state, &mut self.deck, action)?;
+        let board = self.state.board().to_vec();
+        if board.len() > board_before {
+            if board_before < 3 && board.len() >= 3 {
+                self.log_line(format!("Flop {}", cards_text(&board[..3])));
+            }
+            if board_before < 4 && board.len() >= 4 {
+                self.log_line(format!("Turn {}", board[3]));
+            }
+            if board_before < 5 && board.len() >= 5 {
+                self.log_line(format!("River {}", board[4]));
+            }
+            self.push_sound(Sound::Deal);
+        }
+        Ok(outcome)
     }
 
     fn log_line(&mut self, line: String) {
@@ -667,6 +689,16 @@ fn hole_cards_text(cards: Option<[Card; 2]>) -> String {
         Some([first, second]) => format!("{first} {second}"),
         None => "—".to_string(),
     }
+}
+
+/// Formats dealt board cards as space-separated codes for log lines:
+/// `"2c 7h Kd"`.
+fn cards_text(cards: &[Card]) -> String {
+    cards
+        .iter()
+        .map(|card| card.to_string())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Applies an action and settles any street or hand boundary it creates:
@@ -876,6 +908,108 @@ mod tests {
         assert_eq!(session.state().to_act(), Seat::Hero);
         assert_eq!(session.hand_no(), 1);
         assert!(!session.state().is_hand_over());
+    }
+
+    /// Every street action is logged and, when a street is dealt or run out,
+    /// the board cards appear in the log under their street name.
+    #[test]
+    fn board_cards_are_logged_as_streets_are_dealt() {
+        // Hand layout: button on Opponent 2, the hero is the BB; both
+        // opponents limp so the hero faces a bet/check decision.
+        let mut deck = Deck::default();
+        let mut state = GameState::new(Seat::Opponent2, level());
+        state.start_hand(&mut deck).unwrap();
+        state.apply_action(Action::Call).unwrap();
+        state.apply_action(Action::Call).unwrap();
+        assert_eq!(state.to_act(), Seat::Hero);
+
+        let mut session = TableSession::resume(
+            state,
+            deck,
+            3,
+            63,
+            probe_config(),
+            survival(),
+            never_intercepts(),
+        );
+
+        // Preflop closes on the hero's bet: it is a "raise to" total, so the
+        // posted blind is not committed twice (regression: the street used
+        // to wedge open and never deal a flop).
+        session.settle_action(Action::Bet(60)).unwrap();
+        session.settle_action(Action::Call).unwrap();
+        session.settle_action(Action::Call).unwrap();
+        assert_eq!(session.state().street(), Street::Flop);
+        assert_eq!(session.state().board().len(), 3);
+        let board = session.state().board();
+        let flop = format!("Flop {} {} {}", board[0], board[1], board[2]);
+        assert!(
+            session.log().contains(&flop),
+            "flop cards are logged: {:?}",
+            session.log()
+        );
+
+        // Postflop the hero acts first (button on Opponent 2). Checks
+        // around deal the turn and river, each logged with its card.
+        session.settle_action(Action::Check).unwrap();
+        session.settle_action(Action::Check).unwrap();
+        session.settle_action(Action::Check).unwrap();
+        assert_eq!(session.state().street(), Street::Turn);
+        let board = session.state().board();
+        let turn = format!("Turn {}", board[3]);
+        assert!(
+            session.log().contains(&turn),
+            "turn card is logged: {:?}",
+            session.log()
+        );
+
+        session.settle_action(Action::Check).unwrap();
+        session.settle_action(Action::Check).unwrap();
+        session.settle_action(Action::Check).unwrap();
+        assert_eq!(session.state().street(), Street::River);
+        assert_eq!(session.state().board().len(), 5);
+        let board = session.state().board();
+        let river = format!("River {}", board[4]);
+        assert!(
+            session.log().contains(&river),
+            "river card is logged: {:?}",
+            session.log()
+        );
+    }
+
+    /// All-in preflop: the showdown runs out the whole board at once, and the
+    /// log narrates flop, turn, and river.
+    #[test]
+    fn showdown_runout_logs_every_street() {
+        let mut deck = Deck::default();
+        let mut state = GameState::new(Seat::Opponent1, level());
+        state.start_hand(&mut deck).unwrap();
+
+        let mut session = TableSession::resume(
+            state,
+            deck,
+            2,
+            64,
+            probe_config(),
+            survival(),
+            never_intercepts(),
+        );
+        // Drive an all-in snowball deterministically: hero, Opponent 2, then
+        // Opponent 1 all shove; the hand ends at showdown with 5 board cards.
+        session.settle_action(Action::AllIn).unwrap();
+        session.settle_action(Action::AllIn).unwrap();
+        session.settle_action(Action::AllIn).unwrap();
+        assert!(session.state().is_hand_over());
+
+        let board = session.state().board();
+        assert_eq!(board.len(), 5);
+        let lines = session.log();
+        assert!(
+            lines.contains(&format!("Flop {} {} {}", board[0], board[1], board[2])),
+            "{lines:?}"
+        );
+        assert!(lines.contains(&format!("Turn {}", board[3])), "{lines:?}");
+        assert!(lines.contains(&format!("River {}", board[4])), "{lines:?}");
     }
 
     #[test]
