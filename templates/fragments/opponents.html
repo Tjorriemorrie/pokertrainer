@@ -1,0 +1,20 @@
+{#
+The opponents' HUD cards: seat name with position badges and live status, the
+stack pill (chips with the `?`/Alt BB reveal), the stat grid, and the
+player-friendly read of each opponent's play.
+#}{% import "partials/table.html" as t -%}
+<section class="pt-feedback-card pt-opp-block"><h2 class="pt-overlay-title">Opponents</h2><div class="pt-opp-grid">
+{%- for opp in opponents -%}
+<article class="pt-opp-card">
+<div class="pt-opp-head"><span class="pt-opp-name">{{ opp.name }}{% if opp.is_button %}<span class="pt-badge btn">BTN</span>{% endif %}{% if opp.is_small_blind %}<span class="pt-badge sb">SB</span>{% endif %}{% if opp.is_big_blind %}<span class="pt-badge bb">BB</span>{% endif %}</span>{% if !opp.flag_label.is_empty() %}<span class="pt-opp-flag {{ opp.flag_class }}">{{ opp.flag_label }}</span>{% endif %}<span class="pt-stack">{{ t::stack_pill(opp.stack, opp.stack_bb) }}</span></div>
+<div class="pt-opp-stats">
+<div class="pt-opp-stat"><span>Hands</span><b>{{ opp.hands }}</b></div>
+<div class="pt-opp-stat"><span>VPIP</span><b>{{ opp.vpip }}%</b></div>
+<div class="pt-opp-stat"><span>PFR</span><b>{{ opp.pfr }}%</b></div>
+<div class="pt-opp-stat"><span>Folds to bet</span><b>{{ opp.fold_to_bet }}%</b></div>
+<div class="pt-opp-stat"><span>Aggression</span><b>{{ opp.aggression }}</b></div>
+</div>
+<p class="pt-opp-read">{{ opp.read }}</p>
+</article>
+{%- endfor -%}
+</div></section>

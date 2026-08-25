@@ -1,0 +1,38 @@
+{#
+The tactical-breakdown fragment rendered into the coach-feedback panel beside the
+table: the opponents' live HUD cards first, then a plain-English takeaway
+sentence, the played vs optimal action comparison, and the candidate table sorted
+from cheapest (fold first) to all-in.
+
+Intercepted blunders freeze the table: the card is titled accordingly and only
+offers a confirmation that unlocks the transition (the coach's best-EV action).
+
+`opponents` is a nested template struct, already rendered with its own escaping
+applied — `|safe` stops the composed markup being escaped a second time. Never
+put `|safe` on raw data.
+#}<div id="tactical-overlay" class="pt-tactical">{{ opponents|safe }}<section class="pt-feedback-card"><div class="pt-overlay-card">
+{%- if intercepted -%}
+<h2 class="pt-overlay-title">Hand #{{ hand_no }} — Blunder intercepted</h2>
+{%- else -%}
+<h2 class="pt-overlay-title">Hand #{{ hand_no }} — Decision review</h2>
+{%- endif -%}
+<div class="pt-ev-diff">{{ sentence }}</div>
+{%- if let Some(played) = played -%}
+<div class="pt-compare"><div class="pt-played">You played <b>{{ played.label }}</b> — EV {{ played.ev }}</div><div class="pt-optimal">Optimal: <b>{{ optimal_label }}</b> — EV {{ optimal_ev }}</div></div><div class="pt-ev-loss">EV lost: <b>{{ played.ev_loss_bb }}</b> BB</div>
+{%- else -%}
+<div class="pt-compare"><div class="pt-optimal">Optimal: <b>{{ optimal_label }}</b> — EV {{ optimal_ev }}</div></div>
+{%- endif -%}
+<table class="pt-ranking"><tr><th>Action</th><th>EV</th><th>σ</th><th>Bust</th><th>Visits</th></tr>
+{%- for row in ranking -%}
+<tr class="{{ row.class }}"><td>{{ row.label }}</td><td>{{ row.ev }}</td><td>{{ row.sigma }}</td><td>{{ row.bust }}%</td><td>{{ row.visits }}</td></tr>
+{%- endfor -%}
+</table><div class="pt-search-meta {{ effort.class }}" title="{{ effort.tooltip }}">
+<span class="pt-search-badge">{{ effort.label }}</span>
+<span class="pt-search-body"><span class="pt-search-caption">{{ effort.caption }}</span><span class="pt-search-note">{{ effort.note }}</span></span>
+</div>
+{%- if intercepted -%}
+<button class="action-btn pt-confirm" data-overlay-confirm>Continue</button>
+{%- else -%}
+<button class="action-btn" data-overlay-close>Continue</button>
+{%- endif -%}
+</div></section></div>

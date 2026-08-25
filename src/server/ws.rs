@@ -936,19 +936,22 @@ fn events_to_messages(session: &mut TableSession, events: Vec<TableEvent>) -> Ve
                 decision,
                 hand_no,
                 intercepted,
-            } => ServerMessage::TriggerTacticalOverlay {
-                fragment: views::tactical_overlay_fragment(
-                    hand_no,
-                    &decision,
-                    intercepted,
-                    &session.opponent_snapshots(),
-                    session.state().blind_level().big_blind,
-                    session.state().legal_actions().call_amount,
-                    session.state().stack(Seat::Hero),
-                ),
+            } => views::tactical_overlay_fragment(
+                hand_no,
+                &decision,
                 intercepted,
-            }
-            .to_json(),
+                &session.opponent_snapshots(),
+                session.state().blind_level().big_blind,
+                session.state().legal_actions().call_amount,
+                session.state().stack(Seat::Hero),
+            )
+            .and_then(|fragment| {
+                ServerMessage::TriggerTacticalOverlay {
+                    fragment,
+                    intercepted,
+                }
+                .to_json()
+            }),
             TableEvent::ChartTick {
                 action_index,
                 ev_loss,

@@ -201,17 +201,6 @@ pub fn tournament_detail_page(detail: &TournamentDetail) -> Result<String> {
     .render()?)
 }
 
-/// Formats a stack pill: chips first, then the big-blind equivalent hidden
-/// behind a `?` placeholder — holding Alt reveals the real value, so the
-/// player learns to convert chips to blinds without the client doing it.
-/// Still used by the tactical overlay's opponent HUD cards.
-fn stack_text(stack: u32, big_blind: u32) -> String {
-    let bb = stack as f32 / big_blind as f32;
-    format!(
-        "{stack}<span class=\"pt-bb\"><span class=\"pt-bb-q\">?</span><span class=\"pt-bb-real\" data-bb=\"{bb:.1}\">{bb:.1}&nbsp;BB</span></span>"
-    )
-}
-
 /// One `pt-stat-card`. Values arrive pre-formatted so `std::fmt` (not the
 /// template) decides the rounding.
 struct Stat {
@@ -621,15 +610,6 @@ fn round1(value: f64) -> f64 {
     (value * 10.0).round() / 10.0
 }
 
-/// Escapes a dynamic string for safe HTML embedding.
-fn escape(input: &str) -> String {
-    input
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
 /// A terse imperative label for an action, used on buttons and in the
 /// tactical overlay: `Fold`, `Check`, `Call`, `Bet 100`, `Raise 400`, `All-in`.
 pub fn action_label(action: Action) -> String {
@@ -1006,6 +986,104 @@ fn pot_percent_label(bucket: BetSize) -> &'static str {
 /// candidate table sorted from cheapest (fold first) to all-in. Intercepted
 /// blunders freeze the table: the card is titled accordingly and only offers
 /// a confirmation that unlocks the transition (the coach's best-EV action).
+/// One opponent's HUD card.
+struct OpponentView {
+    name: String,
+    is_button: bool,
+    is_small_blind: bool,
+    is_big_blind: bool,
+    /// Empty `flag_label` means no status flag at all.
+    flag_class: &'static str,
+    flag_label: &'static str,
+    stack: u32,
+    stack_bb: String,
+    hands: usize,
+    vpip: String,
+    pfr: String,
+    fold_to_bet: String,
+    aggression: String,
+    read: String,
+}
+
+#[derive(Template)]
+#[template(path = "fragments/opponents.html")]
+struct OpponentsFragment {
+    opponents: Vec<OpponentView>,
+}
+
+impl OpponentsFragment {
+    fn new(opponents: &[OpponentSnapshot], big_blind: u32) -> Self {
+        Self {
+            opponents: opponents
+                .iter()
+                .map(|opponent| {
+                    let (flag_class, flag_label) = if opponent.folded {
+                        ("fold", "Folded")
+                    } else if opponent.all_in {
+                        ("allin", "All-in")
+                    } else if opponent.stack == 0 {
+                        ("bust", "OUT")
+                    } else {
+                        ("", "")
+                    };
+                    OpponentView {
+                        name: opponent.seat.to_string(),
+                        is_button: opponent.is_button,
+                        is_small_blind: opponent.is_small_blind,
+                        is_big_blind: opponent.is_big_blind,
+                        flag_class,
+                        flag_label,
+                        stack: opponent.stack,
+                        stack_bb: format!("{:.1}", opponent.stack as f32 / big_blind as f32),
+                        hands: opponent.hands,
+                        vpip: format!("{:.0}", opponent.vpip_pct),
+                        pfr: format!("{:.0}", opponent.pfr_pct),
+                        fold_to_bet: format!("{:.0}", opponent.fold_to_bet_pct),
+                        aggression: match (opponent.postflop_bets, opponent.postflop_calls) {
+                            (0, 0) => "—".to_string(),
+                            (_, 0) => "∞".to_string(),
+                            (bets, calls) => format!("{:.1}", bets as f64 / calls as f64),
+                        },
+                        read: opponent.read.clone(),
+                    }
+                })
+                .collect(),
+        }
+    }
+}
+
+/// The hero's played action, when there was one to compare against.
+struct PlayedView {
+    label: String,
+    ev: String,
+    ev_loss_bb: String,
+}
+
+/// One row of the candidate table.
+struct RankingRow {
+    /// `optimal`, `played`, or empty.
+    class: &'static str,
+    label: String,
+    ev: String,
+    sigma: String,
+    bust: String,
+    visits: u64,
+}
+
+#[derive(Template)]
+#[template(path = "fragments/tactical_overlay.html")]
+struct TacticalOverlayFragment {
+    hand_no: u64,
+    intercepted: bool,
+    opponents: OpponentsFragment,
+    sentence: String,
+    played: Option<PlayedView>,
+    optimal_label: String,
+    optimal_ev: String,
+    ranking: Vec<RankingRow>,
+    effort: SearchEffort,
+}
+
 pub fn tactical_overlay_fragment(
     hand_no: u64,
     decision: &AnalyzedDecision,
@@ -1014,86 +1092,46 @@ pub fn tactical_overlay_fragment(
     big_blind: u32,
     call_amount: u32,
     hero_stack: u32,
-) -> String {
+) -> Result<String> {
     let optimal = decision.optimal;
-    let mut html = String::from(r#"<div id="tactical-overlay" class="pt-tactical">"#);
-
-    html.push_str(&opponents_block(opponents, big_blind));
-
-    html.push_str(r#"<section class="pt-feedback-card">"#);
-    html.push_str(r#"<div class="pt-overlay-card">"#);
-    if intercepted {
-        html.push_str(&format!(
-            r#"<h2 class="pt-overlay-title">Hand #{hand_no} — Blunder intercepted</h2>"#
-        ));
-    } else {
-        html.push_str(&format!(
-            r#"<h2 class="pt-overlay-title">Hand #{hand_no} — Decision review</h2>"#
-        ));
-    }
-
-    html.push_str(&ev_diff_sentence(decision));
-
-    if let Some(played) = &decision.played {
-        html.push_str(&format!(
-            r#"<div class="pt-compare"><div class="pt-played">You played <b>{}</b> — EV {:.1}</div><div class="pt-optimal">Optimal: <b>{}</b> — EV {:.1}</div></div>"#,
-            escape(&action_label(played.analysis.action)),
-            played.analysis.ev,
-            escape(&action_label(optimal.action)),
-            optimal.ev
-        ));
-        html.push_str(&format!(
-            r#"<div class="pt-ev-loss">EV lost: <b>{:.2}</b> BB</div>"#,
-            played.ev_loss_bb
-        ));
-    } else {
-        html.push_str(&format!(
-            r#"<div class="pt-compare"><div class="pt-optimal">Optimal: <b>{}</b> — EV {:.1}</div></div>"#,
-            escape(&action_label(optimal.action)),
-            optimal.ev
-        ));
-    }
-
-    html.push_str(
-        r#"<table class="pt-ranking"><tr><th>Action</th><th>EV</th><th>σ</th><th>Bust</th><th>Visits</th></tr>"#,
-    );
     let mut rows: Vec<&Analysis> = decision.ranking.iter().collect();
     rows.sort_by_key(|analysis| chip_cost(analysis.action, call_amount, hero_stack));
-    for analysis in rows {
-        let row_class = if analysis.action == optimal.action {
-            "optimal"
-        } else if decision
-            .played
-            .as_ref()
-            .is_some_and(|played| played.analysis.action == analysis.action)
-        {
-            "played"
-        } else {
-            ""
-        };
-        html.push_str(&format!(
-            r#"<tr class="{row_class}"><td>{}</td><td>{:.1}</td><td>{:.0}</td><td>{:.1}%</td><td>{}</td></tr>"#,
-            escape(&action_label(analysis.action)),
-            analysis.ev,
-            analysis.sigma(),
-            analysis.bust_prob * 100.0,
-            analysis.visits
-        ));
+    Ok(TacticalOverlayFragment {
+        hand_no,
+        intercepted,
+        opponents: OpponentsFragment::new(opponents, big_blind),
+        sentence: ev_diff_sentence(decision),
+        played: decision.played.as_ref().map(|played| PlayedView {
+            label: action_label(played.analysis.action),
+            ev: format!("{:.1}", played.analysis.ev),
+            ev_loss_bb: format!("{:.2}", played.ev_loss_bb),
+        }),
+        optimal_label: action_label(optimal.action),
+        optimal_ev: format!("{:.1}", optimal.ev),
+        ranking: rows
+            .into_iter()
+            .map(|analysis| RankingRow {
+                class: if analysis.action == optimal.action {
+                    "optimal"
+                } else if decision
+                    .played
+                    .as_ref()
+                    .is_some_and(|played| played.analysis.action == analysis.action)
+                {
+                    "played"
+                } else {
+                    ""
+                },
+                label: action_label(analysis.action),
+                ev: format!("{:.1}", analysis.ev),
+                sigma: format!("{:.0}", analysis.sigma()),
+                bust: format!("{:.1}", analysis.bust_prob * 100.0),
+                visits: analysis.visits,
+            })
+            .collect(),
+        effort: search_effort(&decision.search),
     }
-    html.push_str("</table>");
-
-    html.push_str(&search_effort_html(&decision.search));
-
-    if intercepted {
-        html.push_str(
-            r#"<button class="action-btn pt-confirm" data-overlay-confirm>Continue</button>"#,
-        );
-    } else {
-        html.push_str(r#"<button class="action-btn" data-overlay-close>Continue</button>"#);
-    }
-    html.push_str("</div></section>");
-    html.push_str("</div>");
-    html
+    .render()?)
 }
 
 /// The chips an action commits on the current street — the sort key for the
@@ -1113,7 +1151,7 @@ fn chip_cost(action: Action, call_amount: u32, hero_stack: u32) -> u32 {
 /// for a human stack. Bigger leaks get sharper language.
 fn ev_diff_sentence(decision: &AnalyzedDecision) -> String {
     let optimal_label = action_label(decision.optimal.action);
-    let sentence = match decision.played.as_ref() {
+    match decision.played.as_ref() {
         Some(played) if played.is_optimal => {
             format!("Perfect — {optimal_label} was the highest-value line and you took it.")
         }
@@ -1139,70 +1177,7 @@ fn ev_diff_sentence(decision: &AnalyzedDecision) -> String {
             }
         }
         None => format!("The highest-value line in this spot is {optimal_label}."),
-    };
-    format!(r#"<div class="pt-ev-diff">{}</div>"#, escape(&sentence))
-}
-
-/// The opponents' HUD cards: seat name with position badges and live status,
-/// the stack pill (chips with the `?`/Alt BB reveal), the stat grid, and the
-/// player-friendly read of each opponent's play.
-fn opponents_block(opponents: &[OpponentSnapshot], big_blind: u32) -> String {
-    let mut html = String::from(
-        r#"<section class="pt-feedback-card pt-opp-block"><h2 class="pt-overlay-title">Opponents</h2><div class="pt-opp-grid">"#,
-    );
-    for opponent in opponents {
-        let mut badges = String::new();
-        if opponent.is_button {
-            badges.push_str(r#"<span class="pt-badge btn">BTN</span>"#);
-        }
-        if opponent.is_small_blind {
-            badges.push_str(r#"<span class="pt-badge sb">SB</span>"#);
-        }
-        if opponent.is_big_blind {
-            badges.push_str(r#"<span class="pt-badge bb">BB</span>"#);
-        }
-        let flag = if opponent.folded {
-            r#"<span class="pt-opp-flag fold">Folded</span>"#
-        } else if opponent.all_in {
-            r#"<span class="pt-opp-flag allin">All-in</span>"#
-        } else if opponent.stack == 0 {
-            r#"<span class="pt-opp-flag bust">OUT</span>"#
-        } else {
-            ""
-        };
-
-        let aggression = match (opponent.postflop_bets, opponent.postflop_calls) {
-            (0, 0) => "—".to_string(),
-            (_, 0) => "∞".to_string(),
-            (bets, calls) => format!("{:.1}", bets as f64 / calls as f64),
-        };
-
-        html.push_str(&format!(
-            r#"<article class="pt-opp-card">
-<div class="pt-opp-head"><span class="pt-opp-name">{}{}</span>{}<span class="pt-stack">{}</span></div>
-<div class="pt-opp-stats">
-<div class="pt-opp-stat"><span>Hands</span><b>{}</b></div>
-<div class="pt-opp-stat"><span>VPIP</span><b>{:.0}%</b></div>
-<div class="pt-opp-stat"><span>PFR</span><b>{:.0}%</b></div>
-<div class="pt-opp-stat"><span>Folds to bet</span><b>{:.0}%</b></div>
-<div class="pt-opp-stat"><span>Aggression</span><b>{}</b></div>
-</div>
-<p class="pt-opp-read">{}</p>
-</article>"#,
-            escape(&opponent.seat.to_string()),
-            badges,
-            flag,
-            stack_text(opponent.stack, big_blind),
-            opponent.hands,
-            opponent.vpip_pct,
-            opponent.pfr_pct,
-            opponent.fold_to_bet_pct,
-            aggression,
-            escape(&opponent.read),
-        ));
     }
-    html.push_str("</div></section>");
-    html
 }
 
 /// A plain-language summary of the search effort behind a decision: a color
@@ -1285,17 +1260,6 @@ fn human_count(value: u64) -> String {
     }
 }
 
-fn search_effort_html(search: &SearchReport) -> String {
-    let effort = search_effort(search);
-    format!(
-        r#"<div class="pt-search-meta {}" title="{}">
-<span class="pt-search-badge">{}</span>
-<span class="pt-search-body"><span class="pt-search-caption">{}</span><span class="pt-search-note">{}</span></span>
-</div>"#,
-        effort.class, effort.tooltip, effort.label, effort.caption, effort.note
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1332,14 +1296,6 @@ mod tests {
         assert_eq!(
             describe_action(Seat::Opponent1, Action::AllIn, 100),
             "Opponent 1 go all-in"
-        );
-    }
-
-    #[test]
-    fn escape_neutralizes_html_metacharacters() {
-        assert_eq!(
-            escape(r#"<script>"a&b"</script>"#),
-            "&lt;script&gt;&quot;a&amp;b&quot;&lt;/script&gt;"
         );
     }
 
@@ -2062,7 +2018,8 @@ mod tests {
             20,
             20,
             500,
-        );
+        )
+        .unwrap();
         assert!(fragment.contains("Hand #7 — Decision review"));
         assert!(fragment.contains(r#"class="pt-ev-diff""#));
         assert!(
@@ -2106,7 +2063,8 @@ mod tests {
             20,
             20,
             500,
-        );
+        )
+        .unwrap();
         assert!(fragment.contains("Hand #7 — Blunder intercepted"));
         assert!(
             !fragment.contains("The table is paused"),
@@ -2124,7 +2082,7 @@ mod tests {
     fn tactical_overlay_handles_a_missing_played_action() {
         let mut decision = sample_analysis();
         decision.played = None;
-        let fragment = tactical_overlay_fragment(7, &decision, false, &[], 20, 20, 500);
+        let fragment = tactical_overlay_fragment(7, &decision, false, &[], 20, 20, 500).unwrap();
         assert!(!fragment.contains("EV lost"));
         assert!(fragment.contains("Optimal: <b>Fold</b>"));
         assert!(
@@ -2172,7 +2130,7 @@ mod tests {
         ];
         decision.optimal = decision.ranking[0];
         decision.played = None;
-        let fragment = tactical_overlay_fragment(7, &decision, false, &[], 20, 20, 500);
+        let fragment = tactical_overlay_fragment(7, &decision, false, &[], 20, 20, 500).unwrap();
         let fold = fragment.find("<td>Fold</td>").unwrap();
         let check = fragment.find("<td>Check</td>").unwrap();
         let call = fragment.find("<td>Call</td>").unwrap();
@@ -2226,7 +2184,16 @@ mod tests {
 
     #[test]
     fn opponents_block_renders_stats_statuses_and_reads() {
-        let fragment = opponents_block(&sample_opponents(), 20);
+        let fragment = tactical_overlay_fragment(
+            7,
+            &sample_analysis(),
+            false,
+            &sample_opponents(),
+            20,
+            20,
+            500,
+        )
+        .unwrap();
         assert!(fragment.contains("Opponent 1"));
         assert!(fragment.contains(r#"<span class="pt-badge btn">BTN</span>"#));
         assert!(fragment.contains(r#"class="pt-opp-flag allin">All-in</span>"#));
@@ -2246,7 +2213,9 @@ mod tests {
             postflop_calls: 0,
             ..opponents[1].clone()
         };
-        let fragment = opponents_block(&opponents, 20);
+        let fragment =
+            tactical_overlay_fragment(7, &sample_analysis(), false, &opponents, 20, 20, 500)
+                .unwrap();
         assert!(fragment.contains("<span>Aggression</span><b>∞</b>"));
     }
 
