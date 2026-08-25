@@ -38,10 +38,16 @@ pub struct PlayedEvaluation {
     /// The solver/risk analysis of the played action itself.
     pub analysis: Analysis,
     /// The chip EV given up relative to the optimal action, normalized to
-    /// big blinds (0.0 when the played action is the optimal one). Big-blind
-    /// units make errors comparable across streets and pot sizes: a preflop
-    /// mistake counts as heavily as the same-big-blind river mistake.
+    /// big blinds (0.0 when the played action is the optimal one). Meant for
+    /// human display — an intuitive, real quantity ("you gave up 3 BB here").
     pub ev_loss_bb: f64,
+    /// The same EV given up, normalized instead to the pot at the decision
+    /// point (0.0 when the played action is the optimal one). This is what
+    /// the blunder tracker calibrates against: a fixed BB amount means much
+    /// more relative to a small preflop pot than to a big river one, so a
+    /// pot-fraction basis is what actually makes a preflop mistake count as
+    /// heavily as an equally-bad river mistake.
+    pub ev_loss_pot: f64,
     /// Whether the played action is exactly the survivability-optimal one.
     pub is_optimal: bool,
 }
@@ -154,6 +160,7 @@ pub fn analyze<R: Rng + ?Sized>(
         .ok_or_else(|| Error::Decision("no candidate actions to rank".into()))?;
 
     let big_blind = f64::from(state.blind_level().big_blind);
+    let pot = f64::from(state.total_pot()).max(1.0);
     let played = played
         .map(|action| -> Result<PlayedEvaluation> {
             let analysis = analyses
@@ -161,9 +168,11 @@ pub fn analyze<R: Rng + ?Sized>(
                 .find(|candidate| candidate.action == action)
                 .copied()
                 .ok_or_else(|| Error::Decision("played action missing from the analysis".into()))?;
+            let ev_loss = (optimal.ev - analysis.ev).max(0.0);
             Ok(PlayedEvaluation {
                 analysis,
-                ev_loss_bb: ((optimal.ev - analysis.ev).max(0.0)) / big_blind,
+                ev_loss_bb: ev_loss / big_blind,
+                ev_loss_pot: ev_loss / pot,
                 is_optimal: action == optimal.action,
             })
         })
@@ -229,6 +238,7 @@ pub fn analyze_snapshot(
         .ok_or_else(|| Error::Decision("no candidate actions to rank".into()))?;
 
     let big_blind = f64::from(state.blind_level().big_blind);
+    let pot = f64::from(state.total_pot()).max(1.0);
     let played = played
         .map(|action| -> Result<PlayedEvaluation> {
             let analysis = analyses
@@ -238,9 +248,11 @@ pub fn analyze_snapshot(
                 .ok_or_else(|| {
                     Error::Decision("played action missing from the analysis snapshot".into())
                 })?;
+            let ev_loss = (optimal.ev - analysis.ev).max(0.0);
             Ok(PlayedEvaluation {
                 analysis,
-                ev_loss_bb: ((optimal.ev - analysis.ev).max(0.0)) / big_blind,
+                ev_loss_bb: ev_loss / big_blind,
+                ev_loss_pot: ev_loss / pot,
                 is_optimal: action == optimal.action,
             })
         })

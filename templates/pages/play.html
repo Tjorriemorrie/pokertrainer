@@ -1,30 +1,29 @@
 {#
-The full table shell page: GGPoker-dark skin, top-bar lifetime EV chart (with the
-hero-vs-field skill chip beside it), the table controls (finish, tournament
-history, sound toggle), the table column docked top-left, and the coach-feedback
-panel beside it (never covering the table).
+The full table shell page: GGPoker-dark skin, a toolbar (lifetime EV chart, the
+hero-vs-field skill chip, ws-status, sound toggle, finish button), the table
+column docked top-left, and the coach-feedback panel beside it (never covering
+the table).
 
-This page extends base.html directly rather than the subpage layout: its header
-shares nothing with the sub-pages, and its body carries two extra spaces of
-indentation throughout.
+This page extends base.html directly rather than the subpage layout: its body
+carries two extra spaces of indentation throughout. It shares the global navbar
+with every other page, marking Drill active since the live table is the live
+half of the practice feature /tournaments is the history of.
 #}{% extends "base.html" %}
 {% import "partials/scripts.html" as scripts %}
 
 {% block title %}Poker Trainer{% endblock %}
 
+{% block nav_drill %} is-active{% endblock %}
+
 {% block body %}
-  <header class="pt-topwrap">
-    <a href="/" class="pt-link">Dashboard</a>
-    <div class="pt-brand">Poker Trainer</div>
-    <canvas id="ev-chart" width="1200" height="48" class="ev-chart"></canvas>
-{% if let Some(skill) = skill %}    <div class="pt-skill-chip" title="Skill on a 0..1 scale: how close your decisions average to the solver vs the imported opponents both bots play like. Generate the field skill under Hand history → Analyze imported opponents.">You <b>{{ skill.you }}</b> · Bots <b>{{ skill.bots }}</b></div>
-{% endif %}    <div id="ws-status" class="status-wait">connecting…</div>
-    <button id="sound-toggle" class="pt-icon-btn" type="button" title="Toggle table sounds">🔊</button>
-    <a href="/tournaments" class="pt-link">Tournament history</a>
-    <a href="/history" class="pt-link">Hand history</a>
-    <button id="finish-table" class="action-btn" type="button">Finish table</button>
-  </header>
   <main class="pt-main">
+    <div class="pt-table-toolbar">
+      <canvas id="ev-chart" width="1200" height="48" class="ev-chart"></canvas>
+{% if let Some(skill) = skill %}      <div class="pt-skill-chip" title="Skill on a 0..1 scale: how close your decisions average to the solver vs the imported opponents both bots play like. Generate the field skill under Hand history → Analyze imported opponents.">You <b>{{ skill.you }}</b> · Bots <b>{{ skill.bots }}</b></div>
+{% endif %}      <div id="ws-status" class="status-wait">connecting…</div>
+      <button id="sound-toggle" class="pt-icon-btn" type="button" title="Toggle table sounds">🔊</button>
+      <button id="finish-table" class="action-btn" type="button">Finish table</button>
+    </div>
     <div class="pt-layout">
       <section class="pt-table-col"><div id="table"></div></section>
       <aside class="pt-feedback-col">

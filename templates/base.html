@@ -1,7 +1,14 @@
 {#
-The document shell every page shares: doctype, head, and the closing tags.
-The stylesheet cache-buster lives here and nowhere else — bumping it is a
-one-character edit.
+The document shell every page shares: doctype, head, the global navbar, and the
+closing tags. The stylesheet cache-buster lives here and nowhere else —
+bumping it is a one-character edit.
+
+The navbar is the same three links (Dashboard, Drill, Hand histories) on every
+page. A child template marks which one is current by overriding the matching
+`nav_dashboard` / `nav_drill` / `nav_history` block with ` is-active` — nothing
+else about the navbar varies per page. `/play` (the live table) also marks
+`nav_drill` active since it's the live half of the same practice feature that
+`/drill` is the history of.
 
 Whitespace convention (see AGENTS.md / README): a control tag alone on its own
 line is written `{%- tag %}` — leading dash, no trailing dash — so the line the
@@ -12,9 +19,15 @@ tag sits on disappears from the output entirely.
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}Poker Trainer{% endblock %}</title>
-<link rel="stylesheet" href="/assets/style.css?v=13">
+<link rel="stylesheet" href="/assets/style.css?v=18">
 </head>
 <body class="pt-body">
+<nav class="pt-navbar">
+  <div class="pt-brand">Poker Trainer</div>
+  <a href="/" class="pt-navlink{% block nav_dashboard %}{% endblock %}">Dashboard</a>
+  <a href="/drill" class="pt-navlink{% block nav_drill %}{% endblock %}">Drill</a>
+  <a href="/history" class="pt-navlink{% block nav_history %}{% endblock %}">Hand histories</a>
+</nav>
 {%- block body %}{% endblock %}
 {%- block scripts %}{% endblock %}
 </body>

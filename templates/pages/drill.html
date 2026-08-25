@@ -1,0 +1,49 @@
+{#
+The finished-tournament history page: a paginated table (newest first), one row
+per finished session, of the EV metrics that show whether the hero's play is
+improving drill over drill.
+#}{% extends "layouts/subpage.html" %}
+{% import "partials/macros.html" as macros %}
+
+{% block title %}Poker Trainer — Drill{% endblock %}
+
+{% block heading %}Drill{% endblock %}
+
+{% block heading_action %}<a class="action-btn pt-secondary pt-drill-bar-action" href="/play">{% if active %}Resume drill{% else %}Drill{% endif %}</a>{% endblock %}
+
+{% block nav_drill %} is-active{% endblock %}
+
+{% block content %}
+<section class="pt-detail">
+  <div class="pt-detail-head"><h2 class="pt-hh-title">Drill performance</h2></div>
+  <div class="pt-stat-grid">
+    {% for stat in cards %}{{ macros::stat_card(stat.label, stat.value) }}{% endfor %}
+  </div>
+</section>
+<section class="pt-detail">
+  <div class="pt-detail-head">
+    <h2 class="pt-hh-title">Drills</h2>
+    <nav class="pt-pagination">{% if page > 1 %}<a class="pt-pagination-link" href="/drill?page={{ page - 1 }}">← Newer</a>{% else %}<span class="pt-pagination-link is-disabled">← Newer</span>{% endif %}<span class="pt-pagination-page">Page {{ page }} of {{ pages }}</span>{% if page < pages %}<a class="pt-pagination-link" href="/drill?page={{ page + 1 }}">Older →</a>{% else %}<span class="pt-pagination-link is-disabled">Older →</span>{% endif %}</nav>
+  </div>
+  {%- if rows.is_empty() -%}
+  <div class="pt-empty">No finished drills yet — play a table and finish it (or just close the tab) to see it here.</div>
+  {%- else -%}
+  <table class="pt-hh-table">
+  <tr><th>Drill</th><th>Date</th><th>Result</th><th>Hands</th><th>Won</th><th>Win %</th><th>Actions</th><th>Avg EV lost/decision</th><th>Total EV lost</th></tr>
+  {%- for row in rows %}
+  <tr data-tournament-id="{{ row.id }}"{% if row.is_highlighted %} class="pt-highlight"{% endif %}>
+    <td><a class="pt-link" href="/drill/{{ row.id }}">#{{ row.id }}</a></td>
+    <td class="pt-hh-date">{{ row.started }}</td>
+    <td>{% if !row.badge_class.is_empty() %}<span class="pt-result-badge{{ row.badge_class }}">{{ row.badge_label }}</span>{% else %}{{ row.badge_label }}{% endif %}</td>
+    <td>{{ row.hands }}</td>
+    <td>{{ row.hands_won }}</td>
+    <td>{{ row.running_win_rate }}</td>
+    <td>{{ row.actions }}</td>
+    <td>{{ row.avg_ev_loss }} BB</td>
+    <td>{{ row.total_ev_loss }} BB</td>
+  </tr>
+  {%- endfor %}
+  </table>
+  {%- endif %}
+</section>
+{% endblock %}

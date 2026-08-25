@@ -1,4 +1,4 @@
-use crate::analytics::{ChartPoint, SessionSummary, TournamentDetail};
+use crate::analytics::{SessionSummary, TournamentDetail};
 use crate::card::{Card, Suit};
 use crate::decision::{Analysis, AnalyzedDecision, SearchReport};
 use crate::error::Result;
@@ -73,68 +73,118 @@ fn format_skill(skill: Option<f64>) -> String {
         .unwrap_or_else(|| "—".to_string())
 }
 
-/// One card of the tournaments listing. Floats and the chart dataset are
-/// pre-formatted here so `std::fmt` (not the template) decides the rounding.
-struct TournamentCard {
+/// One row of the drill listing. Floats are pre-formatted here so
+/// `std::fmt` (not the template) decides the rounding.
+struct DrillRow {
     id: i32,
     /// Suffix appended to `pt-result-badge`, e.g. `" win"`. Empty with
     /// `badge_label` means the session finished without a decided outcome and
-    /// the listing shows no badge at all.
+    /// the row shows an em dash instead of a badge.
     badge_class: &'static str,
     badge_label: &'static str,
     started: String,
-    ended: String,
     hands: i32,
+    hands_won: i64,
     actions: i64,
     avg_ev_loss: String,
-    dataset: String,
+    total_ev_loss: String,
+    /// Win rate across all decided drills up to and including this one, in
+    /// chronological order — "—" until at least one drill has a decided
+    /// outcome.
+    running_win_rate: String,
+    /// Set for the drill the player just finished, so the row stands out in
+    /// the listing they land on.
+    is_highlighted: bool,
 }
 
-impl TournamentCard {
-    fn new(summary: &SessionSummary, points: &[ChartPoint]) -> Self {
+impl DrillRow {
+    fn new(summary: &SessionSummary, highlight: Option<i32>) -> Self {
         let (badge_class, badge_label) = match summary.result.as_deref() {
             Some("WIN") => (" win", "WIN"),
             Some("LOSS") => (" loss", "LOSS"),
-            _ => ("", ""),
+            _ => ("", "—"),
+        };
+        let running_win_rate = if summary.running_decided > 0 {
+            format!(
+                "{:.0}%",
+                summary.running_wins as f64 * 100.0 / summary.running_decided as f64
+            )
+        } else {
+            "—".to_string()
         };
         Self {
             id: summary.id,
             badge_class,
             badge_label,
             started: summary.started.clone(),
-            ended: summary.ended.clone(),
             hands: summary.hands,
+            hands_won: summary.hands_won,
             actions: summary.actions,
             avg_ev_loss: format!("{:.2}", summary.avg_ev_loss),
-            dataset: serde_json::to_string(points).unwrap_or_else(|_| "[]".to_string()),
+            total_ev_loss: format!("{:.2}", summary.total_ev_loss),
+            running_win_rate,
+            is_highlighted: highlight == Some(summary.id),
         }
     }
 }
 
-/// The finished-tournament history page: a paginated listing (newest first)
-/// of one server-rendered card per finished session whose decimated EV
-/// dataset is drawn client-side with the same canvas style as the live
-/// top-bar chart. `page`/`pages` drive the Newer/Older navigation.
+/// The finished-tournament history page: a paginated table (newest first),
+/// one row per finished session, of the metrics that show whether the
+/// hero's play is improving drill over drill. `page`/`pages` drive the
+/// Newer/Older navigation.
 #[derive(Template)]
-#[template(path = "pages/tournaments.html")]
+#[template(path = "pages/drill.html")]
 struct TournamentsTemplate {
-    cards: Vec<TournamentCard>,
+    cards: Vec<Stat>,
+    rows: Vec<DrillRow>,
     page: u32,
     pages: u32,
+    /// Whether a tournament is currently in progress — governs whether the
+    /// page's action button reads "Resume drill" or "Drill".
+    active: bool,
 }
 
 pub fn tournaments_page(
-    sessions: &[(SessionSummary, Vec<ChartPoint>)],
+    sessions: &[SessionSummary],
     page: u32,
     pages: u32,
+    active: bool,
+    highlight: Option<i32>,
+    stats: &crate::analytics::DrillOverallStats,
 ) -> Result<String> {
     Ok(TournamentsTemplate {
-        cards: sessions
+        cards: vec![
+            Stat::new("Drills", stats.drills),
+            Stat::new(
+                "Drills won",
+                format!(
+                    "{} ({}%)",
+                    stats.drills_won,
+                    round1(pct(stats.drills_won, stats.drills))
+                ),
+            ),
+            Stat::new("Hands", stats.hands),
+            Stat::new(
+                "Hands won",
+                format!(
+                    "{} ({}%)",
+                    stats.hands_won,
+                    round1(pct(stats.hands_won, stats.hands))
+                ),
+            ),
+            Stat::new(
+                "Avg EV lost/decision",
+                format!("{:.2} BB", stats.avg_ev_loss),
+            ),
+            Stat::new("Total EV lost", format!("{:.2} BB", stats.total_ev_loss)),
+        ],
+        rows: sessions
             .iter()
-            .map(|(summary, points)| TournamentCard::new(summary, points))
+            .map(|summary| DrillRow::new(summary, highlight))
             .collect(),
         page,
         pages,
+        active,
     }
     .render()?)
 }
@@ -232,6 +282,11 @@ struct TournamentRow {
     name: String,
     game_type: Option<String>,
     entrants: String,
+    /// This row's result is derived from the finishing place: 1st is a WIN,
+    /// any other place a LOSS, and an unknown place an em dash — the same
+    /// convention `history_tournament_detail_page` uses.
+    badge_class: &'static str,
+    badge_label: &'static str,
     buy_in: String,
     place: String,
     prize: String,
@@ -242,14 +297,25 @@ struct TournamentRow {
     win_pct: String,
     net_class: &'static str,
     net_chips: String,
+    /// Set for a tournament a scan just imported new hands for, so the row
+    /// stands out in the listing the player lands on.
+    is_highlighted: bool,
 }
 
 impl TournamentRow {
-    fn new(row: &crate::hh::TournamentListing) -> Self {
+    fn new(
+        row: &crate::hh::TournamentListing,
+        highlight: &std::collections::HashSet<String>,
+    ) -> Self {
         let tournament = &row.tournament;
         let profit = match (tournament.buy_in_cents, tournament.prize_cents) {
             (Some(buy), Some(prize)) => crate::hh::money(i64::from(prize) - i64::from(buy)),
             _ => "—".to_string(),
+        };
+        let (badge_class, badge_label) = match tournament.place {
+            Some(1) => (" win", "WIN"),
+            Some(_) => (" loss", "LOSS"),
+            None => ("", "—"),
         };
         Self {
             date: tournament
@@ -262,6 +328,8 @@ impl TournamentRow {
             entrants: tournament
                 .entrants
                 .map_or_else(String::new, |n| format!("{n} players")),
+            badge_class,
+            badge_label,
             buy_in: cents_or_dash(tournament.buy_in_cents),
             place: tournament
                 .place
@@ -285,6 +353,7 @@ impl TournamentRow {
                 "pt-pos"
             },
             net_chips: signed(row.net_chips),
+            is_highlighted: highlight.contains(&tournament.id),
         }
     }
 }
@@ -312,6 +381,7 @@ pub fn history_page(
     stats: &crate::hh::OverallStats,
     tournaments: &[crate::hh::TournamentListing],
     template: Option<&crate::opponent_analysis::DrillTemplate>,
+    highlight: &std::collections::HashSet<String>,
 ) -> Result<String> {
     let profit = stats.prize_cents - stats.buy_in_cents;
     Ok(HistoryTemplate {
@@ -347,45 +417,10 @@ pub fn history_page(
             avg_ev_loss_bb: format!("{:.2}", template.avg_ev_loss_bb),
             decisions: template.decisions,
         }),
-        rows: tournaments.iter().map(TournamentRow::new).collect(),
-    }
-    .render()?)
-}
-
-/// The scan-results page: what the scan found and stored, plus statistics
-/// over the newly imported hands only (already-imported hands add nothing).
-#[derive(Template)]
-#[template(path = "pages/history_scan_result.html")]
-struct HistoryScanResultTemplate {
-    summary_cards: Vec<Stat>,
-    hand_cards: Vec<Stat>,
-    failures: Vec<String>,
-}
-
-pub fn history_scan_result_page(outcome: &crate::hh::ImportOutcome) -> Result<String> {
-    let stats = &outcome.new_stats;
-    Ok(HistoryScanResultTemplate {
-        summary_cards: vec![
-            Stat::new("ZIPs scanned", outcome.zips),
-            Stat::new("Files read", outcome.files),
-            Stat::new("Hands parsed", outcome.hands_parsed),
-            Stat::new("New hands", outcome.hands_new),
-            Stat::new("Already imported", outcome.hands_skipped),
-            Stat::new("New tournaments", outcome.tournaments_new),
-        ],
-        hand_cards: vec![
-            Stat::new("Hands", stats.hands),
-            Stat::new("Won", stats.won),
-            Stat::new("Lost", stats.lost),
-            Stat::new("Win ratio", format!("{}%", round1(stats.win_ratio))),
-            Stat::new("All-ins", stats.all_ins),
-            Stat::new("Showdowns", stats.showdowns),
-            Stat::new("Chips invested", stats.invested),
-            Stat::new("Chips collected", stats.collected),
-            Stat::new("Chips won/lost", signed(stats.net_chips)),
-            Stat::new("Tournaments", stats.tournaments),
-        ],
-        failures: outcome.failures.clone(),
+        rows: tournaments
+            .iter()
+            .map(|row| TournamentRow::new(row, highlight))
+            .collect(),
     }
     .render()?)
 }
@@ -859,7 +894,7 @@ impl ActionPanelFragment {
                     label: if pot_fractions {
                         pot_percent_label(*bucket).to_string()
                     } else {
-                        amount.to_string()
+                        preflop_bb_label(*bucket, amount, level.big_blind)
                     },
                 });
             }
@@ -977,6 +1012,20 @@ fn pot_percent_label(bucket: BetSize) -> &'static str {
         BetSize::ThreeQuarterPot => "75%",
         BetSize::Pot => "100%",
         _ => "",
+    }
+}
+
+/// GGPoker-style preflop sizing chip label: a big-blind multiple (`2BB`,
+/// `3BB`, `4BB`, …) for every bucket except `Pot`, which reads `Pot`.
+fn preflop_bb_label(bucket: BetSize, amount: u32, big_blind: u32) -> String {
+    if bucket == BetSize::Pot {
+        return "Pot".to_string();
+    }
+    let bb = amount as f64 / big_blind.max(1) as f64;
+    if (bb - bb.round()).abs() < 0.05 {
+        format!("{}BB", bb.round() as u32)
+    } else {
+        format!("{bb:.1}BB")
     }
 }
 
@@ -1311,7 +1360,7 @@ mod tests {
             "the finish control is present"
         );
         assert!(
-            page.contains(r#"href="/tournaments""#),
+            page.contains(r#"href="/drill""#),
             "the tournament history link is present"
         );
         assert!(
@@ -1323,7 +1372,7 @@ mod tests {
             "the solver depth badge lives in the action dock, not the header shell"
         );
         assert!(
-            page.contains(r#"/assets/style.css?v=13"#),
+            page.contains(r#"/assets/style.css?v=18"#),
             "the stylesheet link is versioned so browsers drop stale cached CSS"
         );
         assert!(
@@ -1347,20 +1396,20 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_without_an_active_tournament_offers_a_start() {
+    fn dashboard_without_an_active_tournament_offers_only_drill() {
         let page = dashboard_page(None).unwrap();
         assert!(page.contains("<title>Poker Trainer</title>"));
         assert!(
-            page.contains(r#"href="/play">Start tournament</a>"#),
-            "the start button opens the table: {page}"
+            page.contains(r#"href="/play">Drill</a>"#),
+            "the drill button starts a table just like the drill page's own button: {page}"
         );
         assert!(
-            !page.contains("Resume tournament"),
+            !page.contains("Resume drill"),
             "no resume offer without an active tournament"
         );
         assert!(
-            page.contains(r#"href="/tournaments""#),
-            "the dashboard links to the history"
+            !page.contains("Start tournament"),
+            "the drill button is the only start affordance"
         );
     }
 
@@ -1369,7 +1418,7 @@ mod tests {
         let page = dashboard_page(active_summary(true).as_ref()).unwrap();
         assert!(page.contains("Tournament in progress"));
         assert!(
-            page.contains(r#"href="/play">Resume tournament</a>"#),
+            page.contains(r#"href="/play">Resume drill</a>"#),
             "resume points at the table: {page}"
         );
         assert!(
@@ -1399,13 +1448,19 @@ mod tests {
         assert!(page.contains("&#34;evil&#34;"));
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn summary(
         id: i32,
         started: &str,
         ended: &str,
         actions: i64,
         hands: i32,
+        hands_won: i64,
         avg_ev_loss: f64,
+        total_ev_loss: f64,
+        result: Option<&str>,
+        running_wins: i64,
+        running_decided: i64,
     ) -> SessionSummary {
         SessionSummary {
             id,
@@ -1413,84 +1468,141 @@ mod tests {
             ended: ended.to_string(),
             actions,
             hands,
+            hands_won,
             avg_ev_loss,
-            result: None,
+            total_ev_loss,
+            result: result.map(str::to_string),
             final_stack: None,
+            running_wins,
+            running_decided,
+        }
+    }
+
+    fn drill_stats() -> crate::analytics::DrillOverallStats {
+        crate::analytics::DrillOverallStats {
+            drills: 5,
+            drills_won: 2,
+            hands: 30,
+            hands_won: 14,
+            avg_ev_loss: 3.25,
+            total_ev_loss: 97.5,
         }
     }
 
     #[test]
     fn tournaments_page_has_an_empty_state() {
-        let empty: Vec<(SessionSummary, Vec<ChartPoint>)> = Vec::new();
-        let page = tournaments_page(&empty, 1, 1).unwrap();
-        assert!(page.contains("<title>Poker Trainer — Tournaments</title>"));
-        assert!(page.contains("No finished tournaments yet"));
+        let empty: Vec<SessionSummary> = Vec::new();
+        let page = tournaments_page(&empty, 1, 1, false, None, &drill_stats()).unwrap();
+        assert!(page.contains("<title>Poker Trainer — Drill</title>"));
+        assert!(page.contains("No finished drills yet"));
         assert!(
             !page.contains("data-tournament-id"),
-            "no cards without finished sessions"
+            "no rows without finished sessions"
         );
     }
 
     #[test]
-    fn tournaments_page_renders_one_card_per_session_with_chart_data() {
+    fn tournaments_page_renders_one_row_per_session() {
         let sessions = vec![
-            (
-                summary(
-                    7,
-                    "2026-08-01T10:00:00Z",
-                    "2026-08-01T10:05:00Z",
-                    3,
-                    3,
-                    12.5,
-                ),
-                vec![(1, 0.0), (2, 30.0), (3, 12.5)],
+            summary(
+                7,
+                "2026-08-01T10:00:00Z",
+                "2026-08-01T10:05:00Z",
+                3,
+                3,
+                2,
+                12.5,
+                37.5,
+                Some("WIN"),
+                3,
+                4,
             ),
-            (
-                summary(
-                    42,
-                    "2026-08-02T09:00:00Z",
-                    "2026-08-02T09:07:00Z",
-                    5,
-                    2,
-                    2.25,
-                ),
-                vec![(1, 4.5), (2, 0.0)],
+            summary(
+                42,
+                "2026-08-02T09:00:00Z",
+                "2026-08-02T09:07:00Z",
+                5,
+                2,
+                1,
+                2.25,
+                11.25,
+                Some("LOSS"),
+                3,
+                5,
             ),
         ];
-        let page = tournaments_page(&sessions, 1, 1).unwrap();
-        assert!(page.contains(r#"data-tournament-id="7""#));
-        assert!(page.contains("Tournament #7"));
+        let page = tournaments_page(&sessions, 1, 1, false, Some(42), &drill_stats()).unwrap();
         assert!(
-            page.contains(r#"href="/tournaments/7""#),
-            "each card links to its detail page: {page}"
+            page.contains(r#"data-tournament-id="42" class="pt-highlight""#),
+            "the highlighted session's row carries the class: {page}"
         );
-        assert!(page.contains("3 hands · 3 actions · avg EV loss 12.50 BB"));
-        assert!(page.contains("2026-08-01T10:00:00Z → 2026-08-01T10:05:00Z"));
-        assert!(page.contains("Tournament #42"));
         assert!(
-            page.contains(r#"data-points='[[1,0.0],[2,30.0],[3,12.5]]'"#),
-            "decimated datasets are embedded for the client chart"
+            !page.contains(r#"data-tournament-id="7" class="pt-highlight""#),
+            "only the highlighted session's row carries the class: {page}"
         );
-        assert!(page.contains(r#"data-points='[[1,4.5],[2,0.0]]'"#));
-        assert!(page.contains(r#"src="/assets/chart.js"#));
+        assert!(page.contains("#7"));
+        assert!(
+            page.contains(r#"href="/drill/7""#),
+            "each row links to its detail page: {page}"
+        );
+        assert!(page.contains("2026-08-01T10:00:00Z"));
+        assert!(page.contains("12.50 BB"));
+        assert!(page.contains("37.50 BB"));
+        assert!(page.contains("75%"), "3/4 running win rate: {page}");
+        assert!(page.contains("#42"));
+        assert!(page.contains("2.25 BB"));
+        assert!(page.contains("11.25 BB"));
+        assert!(page.contains("60%"), "3/5 running win rate: {page}");
+        assert!(page.contains("<th>Won</th>"));
+        assert!(page.contains("<th>Win %</th>"));
     }
 
     #[test]
     fn tournaments_page_escapes_database_strings() {
-        let sessions = vec![(
-            summary(1, r#"<script>"evil"</script>"#, "end", 1, 1, 0.0),
-            vec![(1, 0.0)],
+        let sessions = vec![summary(
+            1,
+            r#"<script>"evil"</script>"#,
+            "end",
+            1,
+            1,
+            0,
+            0.0,
+            0.0,
+            None,
+            0,
+            0,
         )];
-        let page = tournaments_page(&sessions, 1, 1).unwrap();
+        let page = tournaments_page(&sessions, 1, 1, false, None, &drill_stats()).unwrap();
         assert!(!page.contains(r#"<script>"evil""#));
         assert!(page.contains("&#60;script&#62;"));
     }
 
     #[test]
-    fn tournaments_page_renders_pagination_controls() {
-        let empty: Vec<(SessionSummary, Vec<ChartPoint>)> = Vec::new();
+    fn tournaments_page_offers_drill_without_an_active_tournament() {
+        let empty: Vec<SessionSummary> = Vec::new();
+        let page = tournaments_page(&empty, 1, 1, false, None, &drill_stats()).unwrap();
+        assert!(
+            page.contains(r#"href="/play">Drill</a>"#),
+            "no active tournament: {page}"
+        );
+        assert!(!page.contains("Resume drill"));
+    }
 
-        let first = tournaments_page(&empty, 1, 1).unwrap();
+    #[test]
+    fn tournaments_page_offers_resume_with_an_active_tournament() {
+        let empty: Vec<SessionSummary> = Vec::new();
+        let page = tournaments_page(&empty, 1, 1, true, None, &drill_stats()).unwrap();
+        assert!(
+            page.contains(r#"href="/play">Resume drill</a>"#),
+            "an active tournament: {page}"
+        );
+    }
+
+    #[test]
+    fn tournaments_page_renders_pagination_controls() {
+        let empty: Vec<SessionSummary> = Vec::new();
+
+        let first = tournaments_page(&empty, 1, 1, false, None, &drill_stats()).unwrap();
         assert!(first.contains(r#"class="pt-pagination""#));
         assert!(first.contains("Page 1 of 1"));
         assert!(
@@ -1502,19 +1614,19 @@ mod tests {
             "a single page has no older page: {first}"
         );
 
-        let middle = tournaments_page(&empty, 2, 3).unwrap();
+        let middle = tournaments_page(&empty, 2, 3, false, None, &drill_stats()).unwrap();
         assert!(middle.contains("Page 2 of 3"));
         assert!(
-            middle.contains(r#"href="/tournaments?page=1"#),
+            middle.contains(r#"href="/drill?page=1"#),
             "the newer link points at the previous page: {middle}"
         );
         assert!(
-            middle.contains(r#"href="/tournaments?page=3"#),
+            middle.contains(r#"href="/drill?page=3"#),
             "the older link points at the next page: {middle}"
         );
 
-        let last = tournaments_page(&empty, 3, 3).unwrap();
-        assert!(last.contains(r#"href="/tournaments?page=2"#));
+        let last = tournaments_page(&empty, 3, 3, false, None, &drill_stats()).unwrap();
+        assert!(last.contains(r#"href="/drill?page=2"#));
         assert!(
             last.contains(r#"<span class="pt-pagination-link is-disabled">Older →</span>"#),
             "the last page has no older page: {last}"
@@ -1529,9 +1641,13 @@ mod tests {
                 ended: "2026-08-01T10:05:00Z".to_string(),
                 actions: 4,
                 hands: 3,
+                hands_won: 2,
                 avg_ev_loss: 2.5,
+                total_ev_loss: 10.0,
                 result: result.map(str::to_string),
                 final_stack,
+                running_wins: 0,
+                running_decided: 0,
             },
             hands: 3,
             hands_won: 2,
@@ -1547,7 +1663,7 @@ mod tests {
     #[test]
     fn tournament_detail_page_renders_the_stat_grid() {
         let page = tournament_detail_page(&detail(7, Some("WIN"), Some(1500))).unwrap();
-        assert!(page.contains("<title>Poker Trainer — Tournament #7</title>"));
+        assert!(page.contains("<title>Poker Trainer — Drill #7</title>"));
         assert!(page.contains(r#"class="pt-result-badge win">WIN</span>"#));
         assert!(page.contains("Final stack: 1500 chips"));
         assert!(page.contains("<span>Hands</span><b>3</b>"));
@@ -1666,7 +1782,7 @@ mod tests {
     }
 
     #[test]
-    fn action_panel_labels_amounts_in_chips_not_blinds() {
+    fn action_panel_preflop_open_labels_chips_in_big_blinds() {
         let mut state = GameState::new(Seat::Hero, level());
         state
             .start_hand(&mut Deck::shuffled(&mut seeded_rng(33)))
@@ -1674,10 +1790,12 @@ mod tests {
         state.apply_action(Action::Call).unwrap();
         let fragment = table_fragment(&state, 1, 0, &[], &[]).unwrap();
         assert!(
-            !fragment.contains(">3BB<")
-                && !fragment.contains(">4BB<")
-                && !fragment.contains(">2BB<"),
-            "sizing chips show chip amounts, never BB labels: {fragment}"
+            fragment.contains(">2BB<") && fragment.contains(">3BB<") && fragment.contains(">4BB<"),
+            "preflop open sizing chips are labeled in big blinds, GGPoker-style: {fragment}"
+        );
+        assert!(
+            fragment.contains(">Pot<"),
+            "the pot-sized preflop chip reads \"Pot\", not a BB multiple: {fragment}"
         );
         assert!(
             fragment.contains(r#"data-bucket="3BB""#),
@@ -1995,6 +2113,7 @@ mod tests {
             played: Some(PlayedEvaluation {
                 analysis: call,
                 ev_loss_bb: 0.9,
+                ev_loss_pot: 0.9,
                 is_optimal: false,
             }),
             search: SearchReport {
@@ -2449,7 +2568,7 @@ mod tests {
 
     #[test]
     fn history_page_renders_the_scan_button_stats_and_listing() {
-        let page = history_page(&hh_stats(), &hh_listing(), None).unwrap();
+        let page = history_page(&hh_stats(), &hh_listing(), None, &Default::default()).unwrap();
         assert!(page.contains("<title>Poker Trainer — Hand history</title>"));
         assert!(
             page.contains(r#"action="/history/scan""#)
@@ -2471,7 +2590,7 @@ mod tests {
 
     #[test]
     fn history_page_has_an_empty_state_without_tournaments() {
-        let page = history_page(&hh_stats(), &[], None).unwrap();
+        let page = history_page(&hh_stats(), &[], None, &Default::default()).unwrap();
         assert!(page.contains("No imported hand histories yet"));
         assert!(!page.contains("pt-hh-table"));
     }
@@ -2482,65 +2601,18 @@ mod tests {
         stats.net_chips = -15;
         let mut listing = hh_listing();
         listing[0].tournament.name = r#"<script>"evil"</script>"#.to_string();
-        let page = history_page(&stats, &listing, None).unwrap();
+        let page = history_page(&stats, &listing, None, &Default::default()).unwrap();
         assert!(!page.contains(r#"<script>"evil""#));
         assert!(page.contains("&#60;script&#62;"));
     }
 
-    fn hh_outcome() -> crate::hh::ImportOutcome {
-        crate::hh::ImportOutcome {
-            zips: 2,
-            files: 3,
-            hands_parsed: 20,
-            tournaments_parsed: 2,
-            hands_new: 12,
-            hands_skipped: 8,
-            tournaments_new: 1,
-            failures: vec!["bad.zip/entry.txt: unreadable".to_string()],
-            new_stats: crate::hh::NewHandStats {
-                hands: 12,
-                won: 7,
-                lost: 5,
-                win_ratio: 58.3,
-                all_ins: 3,
-                showdowns: 9,
-                invested: 400,
-                collected: 520,
-                net_chips: 120,
-                tournaments: 1,
-            },
-        }
-    }
-
     #[test]
-    fn scan_result_page_counts_only_the_new_hands() {
-        let page = history_scan_result_page(&hh_outcome()).unwrap();
-        assert!(page.contains("<title>Poker Trainer — Scan results</title>"));
-        assert!(page.contains("<span>New hands</span><b>12</b>"));
-        assert!(page.contains("<span>Already imported</span><b>8</b>"));
-        assert!(page.contains("<span>Won</span><b>7</b>"));
-        assert!(page.contains("<span>Win ratio</span><b>58.3%</b>"));
-        assert!(page.contains("<span>Chips won/lost</span><b>+120</b>"));
-        assert!(page.contains("bad.zip/entry.txt: unreadable"));
-        assert!(
-            page.contains("only the hands imported by this scan"),
-            "{page}"
-        );
-        assert!(page.contains(r#"href="/history""#));
-    }
-
-    #[test]
-    fn scan_result_page_shows_a_clean_run_and_escapes_failures() {
-        let mut outcome = hh_outcome();
-        outcome.failures = vec![r#"<script>"bad"</script>"#.to_string()];
-        let page = history_scan_result_page(&outcome).unwrap();
-        assert!(!page.contains(r#"<script>"bad""#));
-
-        let mut clean = hh_outcome();
-        clean.failures = Vec::new();
-        let page = history_scan_result_page(&clean).unwrap();
-        assert!(page.contains("No problems were found."));
-        assert!(page.contains("0"));
+    fn history_page_highlights_the_scanned_tournaments() {
+        let highlight: std::collections::HashSet<String> =
+            ["307865587".to_string()].into_iter().collect();
+        let page = history_page(&hh_stats(), &hh_listing(), None, &highlight).unwrap();
+        assert!(page.contains(r#"data-tournament-id="307865587""#));
+        assert!(page.contains("pt-highlight"));
     }
 
     fn hh_detail() -> crate::hh::TournamentDetail {
@@ -2664,7 +2736,7 @@ mod tests {
 
     #[test]
     fn history_page_offers_the_analyzer_and_the_current_template() {
-        let page = history_page(&hh_stats(), &hh_listing(), None).unwrap();
+        let page = history_page(&hh_stats(), &hh_listing(), None, &Default::default()).unwrap();
         assert!(
             page.contains(r#"action="/history/analyze-opponents""#)
                 && page.contains("Analyze imported opponents"),
@@ -2676,7 +2748,7 @@ mod tests {
         );
 
         let template = template_fixture();
-        let page = history_page(&hh_stats(), &[], Some(&template)).unwrap();
+        let page = history_page(&hh_stats(), &[], Some(&template), &Default::default()).unwrap();
         assert!(page.contains("Bots trained on: Imported field (132 decisions)"));
         assert!(page.contains("skill <b>0.62</b>"), "{page}");
         assert!(page.contains(r#"action="/history/clear-template""#));

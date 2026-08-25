@@ -59,7 +59,7 @@ pub enum TableEvent {
     /// Intercepted decisions are held back — the game state is only advanced
     /// by [`TableSession::confirm_review`].
     TacticalOverlay {
-        decision: AnalyzedDecision,
+        decision: Box<AnalyzedDecision>,
         hand_no: u64,
         /// Whether the state transition was halted (the client must send
         /// `REVIEW_DONE` to advance).
@@ -248,9 +248,10 @@ impl TableSession {
         })
     }
 
-    /// Replays stored decisions through the blunder tracker so a resumed
-    /// table's interception threshold keeps its history.
-    pub fn hydrate_blunder(&mut self, history: &[(i64, f64)]) {
+    /// Replays stored decisions through the blunder tracker so a new game
+    /// starts already calibrated to the hero's history and a resumed table
+    /// keeps its history.
+    pub fn hydrate_blunder(&mut self, history: &[(i32, i64, f64)]) {
         self.blunder_tracker.hydrate(history);
     }
 
@@ -328,13 +329,20 @@ impl TableSession {
     /// Queues one evaluated hero decision for persistence; the session
     /// stays database-free and the ownership of the write is the WebSocket
     /// layer's.
-    fn record_decision(&mut self, analyzed: &AnalyzedDecision, played: Action, ev_loss: f64) {
+    fn record_decision(
+        &mut self,
+        analyzed: &AnalyzedDecision,
+        played: Action,
+        ev_loss: f64,
+        ev_loss_pot: f64,
+    ) {
         self.records.push(PendingDecision {
             hand_no: self.hand_no,
             street: self.state.street(),
             played: views::action_label(played),
             optimal: views::action_label(analyzed.optimal.action),
             ev_loss,
+            ev_loss_pot,
         });
     }
 
@@ -635,13 +643,19 @@ impl TableSession {
             .as_ref()
             .map(|played| played.ev_loss_bb)
             .unwrap_or(0.0);
+        let ev_loss_pot = analyzed
+            .played
+            .as_ref()
+            .map(|played| played.ev_loss_pot)
+            .unwrap_or(0.0);
 
-        let intercepted = self.blunder_tracker.should_intercept(ev_loss);
-        self.blunder_tracker.record_action(ev_loss);
+        let intercepted = self.blunder_tracker.should_intercept(ev_loss_pot);
+        self.blunder_tracker.record_action(ev_loss_pot);
 
         if intercepted {
             tracing::info!(
                 ev_loss,
+                ev_loss_pot,
                 action = %views::action_label(action),
                 threshold = %(self.blunder_tracker.threshold()),
                 hand_no = self.hand_no,
@@ -656,13 +670,13 @@ impl TableSession {
                 action_index: self.action_no,
             });
             return Ok(vec![TableEvent::TacticalOverlay {
-                decision: analyzed,
+                decision: Box::new(analyzed),
                 hand_no: self.hand_no,
                 intercepted: true,
             }]);
         }
 
-        self.record_decision(&analyzed, action, ev_loss);
+        self.record_decision(&analyzed, action, ev_loss, ev_loss_pot);
         self.apply_submission(action, self.action_no, ev_loss)
     }
 
@@ -682,14 +696,21 @@ impl TableSession {
             .as_ref()
             .map(|played| played.ev_loss_bb)
             .unwrap_or(0.0);
+        let ev_loss_pot = pending
+            .analyzed
+            .played
+            .as_ref()
+            .map(|played| played.ev_loss_pot)
+            .unwrap_or(0.0);
         tracing::info!(
             played = ?pending.action,
             optimal = ?optimal,
             ev_loss,
+            ev_loss_pot,
             hand_no = self.hand_no,
             "review confirmed — the coach's best-EV action replaces the blunder on the table"
         );
-        self.record_decision(&pending.analyzed, pending.action, ev_loss);
+        self.record_decision(&pending.analyzed, pending.action, ev_loss, ev_loss_pot);
         self.apply_submission(optimal, pending.action_index, ev_loss)
     }
 
@@ -920,22 +941,23 @@ mod tests {
         SurvivalConfig::default()
     }
 
-    /// Test preset: the warm-up floor is unreachable, so nothing ever
+    /// Test preset: with an empty rolling history nothing can ever cross the
+    /// threshold (it is infinite), so a fresh session's first decision never
     /// intercepts — suboptimal actions apply immediately without feedback.
+    /// A test that submits more than once and still needs every decision to
+    /// stay unintercepted should pair this with
+    /// `prime_blunder_history(&[LARGE])` so later decisions can't cross a
+    /// small earlier loss.
     fn never_intercepts() -> BlunderConfig {
-        BlunderConfig {
-            fallback_bb: f64::MAX,
-            ..BlunderConfig::default()
-        }
+        BlunderConfig::default()
     }
 
-    /// Test preset: a zero-chip floor means every non-optimal decision
-    /// intercepts (a one-entry history is enough to leave the empty state).
+    /// Test preset: paired with `prime_blunder_history(&[0.0])` at the call
+    /// site so the rolling history is non-empty and its one entry — the
+    /// threshold, with a single-point history — is 0.0: any non-optimal
+    /// decision (EV loss > 0.0) then intercepts.
     fn always_intercepts() -> BlunderConfig {
-        BlunderConfig {
-            fallback_bb: 0.0,
-            ..BlunderConfig::default()
-        }
+        BlunderConfig::default()
     }
 
     /// A full 52-card deck order whose first five board cards are the given
@@ -1411,7 +1433,7 @@ mod tests {
             always_intercepts(),
             None,
         );
-        session.prime_blunder_history(&[5.0]);
+        session.prime_blunder_history(&[0.0]);
 
         let events = session.submit(alternative).unwrap();
         assert_eq!(
@@ -1527,7 +1549,7 @@ mod tests {
             always_intercepts(),
             None,
         );
-        session.prime_blunder_history(&[5.0]);
+        session.prime_blunder_history(&[0.0]);
         let events = session.submit(probed.optimal.action).unwrap();
         assert!(
             events
@@ -2289,7 +2311,7 @@ mod tests {
             never_intercepts(),
             None,
         );
-        session.hydrate_blunder(&[(1, 0.0), (1, 3.0), (2, 1.5)]);
+        session.hydrate_blunder(&[(9, 1, 0.0), (9, 1, 3.0), (9, 2, 1.5)]);
         assert_eq!(session.blunder_tracker.recorded_actions(), 3);
     }
 

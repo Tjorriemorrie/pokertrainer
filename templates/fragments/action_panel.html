@@ -1,14 +1,14 @@
 {#
 The GGPoker-style bottom dock overlaid on the felt: sizing chips (chip values
-only — no BB labels), a golden bet slider with fine-grain wheel control, and the
-Fold / Check-Call / Bet-Raise buttons.
+only — no BB labels) sharing one row with a golden bet slider with fine-grain
+wheel control, and the Fold / Check-Call / Bet-Raise buttons below.
 
 Single-line authoring where the fragment it replaced concatenated with no
 separator. Which chips survive, and the slider bounds, are decided in Rust
 (SizingView) — clamping and dedup are real logic, not presentation.
 #}<div id="action-panel" class="pt-action-dock"><div class="pt-dock-wait">Simulating — actions unlock when the depth badge turns green.</div>
 {%- if let Some(sizing) = sizing -%}
-<div class="pt-bet-row">
+<div class="pt-sizing-row"><div class="pt-bet-row">
 {%- for chip in sizing.chips -%}
 <button type="button" class="pt-chip-size" data-bucket="{{ chip.bucket }}" data-size="{{ chip.amount }}">{{ chip.label }}</button>
 {%- endfor -%}
@@ -20,11 +20,11 @@ separator. Which chips survive, and the slider bounds, are decided in Rust
 <input id="custom-amount" class="bet-slider" type="range" min="{{ sizing.min }}" max="{{ sizing.max }}" step="5" value="{{ sizing.initial }}">
 <button type="button" class="pt-stepper" data-step="1">+</button>
 <input id="custom-amount-num" class="bet-number" type="number" min="{{ sizing.min }}" max="{{ sizing.max }}" value="{{ sizing.initial }}">
-</div>
+</div></div>
 {%- endif -%}
 <div class="pt-action-row">
 {%- if can_fold -%}
-<button type="button" class="action-btn red" data-kind="fold">Fold</button>
+<button type="button" class="action-btn red" data-kind="fold">{% if can_check %}Check / Fold{% else %}Fold{% endif %}</button>
 {%- endif -%}
 {%- if can_check -%}
 <button type="button" class="action-btn red" data-kind="check">Check</button>

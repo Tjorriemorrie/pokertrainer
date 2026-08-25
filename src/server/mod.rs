@@ -40,6 +40,14 @@ pub const LIVE_MCTS: MctsConfig = MctsConfig {
 /// configuration applied to every new table session, how often the decimated
 /// chart snapshot refreshes, and how long the winner stays on screen
 /// before the next hand is dealt.
+///
+/// `result_pause_ms` runs from the moment the hand-over fragment is sent, in
+/// parallel with the client's own showdown animation (see `animateShowdown`
+/// in `assets/app.js`: up to 5 fresh board cards at 300ms apart plus a 260ms
+/// tail, then a 200ms buffer before the winner ribbon lights up — 1660ms
+/// worst case). The pause is sized so the winner still shows for a good 4s
+/// once that animation clears, even though the server has no way to hear
+/// back when the client's animation actually finished.
 #[derive(Clone, Copy, Debug)]
 pub struct ServerConfig {
     pub bind: SocketAddr,
@@ -59,7 +67,7 @@ impl ServerConfig {
             survival: SurvivalConfig::default(),
             blunder: BlunderConfig::default(),
             snapshot_interval: 100,
-            result_pause_ms: 2000,
+            result_pause_ms: 5700,
         }
     }
 }

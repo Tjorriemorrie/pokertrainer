@@ -16,7 +16,13 @@
 - Every module must maintain >= 90% line coverage, verified with `cargo llvm-cov`. Per-module is the gate; all modules of a finished stage must pass before committing.
 - The entire test suite must finish within 30 seconds; keep tests fast, reduce or restructure anything slower.
 - Database integration tests require the local PostgreSQL instance (start it with `pg.ps1`).
+- Tests and manual testing must never run against the real/production database. Use the `_test`-suffixed database (see `db::test_database_url` / `db::test_pool` in `src/db.rs`), which is derived from `DATABASE_URL` and kept separate from real data.
 - Verification is: `cargo check`, `cargo clippy -- -D warnings`, `cargo fmt --check`, `cargo test`, `cargo llvm-cov --lib --summary-only` (per-module gate), and a manual `cargo run`.
+
+## UI conventions
+
+- Every navigational or state-changing action that leads to the same destination must use identical label text and identical button styling everywhere it appears, so the user learns one affordance instead of several. E.g. starting/resuming a drill is always an `action-btn pt-secondary` link to `/play`, labeled "Drill" with nothing active or "Resume drill" with one in progress — on the dashboard and on the drill page alike.
+- Button styling classes (`assets/style.css`): `pt-confirm` (green) marks a confirming/destructive-adjacent action taken *within* the current page (e.g. "Continue", "Scan for new hand histories"); `pt-secondary` (gold) marks navigation to start or resume play. Reuse these two consistently rather than introducing new button colors.
 
 ## Commits
 

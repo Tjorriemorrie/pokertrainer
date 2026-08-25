@@ -9,23 +9,14 @@ one row per imported tournament (newest first) linking to its detail page.
 
 {% block heading %}Hand history{% endblock %}
 
-{% block nav %}
-  <a href="/" class="pt-link">Dashboard</a>
-  <a href="/tournaments" class="pt-link">Tournament history</a>
-{%- endblock %}
+{% block heading_action %}<form method="post" action="/history/scan"><button class="action-btn pt-secondary pt-drill-bar-action" type="submit">Scan for new hand histories</button></form><form method="post" action="/history/analyze-opponents"><button class="action-btn pt-secondary pt-drill-bar-action" type="submit">Analyze imported opponents</button></form>{% endblock %}
+
+{% block nav_history %} is-active{% endblock %}
 
 {% block content %}
 <section class="pt-detail">
   <div class="pt-detail-head">
     <h2 class="pt-hh-title">GGPoker hand histories</h2>
-    <div class="pt-hh-actions">
-      <form method="post" action="/history/scan">
-        <button class="action-btn pt-confirm" type="submit">Scan for new hand histories</button>
-      </form>
-      <form method="post" action="/history/analyze-opponents">
-        <button class="action-btn pt-confirm" type="submit">Analyze imported opponents</button>
-      </form>
-    </div>
   </div>
   <p class="pt-detail-meta">Reads the PokerCraft zip exports in the history/ folder and imports the hands into
   the database. Hands that were already imported are skipped, so re-scanning is always safe.</p>
@@ -44,8 +35,8 @@ one row per imported tournament (newest first) linking to its detail page.
 <section class="pt-detail">
   <div class="pt-detail-head"><h2 class="pt-hh-title">Tournaments</h2></div>
   {% if rows.is_empty() %}<div class="pt-empty">No imported hand histories yet — press <b>Scan for new hand histories</b> to read the zips in your history/ folder.</div>{% else %}<table class="pt-hh-table">
-<tr><th>Date</th><th>Tournament</th><th>Buy-in</th><th>Place</th><th>Prize</th><th>Profit</th><th>Hands</th><th>Won</th><th>Win %</th><th>Net chips</th></tr>
-{% for row in rows %}<tr><td class="pt-hh-date">{{ row.date }}</td><td><a class="pt-link" href="/history/tournaments/{{ row.id }}">{{ row.name }}</a>{% if let Some(game) = row.game_type %}<span class="pt-hh-sub">{{ game }} </span>{% endif %}<span class="pt-hh-sub">{{ row.entrants }}</span></td><td>{{ row.buy_in }}</td><td>{{ row.place }}</td><td>{{ row.prize }}</td><td class="{{ row.profit_class }}">{{ row.profit }}</td><td>{{ row.hands }}</td><td>{{ row.hands_won }}</td><td>{{ row.win_pct }}%</td><td class="{{ row.net_class }}">{{ row.net_chips }}</td></tr>
+<tr><th>Date</th><th>Tournament</th><th>Result</th><th>Buy-in</th><th>Place</th><th>Prize</th><th>Profit</th><th>Hands</th><th>Won</th><th>Win %</th><th>Net chips</th></tr>
+{% for row in rows %}<tr data-tournament-id="{{ row.id }}"{% if row.is_highlighted %} class="pt-highlight"{% endif %}><td class="pt-hh-date">{{ row.date }}</td><td><a class="pt-link" href="/history/tournaments/{{ row.id }}">{{ row.name }}</a>{% if let Some(game) = row.game_type %}<span class="pt-hh-sub">{{ game }} </span>{% endif %}<span class="pt-hh-sub">{{ row.entrants }}</span></td><td>{% if !row.badge_class.is_empty() %}<span class="pt-result-badge{{ row.badge_class }}">{{ row.badge_label }}</span>{% else %}{{ row.badge_label }}{% endif %}</td><td>{{ row.buy_in }}</td><td>{{ row.place }}</td><td>{{ row.prize }}</td><td class="{{ row.profit_class }}">{{ row.profit }}</td><td>{{ row.hands }}</td><td>{{ row.hands_won }}</td><td>{{ row.win_pct }}%</td><td class="{{ row.net_class }}">{{ row.net_chips }}</td></tr>
 {% endfor %}</table>{% endif %}
 </section>
 {% endblock %}

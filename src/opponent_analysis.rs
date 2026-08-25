@@ -1109,7 +1109,7 @@ Seat 3: 14c11a2a (small blind) showed [Qs Ad] and won (600) with a pair of Queen
         assert_eq!(first.state.stack(Seat::Hero), 355);
         // The hero's As Kh follow the rotation into the pin array.
         let expected_hero = hero_cards("As Kh").unwrap();
-        let pinned: Vec<Option<[Card; 2]>> = first.pins.iter().map(|pin| *pin).collect();
+        let pinned: Vec<Option<[Card; 2]>> = first.pins.to_vec();
         assert_eq!(pinned.iter().flatten().count(), 1);
         assert!(pinned.contains(&Some(expected_hero)));
         assert_eq!(first.state.blind_level(), BlindLevel::new(20, 40));
@@ -1577,6 +1577,7 @@ Seat 3: 14c11a2a (small blind) showed [Qs Ad] and won (600) with a pair of Queen
                     played: "Call".into(),
                     optimal: "Fold".into(),
                     ev_loss: 2.0,
+                    ev_loss_pot: 2.0,
                 },
                 crate::analytics::PendingDecision {
                     hand_no: 1,
@@ -1584,6 +1585,7 @@ Seat 3: 14c11a2a (small blind) showed [Qs Ad] and won (600) with a pair of Queen
                     played: "Check".into(),
                     optimal: "Bet(40)".into(),
                     ev_loss: 0.5,
+                    ev_loss_pot: 0.5,
                 },
             ],
         )

@@ -4,14 +4,11 @@ and the decimated EV chart drawn client-side.
 #}{% extends "layouts/subpage.html" %}
 {% import "partials/scripts.html" as scripts %}
 
-{% block title %}Poker Trainer — Tournament #{{ id }}{% endblock %}
+{% block title %}Poker Trainer — Drill #{{ id }}{% endblock %}
 
-{% block heading %}Tournament #{{ id }}{% endblock %}
+{% block heading %}Drill #{{ id }}{% endblock %}
 
-{% block nav %}
-  <a href="/tournaments" class="pt-link">All tournaments</a>
-  <a href="/" class="pt-link">Dashboard</a>
-{%- endblock %}
+{% block nav_drill %} is-active{% endblock %}
 
 {% block content %}
   <section class="pt-detail">

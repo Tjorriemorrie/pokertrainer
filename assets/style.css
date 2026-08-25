@@ -40,6 +40,37 @@ button { font-family: inherit; }
 
 /* ---------------------------------------------------------------- header */
 
+.pt-navbar {
+  display: flex;
+  align-items: center;
+  gap: 1.1rem;
+  background: #0d1117dd;
+  backdrop-filter: blur(6px);
+  padding: 0.55rem 1.1rem;
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+  z-index: 50;
+}
+
+.pt-navlink {
+  color: #93c5fd;
+  font-size: 0.85rem;
+  text-decoration: none;
+  white-space: nowrap;
+  padding-bottom: 0.15rem;
+  border-bottom: 2px solid transparent;
+}
+
+.pt-navlink:hover { text-decoration: underline; }
+
+.pt-navlink.is-active {
+  color: var(--gold-light);
+  font-weight: 700;
+  border-bottom-color: var(--gold);
+  text-decoration: none;
+}
+
 .pt-topwrap {
   display: flex;
   align-items: center;
@@ -48,9 +79,13 @@ button { font-family: inherit; }
   backdrop-filter: blur(6px);
   padding: 0.55rem 1.1rem;
   border-bottom: 1px solid var(--line);
-  position: sticky;
-  top: 0;
-  z-index: 50;
+}
+
+.pt-table-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  margin-bottom: 1rem;
 }
 
 .pt-brand {
@@ -116,7 +151,7 @@ button { font-family: inherit; }
 .pt-icon-btn:hover { border-color: var(--gold); }
 .pt-icon-btn.muted { opacity: 0.55; }
 
-.pt-page-title { font-weight: 800; letter-spacing: 0.06em; color: var(--gold); text-transform: uppercase; font-size: 1rem; margin: 0; }
+.pt-page-title { font-weight: 800; letter-spacing: 0.06em; color: var(--gold); text-transform: uppercase; font-size: 1rem; margin: 0 auto 0 0; }
 
 .pt-empty {
   background: #0d1117;
@@ -317,6 +352,14 @@ button { font-family: inherit; }
   border: 2px solid #e9e4d8;
 }
 
+.pt-card-hidden { opacity: 0; }
+.pt-card-dealt { animation: pt-deal-in 220ms ease; }
+
+@keyframes pt-deal-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
 .pt-stack {
   margin-top: 5px;
   background: rgba(8, 13, 18, 0.74);
@@ -369,25 +412,38 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
 .pt-flag.allin { color: #ffd27d; }
 .pt-flag.bust { color: #9aa5b1; }
 
-/* Hand-over win display: a gold ribbon draped over the winner's seat (shown
-   for the result pause before the next hand is dealt). */
+/* Hand-over win display: a gold ribbon floated above the winner's seat, clear
+   of the hole cards below (shown for the result pause before the next hand
+   is dealt). */
 .pt-seat.pt-winner .pt-seat-name {
   color: var(--gold-light);
   text-shadow: 0 0 12px rgba(243, 217, 164, 0.9);
+  transition: color 220ms ease, text-shadow 220ms ease;
+}
+
+/* At showdown the winner ribbon and name glow stay hidden until the reveal
+   sequence (board, then hands) has finished playing. */
+.pt-seat.pt-winner.pt-win-pending .pt-seat-name {
+  color: inherit;
+  text-shadow: none;
+}
+
+.pt-seat.pt-win-pending .pt-win {
+  opacity: 0;
 }
 
 .pt-win {
   position: absolute;
-  inset: 0;
+  left: 50%;
+  top: -34px;
+  transform: translateX(-50%);
   z-index: 20;
   display: flex;
-  flex-direction: column;
   align-items: center;
-  justify-content: center;
-  gap: 3px;
+  gap: 6px;
   pointer-events: none;
-  background: rgba(10, 16, 22, 0.35);
-  border-radius: 10px;
+  opacity: 1;
+  transition: opacity 220ms ease;
 }
 
 .pt-win b {
@@ -401,6 +457,7 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
   border: 1px solid #fff0cc;
   box-shadow: 0 3px 16px rgba(0, 0, 0, 0.65);
   transform: rotate(-4deg);
+  white-space: nowrap;
 }
 
 .pt-win span {
@@ -413,6 +470,7 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
   border-radius: 999px;
   padding: 0.05rem 0.75rem;
   transform: rotate(-4deg);
+  white-space: nowrap;
 }
 
 .pt-bet {
@@ -558,8 +616,7 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
   background: rgba(10, 16, 22, 0.85);
 }
 
-.pt-action-dock.locked .pt-bet-row,
-.pt-action-dock.locked .pt-slider-row,
+.pt-action-dock.locked .pt-sizing-row,
 .pt-action-dock.locked .pt-action-row {
   display: none;
 }
@@ -568,27 +625,37 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
   display: block;
 }
 
+.pt-sizing-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 12px;
+  width: 100%;
+}
+
 .pt-bet-row {
   display: flex;
   gap: 7px;
   flex-wrap: wrap;
-  justify-content: center;
+  justify-content: flex-end;
 }
 
 .pt-chip-size {
-  min-width: 54px;
-  padding: 0.32rem 0.65rem;
+  min-width: 44px;
+  padding: 0.38rem 0.8rem;
   border-radius: 6px;
-  border: 1px solid #3a424c;
-  background: #2a3038;
-  color: #c9d1d9;
-  font-weight: 800;
-  font-size: 0.86rem;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(20, 24, 30, 0.7);
+  color: #e8e6e3;
+  font-weight: 700;
+  font-size: 0.82rem;
+  letter-spacing: 0.01em;
   cursor: pointer;
   transition: background 0.12s ease;
 }
 
-.pt-chip-size:hover { background: #343b45; }
+.pt-chip-size:hover { background: rgba(255, 255, 255, 0.12); }
 
 .pt-chip-size.allin {
   background: linear-gradient(var(--red-2), #7c2a28);
@@ -599,15 +666,15 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
 .pt-slider-row {
   display: flex;
   align-items: center;
-  gap: 9px;
-  width: 560px;
-  max-width: 96%;
+  gap: 7px;
+  flex: 0 1 190px;
+  min-width: 150px;
 }
 
 .pt-stepper {
-  width: 30px;
-  height: 30px;
-  flex: 0 0 30px;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 26px;
   border-radius: 50%;
   border: 1px solid rgba(207, 159, 93, 0.55);
   background: rgba(10, 16, 22, 0.88);
@@ -622,6 +689,7 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
 
 .bet-slider {
   flex: 1;
+  min-width: 0;
   height: 26px;
   background: transparent;
   cursor: ew-resize;
@@ -647,13 +715,13 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
 }
 
 .bet-number {
-  width: 80px;
-  flex: 0 0 80px;
-  background: #0a1016;
-  color: #f1e9d7;
-  border: 1px solid rgba(207, 159, 93, 0.45);
-  border-radius: 6px;
-  padding: 0.35rem 0.5rem;
+  width: 52px;
+  flex: 0 0 52px;
+  min-width: 0;
+  background: transparent;
+  color: #fff;
+  border: none;
+  padding: 0.35rem 0.2rem;
   font-weight: 700;
   font-size: 0.95rem;
   text-align: right;
@@ -695,17 +763,19 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
 /* The table action dock uses square, uniformly red buttons with the amount
    stacked under the label (GGPoker style). */
 .pt-action-dock .action-btn {
-  border-radius: 4px;
-  padding: 0.5rem 1.2rem;
+  border-radius: 8px;
+  padding: 0.65rem 1.2rem;
   line-height: 1.15;
+  font-size: 1.05rem;
+  letter-spacing: 0.01em;
 }
 
 .pt-action-dock .action-btn .amt {
   display: block;
-  font-size: 0.82em;
+  font-size: 0.78em;
   font-weight: 700;
   opacity: 0.92;
-  margin-top: 2px;
+  margin-top: 3px;
 }
 
 /* ------------------------------------------------------------------ log */
@@ -822,8 +892,16 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
 
 .pt-overlay-card { padding: 1.25rem 1.5rem; }
 .pt-overlay-card .action-btn { width: 100%; }
+
+/* Button color convention (see AGENTS.md "UI conventions"): pt-confirm (green)
+   is a confirming action taken within the current page; pt-secondary (gold)
+   is navigation that starts or resumes play. The same destination always
+   gets the same label + class everywhere it's offered. */
 .pt-confirm { background: linear-gradient(var(--green-1), var(--green-2)); font-weight: 800; }
 .pt-confirm:hover { filter: brightness(1.13); }
+
+.pt-secondary { background: linear-gradient(var(--gold-light), var(--gold-dark)); color: #241b0d; font-weight: 800; text-shadow: none; }
+.pt-secondary:hover { filter: brightness(1.08); }
 
 /* The full tactical review stacks the opponents' HUD block above the
    played-vs-optimal card so both stay readable in the right column. */
@@ -958,28 +1036,6 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
 
 /* -------------------------------------------------------- history page */
 
-.pt-tournament {
-  background: #0d1117;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 0.75rem 1rem;
-  margin-bottom: 1rem;
-}
-
-.pt-tournament-head {
-  display: flex;
-  justify-content: space-between;
-  gap: 1rem;
-  flex-wrap: wrap;
-  padding-bottom: 0.5rem;
-  font-size: 0.85rem;
-  color: #9ca3af;
-}
-
-.pt-tournament-title { font-weight: 700; color: #e5e7eb; }
-.pt-tournament-title { text-decoration: none; }
-.pt-tournament-title:hover { color: var(--gold); }
-
 .pt-result-badge {
   display: inline-block;
   font-size: 0.68rem;
@@ -992,12 +1048,17 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
 .pt-result-badge.win { background: #064e3b; color: #86efac; }
 .pt-result-badge.loss { background: #7f1d1d; color: #fecaca; }
 
+.pt-drill-bar-action {
+  min-width: auto;
+  padding: 0.5rem 1.2rem;
+  font-size: 0.85rem;
+}
+
 .pt-pagination {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 1rem;
-  margin-bottom: 1rem;
   font-size: 0.85rem;
 }
 
@@ -1198,6 +1259,11 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
 
 .pt-hh-table tr:last-child td { border-bottom: none; }
 
+.pt-hh-table tr.pt-highlight td {
+  background: rgba(207, 159, 93, 0.14);
+  box-shadow: inset 3px 0 0 #cf9f5d;
+}
+
 .pt-hh-date { color: #9ca3af; }
 
 .pt-hh-sub {
@@ -1226,12 +1292,6 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
 
 .pt-hh-failures ul { margin: 0.4rem 0 0.2rem; padding-left: 1.2rem; }
 .pt-hh-failures li { margin: 0.15rem 0; word-break: break-all; }
-
-.pt-hh-actions {
-  display: flex;
-  gap: 0.5rem;
-  flex-wrap: wrap;
-}
 
 .pt-template-chip {
   display: flex;

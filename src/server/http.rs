@@ -51,8 +51,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/", get(dashboard))
         .route("/play", get(play))
         .route("/health", get(health))
-        .route("/tournaments", get(tournaments))
-        .route("/tournaments/{id}", get(tournament_detail))
+        .route("/drill", get(tournaments))
+        .route("/drill/{id}", get(tournament_detail))
         .route("/history", get(history))
         .route("/history/scan", post(history_scan))
         .route("/history/tournaments/{id}", get(history_tournament_detail))
@@ -168,23 +168,28 @@ async fn health() -> impl IntoResponse {
 /// How many finished tournaments render per page of the history listing.
 pub const TOURNAMENTS_PAGE_SIZE: i64 = 25;
 
-/// The parsed `?page=` query parameter of `/tournaments`.
+/// The parsed `?page=`/`?highlight=` query parameters of `/drill`.
 #[derive(Clone, Copy, Debug, serde::Deserialize)]
 pub struct TournamentsParams {
     pub page: Option<u32>,
+    /// A session id to highlight — set right after a drill finishes so the
+    /// player can spot the one they just played in the listing.
+    pub highlight: Option<i32>,
 }
 
 /// One rendered page of the tournament history.
 #[derive(Clone, Debug)]
 pub struct TournamentsPage {
-    pub sessions: Vec<(analytics::SessionSummary, Vec<analytics::ChartPoint>)>,
+    pub sessions: Vec<analytics::SessionSummary>,
     pub page: u32,
     pub pages: u32,
+    pub stats: analytics::DrillOverallStats,
 }
 
-/// The finished-tournament history page: a paginated listing (25 per page,
-/// newest first) of one decimated EV chart per finished session. Without a
-/// database this endpoint cannot render anything.
+/// The finished-tournament history page: a paginated table (25 per page,
+/// newest first) of the EV metrics that show whether the hero's play is
+/// improving drill over drill. Without a database this endpoint cannot
+/// render anything.
 async fn tournaments(
     State(app): State<Arc<AppState>>,
     Query(params): Query<TournamentsParams>,
@@ -197,11 +202,21 @@ async fn tournaments(
             .into_response();
     };
     let page = params.page.unwrap_or(1).max(1);
+    let active = match crate::live::load_dashboard(&pool).await {
+        Ok(active) => active.is_some(),
+        Err(error) => {
+            tracing::warn!(%error, "drill page could not read the active tournament");
+            false
+        }
+    };
     match render_tournaments(&pool, page).await {
         Ok(pageview) => html(views::tournaments_page(
             &pageview.sessions,
             pageview.page,
             pageview.pages,
+            active,
+            params.highlight,
+            &pageview.stats,
         )),
         Err(error) => {
             tracing::warn!(%error, page, "tournaments page failed to render");
@@ -214,25 +229,18 @@ async fn tournaments(
     }
 }
 
-/// Loads one page of finished sessions (newest first) plus their decimated
-/// chart datasets.
+/// Loads one page of finished sessions, newest first.
 pub async fn render_tournaments(pool: &PgPool, page: u32) -> Result<TournamentsPage> {
     let total = analytics::count_finished_sessions(pool).await?;
     let pages = (((total + TOURNAMENTS_PAGE_SIZE - 1) / TOURNAMENTS_PAGE_SIZE) as u32).max(1);
     let offset = (page - 1) as i64 * TOURNAMENTS_PAGE_SIZE;
-    let summaries = analytics::list_finished_sessions(pool, TOURNAMENTS_PAGE_SIZE, offset).await?;
-    let mut sessions = Vec::with_capacity(summaries.len());
-    for summary in summaries {
-        let points = analytics::load_session(pool, summary.id, analytics::CHART_WINDOW).await?;
-        sessions.push((
-            summary,
-            analytics::decimate(&points, analytics::DECIMATED_POINTS),
-        ));
-    }
+    let sessions = analytics::list_finished_sessions(pool, TOURNAMENTS_PAGE_SIZE, offset).await?;
+    let stats = analytics::overall_drill_stats(pool).await?;
     Ok(TournamentsPage {
         sessions,
         page,
         pages,
+        stats,
     })
 }
 
@@ -264,16 +272,35 @@ async fn tournament_detail(State(app): State<Arc<AppState>>, Path(id): Path<i32>
     }
 }
 
+/// The parsed `?highlight=` query parameter of `/history`: a comma-separated
+/// list of tournament ids, set right after a scan imports new hands so the
+/// player can spot which tournaments it affected.
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+pub struct HistoryParams {
+    pub highlight: Option<String>,
+}
+
 /// The GGPoker hand-history page: the scan trigger, lifetime aggregates, and
 /// the imported-tournament listing (newest first), plus the opponent-skill
 /// analyzer entry and the current bot template.
-async fn history(State(app): State<Arc<AppState>>) -> Response {
+async fn history(
+    State(app): State<Arc<AppState>>,
+    Query(params): Query<HistoryParams>,
+) -> Response {
     let Some(pool) = app.pool.clone() else {
         return unavailable("analytics store is unavailable");
     };
+    let highlight: std::collections::HashSet<String> = params
+        .highlight
+        .as_deref()
+        .unwrap_or("")
+        .split(',')
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .collect();
     let page = match history_page_data(&pool).await {
         Ok((stats, tournaments, template)) => {
-            views::history_page(&stats, &tournaments, template.as_ref())
+            views::history_page(&stats, &tournaments, template.as_ref(), &highlight)
         }
         Err(error) => {
             tracing::warn!(%error, "history page failed to render");
@@ -303,7 +330,8 @@ async fn history_page_data(
 }
 
 /// Scans the configured history directory, imports the found hands, and
-/// renders the results page restricted to the newly imported hands.
+/// redirects back to the hand-history page with the affected tournaments
+/// highlighted.
 async fn history_scan(State(app): State<Arc<AppState>>) -> Response {
     let Some(pool) = app.pool.clone() else {
         return unavailable("analytics store is unavailable");
@@ -313,7 +341,17 @@ async fn history_scan(State(app): State<Arc<AppState>>) -> Response {
         Err(error) => return scan_failure(error),
     };
     match hh::import_scan(&pool, &run).await {
-        Ok(outcome) => html(views::history_scan_result_page(&outcome)),
+        Ok(outcome) => {
+            if !outcome.failures.is_empty() {
+                tracing::warn!(failures = ?outcome.failures, "hand history scan skipped some files");
+            }
+            if outcome.affected_tournaments.is_empty() {
+                Redirect::to("/history").into_response()
+            } else {
+                let highlight = outcome.affected_tournaments.join(",");
+                Redirect::to(&format!("/history?highlight={highlight}")).into_response()
+            }
+        }
         Err(error) => {
             tracing::warn!(%error, "hand history scan failed to import");
             scan_failure(error)
@@ -535,8 +573,8 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("<title>Poker Trainer</title>"));
         assert!(
-            body.contains(r#"href="/play">Start tournament</a>"#),
-            "the dashboard offers a start without a database: {body}"
+            body.contains(r#"href="/play">Drill</a>"#),
+            "the dashboard offers the drill button without a database: {body}"
         );
         assert!(!body.contains(r#"id="table""#), "the table lives on /play");
     }
@@ -591,8 +629,8 @@ mod tests {
         let (status, body) = get_with(state.clone(), "/").await;
         assert_eq!(status, StatusCode::OK);
         assert!(
-            body.contains("Start tournament"),
-            "a dashboard without an active row offers a start: {body}"
+            body.contains(r#"href="/play">Drill</a>"#),
+            "a dashboard without an active row offers the drill button: {body}"
         );
 
         let session_id = match crate::live::claim_or_resume(&pool).await.unwrap() {
@@ -654,7 +692,7 @@ mod tests {
         let (status, body) = get_with(state, "/").await;
         assert_eq!(status, StatusCode::OK);
         assert!(
-            body.contains(r#"href="/play">Resume tournament</a>"#),
+            body.contains(r#"href="/play">Resume drill</a>"#),
             "an active tournament renders the resume card: {body}"
         );
         assert!(body.contains("Hand</span><b>#6</b>"));
@@ -670,13 +708,13 @@ mod tests {
 
     #[tokio::test]
     async fn tournaments_requires_an_analytics_store() {
-        let (status, body) = get("/tournaments").await;
+        let (status, body) = get("/drill").await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert!(body.contains("analytics store is unavailable"));
     }
 
     #[tokio::test]
-    async fn tournaments_page_lists_finished_sessions_with_charts() {
+    async fn tournaments_page_lists_finished_sessions() {
         use crate::game::Street;
 
         let _guard = crate::analytics::DB_TEST_LOCK.lock().await;
@@ -691,6 +729,7 @@ mod tests {
                 played: "Call".into(),
                 optimal: "Fold".into(),
                 ev_loss: 12.5,
+                ev_loss_pot: 12.5,
             }],
         )
         .await
@@ -708,12 +747,11 @@ mod tests {
             history_dir: crate::hh::default_history_dir(),
             analysis: Arc::new(Mutex::new(JobState::Idle)),
         });
-        let (status, body) = get_with(state, "/tournaments").await;
+        let (status, body) = get_with(state, "/drill").await;
         assert_eq!(status, StatusCode::OK);
-        assert!(body.contains("<title>Poker Trainer — Tournaments</title>"));
+        assert!(body.contains("<title>Poker Trainer — Drill</title>"));
         assert!(body.contains(&format!("data-tournament-id=\"{session_id}\"")));
-        assert!(body.contains("3 hands"));
-        assert!(body.contains("12.5"));
+        assert!(body.contains("12.50 BB"));
 
         sqlx::query("DELETE FROM hero_sessions WHERE id = $1")
             .bind(session_id)
@@ -746,6 +784,7 @@ mod tests {
                     played: "Call".into(),
                     optimal: "Fold".into(),
                     ev_loss: 1.0,
+                    ev_loss_pot: 1.0,
                 }],
             )
             .await
@@ -772,7 +811,7 @@ mod tests {
         let oldest_id = ids[0];
         let second_page_first = ids[ids.len() - TOURNAMENTS_PAGE_SIZE as usize - 1];
 
-        let (status, first) = get_with(state.clone(), "/tournaments").await;
+        let (status, first) = get_with(state.clone(), "/drill").await;
         assert_eq!(status, StatusCode::OK);
         let newest_marker = format!("data-tournament-id=\"{newest_id}\"");
         let oldest_marker = format!("data-tournament-id=\"{oldest_id}\"");
@@ -789,7 +828,7 @@ mod tests {
         assert!(!first.contains(&oldest_marker));
         assert!(first.contains(&format!("Page 1 of {pages}")));
 
-        let (status, second) = get_with(state.clone(), "/tournaments?page=2").await;
+        let (status, second) = get_with(state.clone(), "/drill?page=2").await;
         assert_eq!(status, StatusCode::OK);
         let spill_marker = format!("data-tournament-id=\"{second_page_first}\"");
         assert!(
@@ -799,7 +838,7 @@ mod tests {
         assert!(!second.contains(&format!("data-tournament-id=\"{newest_id}\"")));
         assert!(second.contains(&format!("Page 2 of {pages}")));
 
-        let (status, beyond) = get_with(state.clone(), "/tournaments?page=999").await;
+        let (status, beyond) = get_with(state.clone(), "/drill?page=999").await;
         assert_eq!(status, StatusCode::OK);
         assert!(
             !beyond.contains("data-tournament-id"),
@@ -809,6 +848,55 @@ mod tests {
 
         sqlx::query("DELETE FROM hero_sessions WHERE id = ANY($1)")
             .bind(&ids)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn tournaments_page_highlights_the_requested_session() {
+        let _guard = crate::analytics::DB_TEST_LOCK.lock().await;
+        let pool = crate::db::test_pool().await;
+        let session_id = analytics::start_session(&pool).await.unwrap();
+        analytics::persist_records(
+            &pool,
+            session_id,
+            &[analytics::PendingDecision {
+                hand_no: 1,
+                street: crate::game::Street::Preflop,
+                played: "Call".into(),
+                optimal: "Fold".into(),
+                ev_loss: 1.0,
+                ev_loss_pot: 1.0,
+            }],
+        )
+        .await
+        .unwrap();
+        analytics::finish_session(&pool, session_id).await.unwrap();
+
+        let state = Arc::new(AppState {
+            assets: default_assets(),
+            mcts: MctsConfig::test(),
+            survival: SurvivalConfig::default(),
+            blunder: BlunderConfig::default(),
+            pool: Some(pool.clone()),
+            snapshot_interval: 100,
+            result_pause_ms: 0,
+            history_dir: crate::hh::default_history_dir(),
+            analysis: Arc::new(Mutex::new(JobState::Idle)),
+        });
+
+        let (status, body) = get_with(state, &format!("/drill?highlight={session_id}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains(&format!(
+                "data-tournament-id=\"{session_id}\" class=\"pt-highlight\""
+            )),
+            "the just-finished drill's row is highlighted: {body}"
+        );
+
+        sqlx::query("DELETE FROM hero_sessions WHERE id = $1")
+            .bind(session_id)
             .execute(&pool)
             .await
             .unwrap();
@@ -830,6 +918,7 @@ mod tests {
                 played: "Call".into(),
                 optimal: "Fold".into(),
                 ev_loss: 4.0,
+                ev_loss_pot: 4.0,
             }],
         )
         .await
@@ -862,10 +951,10 @@ mod tests {
             history_dir: crate::hh::default_history_dir(),
             analysis: Arc::new(Mutex::new(JobState::Idle)),
         });
-        let (status, body) = get_with(state, &format!("/tournaments/{session_id}")).await;
+        let (status, body) = get_with(state, &format!("/drill/{session_id}")).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains(&format!(
-            "<title>Poker Trainer — Tournament #{session_id}</title>"
+            "<title>Poker Trainer — Drill #{session_id}</title>"
         )));
         assert!(body.contains(r#"class="pt-result-badge win">WIN</span>"#));
         assert!(body.contains("<span>Hands won</span><b>1</b>"));
@@ -883,7 +972,7 @@ mod tests {
                 history_dir: crate::hh::default_history_dir(),
                 analysis: Arc::new(Mutex::new(JobState::Idle)),
             }),
-            "/tournaments/999999999",
+            "/drill/999999999",
         )
         .await;
         assert_eq!(missing, StatusCode::NOT_FOUND);
@@ -985,6 +1074,29 @@ mod tests {
         (status, String::from_utf8_lossy(&bytes).to_string())
     }
 
+    /// Posts to `path` and returns the response status plus its `Location`
+    /// header (empty when absent) — for asserting on a redirect without
+    /// following it.
+    async fn post_expect_redirect(state: Arc<AppState>, path: &str) -> (StatusCode, String) {
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let location = response
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .map(|value| value.to_str().unwrap().to_string())
+            .unwrap_or_default();
+        (status, location)
+    }
+
     #[tokio::test]
     async fn history_requires_an_analytics_store() {
         let (status, body) = get("/history").await;
@@ -1000,7 +1112,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn history_scan_imports_zips_and_renders_new_hand_stats() {
+    async fn history_scan_imports_zips_and_redirects_with_highlight() {
         use std::io::Write;
         use zip::write::SimpleFileOptions;
 
@@ -1079,24 +1191,23 @@ You finished in 1st place.
         assert!(body.contains("Hand history"));
         assert!(body.contains(r#"action="/history/scan""#));
 
-        let (status, body) = post_with(state.clone(), "/history/scan").await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(body.contains("<title>Poker Trainer — Scan results</title>"));
-        assert!(body.contains("<span>New hands</span><b>1</b>"), "{body}");
-        assert!(body.contains("<span>New tournaments</span><b>1</b>"));
-        assert!(body.contains("<span>Won</span><b>1</b>"));
-        assert!(body.contains("<span>Win ratio</span><b>100%</b>"), "{body}");
+        let (status, location) = post_expect_redirect(state.clone(), "/history/scan").await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        let highlight_location = format!("/history?highlight={tournament_id}");
+        assert_eq!(location, highlight_location);
 
-        // A re-scan is idempotent: nothing new, hand skipped.
-        let (status, body) = post_with(state.clone(), "/history/scan").await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(body.contains("<span>New hands</span><b>0</b>"), "{body}");
-        assert!(body.contains("<span>Already imported</span><b>1</b>"));
+        // A re-scan is idempotent: nothing new, so nothing to highlight.
+        let (status, location) = post_expect_redirect(state.clone(), "/history/scan").await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        assert_eq!(location, "/history");
 
-        // The listing shows the tournament and the detail page the hand.
-        let (status, body) = get_with(state.clone(), "/history").await;
+        // The listing shows the tournament, highlighted after the scan, and
+        // the detail page the hand.
+        let (status, body) = get_with(state.clone(), &highlight_location).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains(&format!("href=\"/history/tournaments/{tournament_id}\"")));
+        assert!(body.contains(&format!(r#"data-tournament-id="{tournament_id}""#)));
+        assert!(body.contains("pt-highlight"));
         assert!(body.contains("$0.50"), "{body}");
 
         let (status, body) = get_with(
@@ -1175,12 +1286,13 @@ You finished in 1st place.
             analysis: Arc::new(Mutex::new(JobState::Idle)),
         });
 
-        let (status, body) = post_with(state, "/history/scan").await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(body.contains("<span>New hands</span><b>1</b>"), "{body}");
-        assert!(
-            body.contains("no recognizable PokerCraft content"),
-            "the junk entry is listed as skipped: {body}"
+        let (status, location) = post_expect_redirect(state, "/history/scan").await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        assert_eq!(
+            location,
+            format!("/history?highlight={tournament_id}"),
+            "the good hand still imports and its tournament is highlighted, \
+             even though the junk entry alongside it is skipped"
         );
 
         sqlx::query("DELETE FROM gg_tournaments WHERE id = $1")
@@ -1389,6 +1501,7 @@ You finished in 1st place.
                 played: "Call".into(),
                 optimal: "Raise(60)".into(),
                 ev_loss: 0.2,
+                ev_loss_pot: 0.2,
             }],
         )
         .await

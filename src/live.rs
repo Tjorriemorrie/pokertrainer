@@ -352,6 +352,7 @@ mod tests {
                 played: "Call".into(),
                 optimal: "Fold".into(),
                 ev_loss: 1.0,
+                ev_loss_pot: 1.0,
             }],
         )
         .await

@@ -8,6 +8,7 @@ use sqlx::PgPool;
 use tokio::sync::mpsc;
 
 use crate::analytics::{self, PendingHandResult};
+use crate::blunder::BlunderConfig;
 use crate::error::{Error, Result};
 use crate::game::{Action, GameState, Seat};
 use crate::mcts::MctsConfig;
@@ -26,7 +27,7 @@ pub const DASHBOARD_URL: &str = "/";
 
 /// Where the client is sent once it finishes the table or is rejected
 /// because the table is open elsewhere — see [`DASHBOARD_URL`].
-pub const TOURNAMENTS_URL: &str = "/tournaments";
+pub const TOURNAMENTS_URL: &str = "/drill";
 
 /// The outcome of handling one client frame: the frames to send back, how
 /// many chart ticks were produced (snapshot refresh pacing), the hero action
@@ -99,7 +100,7 @@ async fn handle_socket(socket: WebSocket, app: Arc<AppState>) {
                 app.blunder,
             ) {
                 Ok(mut session) => {
-                    hydrate_blunder(app.pool.as_ref(), session_id, &mut session).await;
+                    hydrate_blunder(app.pool.as_ref(), session_id, app.blunder, &mut session).await;
                     tracing::info!(session_id = ?session_id, hand_no = session.hand_no(), "resumed stored tournament");
                     session
                 }
@@ -161,6 +162,7 @@ async fn handle_socket(socket: WebSocket, app: Arc<AppState>) {
                 reject_socket(socket, "the table could not be dealt").await;
                 return;
             }
+            hydrate_blunder(app.pool.as_ref(), session_id, app.blunder, &mut session).await;
             tracing::info!(session_id = ?session_id, "new tournament started");
             session
         }
@@ -194,20 +196,27 @@ enum ConnectionEnd {
     Disconnected,
 }
 
-/// Rebuilds the blunder tracker from the session's stored decisions so the
-/// intervention threshold resumes exactly where it stopped.
+/// Rebuilds the blunder tracker from the hero's stored decisions across
+/// every session, so a brand-new game starts already calibrated instead of
+/// cold and a resumed table's intervention threshold picks up exactly where
+/// it stopped.
 async fn hydrate_blunder(
     pool: Option<&PgPool>,
     session_id: Option<i32>,
+    blunder: BlunderConfig,
     session: &mut TableSession,
 ) {
     let (Some(pool), Some(session_id)) = (pool, session_id) else {
         return;
     };
-    match analytics::load_session_losses(pool, session_id).await {
+    match analytics::load_recent_losses(pool, blunder.history_actions).await {
         Ok(history) => {
             session.hydrate_blunder(&history);
-            tracing::info!(actions = history.len(), "blunder history restored");
+            tracing::info!(
+                session_id,
+                actions = history.len(),
+                "blunder history restored"
+            );
         }
         Err(error) => {
             tracing::warn!(%error, "blunder history unavailable — resuming with a fresh tracker")
@@ -711,7 +720,7 @@ async fn finalize_tournament(
         }
     }
     let url = match session_id {
-        Some(id) => format!("/tournaments/{id}"),
+        Some(id) => format!("{TOURNAMENTS_URL}?highlight={id}"),
         None => TOURNAMENTS_URL.to_string(),
     };
     tournament_finished_message(result.won, &url)
@@ -1465,7 +1474,7 @@ mod tests {
             json!({
                 "type": "TOURNAMENT_FINISHED",
                 "won": false,
-                "url": "/tournaments/7"
+                "url": "/drill?highlight=7"
             })
         );
     }
@@ -1495,6 +1504,7 @@ mod tests {
             played: Some(PlayedEvaluation {
                 analysis: fold,
                 ev_loss_bb: 0.0,
+                ev_loss_pot: 0.0,
                 is_optimal: true,
             }),
             search: SearchReport {
@@ -1527,15 +1537,15 @@ mod tests {
 
     #[test]
     fn tournament_finished_message_carries_the_outcome_and_detail_url() {
-        let message = tournament_finished_message(true, "/tournaments/7").unwrap();
+        let message = tournament_finished_message(true, "/drill/7").unwrap();
         assert_eq!(
             parse(&message),
-            json!({"type": "TOURNAMENT_FINISHED", "won": true, "url": "/tournaments/7"})
+            json!({"type": "TOURNAMENT_FINISHED", "won": true, "url": "/drill/7"})
         );
-        let loss = tournament_finished_message(false, "/tournaments/9").unwrap();
+        let loss = tournament_finished_message(false, "/drill/9").unwrap();
         assert_eq!(
             parse(&loss),
-            json!({"type": "TOURNAMENT_FINISHED", "won": false, "url": "/tournaments/9"})
+            json!({"type": "TOURNAMENT_FINISHED", "won": false, "url": "/drill/9"})
         );
     }
 
@@ -1563,7 +1573,7 @@ mod tests {
             finalize_tournament(None, Some(7), &sample_tournament_result(false), Vec::new()).await;
         assert_eq!(
             parse(&frame),
-            json!({"type": "TOURNAMENT_FINISHED", "won": false, "url": "/tournaments/7"})
+            json!({"type": "TOURNAMENT_FINISHED", "won": false, "url": "/drill?highlight=7"})
         );
     }
 
@@ -1581,6 +1591,7 @@ mod tests {
                 played: "Call".into(),
                 optimal: "Fold".into(),
                 ev_loss: 1.0,
+                ev_loss_pot: 1.0,
             }],
         )
         .await
@@ -1602,7 +1613,7 @@ mod tests {
         .await;
         assert_eq!(
             parse(&frame),
-            json!({"type": "TOURNAMENT_FINISHED", "won": true, "url": format!("/tournaments/{session_id}")})
+            json!({"type": "TOURNAMENT_FINISHED", "won": true, "url": format!("/drill?highlight={session_id}")})
         );
 
         let detail = analytics::load_tournament_detail(&pool, session_id)
@@ -1645,7 +1656,7 @@ mod tests {
         let frame = tournament_over_frame(&mut session, None, Some(7)).await;
         assert_eq!(
             parse(&frame.unwrap()),
-            json!({"type": "TOURNAMENT_FINISHED", "won": true, "url": "/tournaments/7"})
+            json!({"type": "TOURNAMENT_FINISHED", "won": true, "url": "/drill?highlight=7"})
         );
         assert!(
             session.take_hand_results().is_empty(),
@@ -1722,7 +1733,7 @@ mod tests {
         let mut session = make_session();
         let events = vec![
             TableEvent::TacticalOverlay {
-                decision: sample_analysis(),
+                decision: Box::new(sample_analysis()),
                 hand_no: 1,
                 intercepted: true,
             },
@@ -2206,15 +2217,19 @@ mod tests {
                 }
                 "TABLE_STATE_UPDATE" => {
                     let fragment = frame["fragment"].as_str().unwrap();
+                    // Hand #1 can walk to showdown on checks alone after the
+                    // hero's one call, with no further hero decision — the
+                    // wait then spills into hand #2 (or beyond) before a
+                    // decision block appears again. Any non-decision frame
+                    // just means it still isn't the hero's turn; the
+                    // surrounding `next_text` timeout is the backstop against
+                    // a genuine hang.
                     let Some(datadecision) = fragment
                         .split(r#"class="pt-action-block" data-decision=""#)
                         .nth(1)
                         .and_then(|rest| rest.split('"').next())
                     else {
-                        if fragment.contains("Hand #1") {
-                            continue; // the hand is still running
-                        }
-                        panic!("no decision on the refreshed table: {fragment}");
+                        continue;
                     };
                     break datadecision.to_string();
                 }
@@ -2222,9 +2237,17 @@ mod tests {
                 other => panic!("unexpected frame type {other}"),
             }
         };
-        assert!(
-            decision.starts_with("h1-a1-"),
-            "second decision of hand #1: {decision}"
+        // The hand the captured decision belongs to — usually still hand #1,
+        // but a walked hand (every street checks through after the hero's
+        // call) can leave zero further hero decisions in hand #1, so the
+        // first decision found here is already hand #2's. Either way the
+        // resume below must land on this same hand and token.
+        let hand_marker = format!(
+            "Hand #{}",
+            decision
+                .strip_prefix('h')
+                .and_then(|rest| rest.split('-').next())
+                .expect("decision token starts with the hand number")
         );
         stream.close(None).await.unwrap();
 
@@ -2248,7 +2271,7 @@ mod tests {
         assert_eq!(resumed_frame["type"], "TABLE_STATE_UPDATE");
         let fragment = resumed_frame["fragment"].as_str().unwrap();
         assert!(
-            fragment.contains("Hand #1"),
+            fragment.contains(&hand_marker),
             "the resume lands on the saved hand, not a fresh deal: {fragment}"
         );
         let resumed_decision = fragment

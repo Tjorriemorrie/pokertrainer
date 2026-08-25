@@ -394,7 +394,7 @@ mod tests {
 
     #[test]
     fn template_skill_survives_the_json_round_trip() {
-        let mut snapshot = TournamentSnapshot {
+        let snapshot = TournamentSnapshot {
             state: StateSnapshot {
                 stacks: [500, 480, 500],
                 button: 0,

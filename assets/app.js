@@ -172,6 +172,66 @@
     el.innerHTML = html;
   };
 
+  /* ------------------------------------------------------ card dealing */
+
+  function cardSnapshot() {
+    const seen = new Map();
+    document.querySelectorAll("#table .pt-seat-cards, #table .pt-board").forEach((container) => {
+      const seat = container.closest("[data-seat]");
+      const scope = seat ? `seat:${seat.dataset.seat}` : "board";
+      container.querySelectorAll(":scope > .pt-card").forEach((card, i) => {
+        const code = card.dataset.code || (card.classList.contains("back") ? "back" : "");
+        seen.set(`${scope}:${i}:${code}`, true);
+      });
+    });
+    return seen;
+  }
+
+  function freshCardGroups(before) {
+    const board = [];
+    const seats = [];
+    document.querySelectorAll("#table .pt-seat-cards, #table .pt-board").forEach((container) => {
+      const seat = container.closest("[data-seat]");
+      const scope = seat ? `seat:${seat.dataset.seat}` : "board";
+      const bucket = seat ? seats : board;
+      container.querySelectorAll(":scope > .pt-card").forEach((card, i) => {
+        const code = card.dataset.code || (card.classList.contains("back") ? "back" : "");
+        if (!before.has(`${scope}:${i}:${code}`)) bucket.push(card);
+      });
+    });
+    return { board, seats };
+  }
+
+  function revealCards(cards, onDone) {
+    if (cards.length === 0) {
+      if (onDone) onDone();
+      return;
+    }
+    cards.forEach((card) => card.classList.add("pt-card-hidden"));
+    cards.forEach((card, i) => {
+      setTimeout(() => {
+        card.classList.remove("pt-card-hidden");
+        card.classList.add("pt-card-dealt");
+      }, i * 300);
+    });
+    if (onDone) setTimeout(onDone, (cards.length - 1) * 300 + 260);
+  }
+
+  // Showdown gets its own pacing: hole cards are already rendered face-up by
+  // the fragment (no re-dealing them), so the only thing worth animating is
+  // any board street the hand skipped past (e.g. a preflop all-in running
+  // the board out at once) — then the winner ribbon lights up.
+  function animateShowdown(before) {
+    const { board } = freshCardGroups(before);
+    const winners = document.querySelectorAll("#table .pt-seat.pt-winner");
+    winners.forEach((seat) => seat.classList.add("pt-win-pending"));
+    revealCards(board, () => {
+      setTimeout(() => {
+        winners.forEach((seat) => seat.classList.remove("pt-win-pending"));
+      }, 200);
+    });
+  }
+
 function setStatus(text, cls) {
     statusEl.textContent = text;
     statusEl.className = cls;
@@ -380,9 +440,18 @@ function setStatus(text, cls) {
       return;
     }
     switch (msg.type) {
-      case "TABLE_STATE_UPDATE":
+      case "TABLE_STATE_UPDATE": {
+        const before = cardSnapshot();
         swap(table, msg.fragment);
         bindDock();
+        const { board, seats } = freshCardGroups(before);
+        const isShowdown =
+          seats.length > 0 && document.querySelectorAll("#table .pt-seat.pt-winner").length > 0;
+        if (isShowdown) {
+          animateShowdown(before);
+        } else {
+          revealCards(board.concat(seats));
+        }
         const block = document.querySelector("#table-state .pt-action-block");
         currentDecision = block ? (block.dataset.decision || null) : null;
         setDockLocked(true);
@@ -397,6 +466,7 @@ function setStatus(text, cls) {
         const logLines = document.getElementById("pt-hlog-lines");
         if (logLines) logLines.scrollTop = logLines.scrollHeight;
         break;
+      }
       case "TRIGGER_TACTICAL_OVERLAY":
         swap(feedback, msg.fragment);
         bindFeedback();

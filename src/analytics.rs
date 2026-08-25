@@ -35,8 +35,12 @@ type SummaryRow = (
     i64,
     i32,
     f64,
+    f64,
     Option<String>,
     Option<i32>,
+    i64,
+    i64,
+    i64,
 );
 
 /// One hero decision awaiting a database write.
@@ -46,8 +50,15 @@ pub struct PendingDecision {
     pub street: Street,
     pub played: String,
     pub optimal: String,
-    /// EV given up against the optimal action, in big blinds.
+    /// EV given up against the optimal action, in big blinds — the
+    /// human-readable figure shown in the coach overlay and the progress
+    /// chart.
     pub ev_loss: f64,
+    /// The same EV given up, normalized instead to the pot at the decision
+    /// point — what the blunder tracker's rolling calibration is built
+    /// from, so a river mistake in a big pot doesn't outrank an equally bad
+    /// preflop mistake just because more chips were on the table.
+    pub ev_loss_pot: f64,
 }
 
 /// One completed hand awaiting a database write: who won it and how the hero
@@ -71,13 +82,25 @@ pub struct SessionSummary {
     pub ended: String,
     pub actions: i64,
     pub hands: i32,
+    /// Hands the hero won within this session.
+    pub hands_won: i64,
     /// Mean EV loss across the session's actions, in big blinds.
     pub avg_ev_loss: f64,
+    /// Total EV lost across the whole session's actions, in big blinds — the
+    /// headline number for tracking improvement drill over drill.
+    pub total_ev_loss: f64,
     /// The tournament outcome (`WIN`/`LOSS`), or `None` for sessions finished
     /// manually before a winner was decided.
     pub result: Option<String>,
     /// The hero's stack when the tournament ended, or `None` when unknown.
     pub final_stack: Option<i32>,
+    /// Wins among all decided (`WIN`/`LOSS`) sessions up to and including
+    /// this one, in chronological order — the numerator of the running
+    /// win rate shown on the drill listing.
+    pub running_wins: i64,
+    /// Decided sessions up to and including this one, in chronological
+    /// order — the denominator of the running win rate.
+    pub running_decided: i64,
 }
 
 /// The `hero_decisions.street` index (0: Preflop, 1: Flop, 2: Turn,
@@ -106,8 +129,8 @@ where
 {
     sqlx::query_scalar(
         "INSERT INTO hero_decisions
-             (session_id, hand_number, street, played_action, optimal_action, ev_loss)
-         VALUES ($1, $2, $3, $4, $5, $6)
+             (session_id, hand_number, street, played_action, optimal_action, ev_loss, ev_loss_pot)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
          RETURNING id",
     )
     .bind(session_id)
@@ -116,6 +139,7 @@ where
     .bind(&decision.played)
     .bind(&decision.optimal)
     .bind(decision.ev_loss)
+    .bind(decision.ev_loss_pot)
     .fetch_one(executor)
     .await
     .map_err(Into::into)
@@ -174,18 +198,23 @@ pub async fn record_decision(
     insert_decision(pool, session_id, decision).await
 }
 
-/// One session's recorded decisions in play order: the hand number and the
-/// EV lost (big blinds). Fed into the blunder tracker on a table resume so
-/// the intervention threshold continues exactly where it stopped.
-pub async fn load_session_losses(pool: &PgPool, session_id: i32) -> Result<Vec<(i64, f64)>> {
-    let rows: Vec<(i64, f64)> = sqlx::query_as(
-        "SELECT hand_number::bigint, ev_loss FROM hero_decisions
-         WHERE session_id = $1 ORDER BY id",
+/// The hero's last `limit` recorded decisions across every session, oldest
+/// first: session id, hand number, and the pot-normalized EV lost. Fed into
+/// the blunder tracker at the start of every table — a brand-new game
+/// inherits the hero's established calibration instead of starting cold,
+/// and a resumed table continues exactly where it stopped. The session id
+/// travels alongside the hand number because every session restarts hand
+/// numbering at 1.
+pub async fn load_recent_losses(pool: &PgPool, limit: usize) -> Result<Vec<(i32, i64, f64)>> {
+    let limit = limit as i64;
+    let rows: Vec<(i32, i64, f64)> = sqlx::query_as(
+        "SELECT session_id, hand_number::bigint, ev_loss_pot FROM hero_decisions
+         ORDER BY id DESC LIMIT $1",
     )
-    .bind(session_id)
+    .bind(limit)
     .fetch_all(pool)
     .await?;
-    Ok(rows)
+    Ok(rows.into_iter().rev().collect())
 }
 
 /// Writes a batch of decisions atomically; returns the persisted count.
@@ -275,6 +304,50 @@ pub async fn load_session(pool: &PgPool, session_id: i32, limit: usize) -> Resul
     Ok(points)
 }
 
+/// Lifetime drill aggregates, shown at the top of the drill page the same
+/// way `hh::OverallStats` tops the hand-history page.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DrillOverallStats {
+    pub drills: i64,
+    pub drills_won: i64,
+    pub hands: i64,
+    pub hands_won: i64,
+    pub avg_ev_loss: f64,
+    pub total_ev_loss: f64,
+}
+
+/// Aggregates every finished drill (session with at least one recorded
+/// decision): how many were played and won, hands played and won across all
+/// of them, and the EV-loss figures that track improvement over time.
+pub async fn overall_drill_stats(pool: &PgPool) -> Result<DrillOverallStats> {
+    let row: (i64, i64, i64, i64, f64, f64) = sqlx::query_as(
+        "SELECT
+             (SELECT count(*) FROM hero_sessions s WHERE s.session_end IS NOT NULL
+                 AND EXISTS (SELECT 1 FROM hero_decisions d WHERE d.session_id = s.id)),
+             (SELECT count(*) FROM hero_sessions s WHERE s.session_end IS NOT NULL
+                 AND s.result = 'WIN'
+                 AND EXISTS (SELECT 1 FROM hero_decisions d WHERE d.session_id = s.id)),
+             (SELECT count(*) FROM hero_hand_results r
+                 JOIN hero_sessions s ON s.id = r.session_id WHERE s.session_end IS NOT NULL),
+             COALESCE((SELECT sum(CASE WHEN r.hero_won THEN 1 ELSE 0 END) FROM hero_hand_results r
+                 JOIN hero_sessions s ON s.id = r.session_id WHERE s.session_end IS NOT NULL), 0),
+             COALESCE((SELECT avg(d.ev_loss) FROM hero_decisions d
+                 JOIN hero_sessions s ON s.id = d.session_id WHERE s.session_end IS NOT NULL), 0.0),
+             COALESCE((SELECT sum(d.ev_loss) FROM hero_decisions d
+                 JOIN hero_sessions s ON s.id = d.session_id WHERE s.session_end IS NOT NULL), 0.0)",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(DrillOverallStats {
+        drills: row.0,
+        drills_won: row.1,
+        hands: row.2,
+        hands_won: row.3,
+        avg_ev_loss: row.4,
+        total_ev_loss: row.5,
+    })
+}
+
 /// The number of finished sessions shown on the tournaments page (every
 /// session with at least one recorded decision).
 pub async fn count_finished_sessions(pool: &PgPool) -> Result<i64> {
@@ -304,8 +377,17 @@ pub async fn list_finished_sessions(
                  count(d.id),
                  COALESCE(max(d.hand_number), 0),
                  COALESCE(avg(d.ev_loss), 0.0),
+                 COALESCE(sum(d.ev_loss), 0.0),
                  s.result,
-                 s.final_stack
+                 s.final_stack,
+                 count(*) FILTER (WHERE s.result = 'WIN')
+                     OVER (ORDER BY s.session_end ASC, s.id ASC ROWS UNBOUNDED PRECEDING),
+                 count(*) FILTER (WHERE s.result IN ('WIN', 'LOSS'))
+                     OVER (ORDER BY s.session_end ASC, s.id ASC ROWS UNBOUNDED PRECEDING),
+                 COALESCE((
+                     SELECT sum(CASE WHEN r.hero_won THEN 1 ELSE 0 END)
+                     FROM hero_hand_results r WHERE r.session_id = s.id
+                 ), 0)
              FROM hero_sessions s
              JOIN hero_decisions d ON d.session_id = s.id
              WHERE s.session_end IS NOT NULL
@@ -321,16 +403,33 @@ pub async fn list_finished_sessions(
     Ok(rows
         .into_iter()
         .map(
-            |(id, started, ended, actions, hands, avg_ev_loss, result, final_stack)| {
+            |(
+                id,
+                started,
+                ended,
+                actions,
+                hands,
+                avg_ev_loss,
+                total_ev_loss,
+                result,
+                final_stack,
+                running_wins,
+                running_decided,
+                hands_won,
+            )| {
                 SessionSummary {
                     id,
                     started,
                     ended,
                     actions,
                     hands,
+                    hands_won,
                     avg_ev_loss,
+                    total_ev_loss,
                     result,
                     final_stack,
+                    running_wins,
+                    running_decided,
                 }
             },
         )
@@ -367,8 +466,12 @@ pub async fn load_tournament_detail(
                  count(d.id),
                  COALESCE(max(d.hand_number), 0),
                  COALESCE(avg(d.ev_loss), 0.0),
+                 COALESCE(sum(d.ev_loss), 0.0),
                  s.result,
-                 s.final_stack
+                 s.final_stack,
+                 0::bigint,
+                 0::bigint,
+                 0::bigint
              FROM hero_sessions s
              LEFT JOIN hero_decisions d ON d.session_id = s.id
              WHERE s.id = $1
@@ -378,7 +481,20 @@ pub async fn load_tournament_detail(
     .fetch_optional(pool)
     .await?;
 
-    let Some((id, started, ended, actions, hands, avg_ev_loss, result, final_stack)) = summary_row
+    let Some((
+        id,
+        started,
+        ended,
+        actions,
+        hands,
+        avg_ev_loss,
+        total_ev_loss,
+        result,
+        final_stack,
+        _running_wins,
+        _running_decided,
+        _hands_won,
+    )) = summary_row
     else {
         return Ok(None);
     };
@@ -408,14 +524,12 @@ pub async fn load_tournament_detail(
         0.0
     };
 
-    let ev_stats: (f64, f64) = sqlx::query_as(
-        "SELECT COALESCE(sum(ev_loss), 0.0), COALESCE(max(ev_loss), 0.0)
-         FROM hero_decisions WHERE session_id = $1",
+    let max_ev_loss: f64 = sqlx::query_scalar(
+        "SELECT COALESCE(max(ev_loss), 0.0) FROM hero_decisions WHERE session_id = $1",
     )
     .bind(session_id)
     .fetch_one(pool)
     .await?;
-    let (total_ev_loss, max_ev_loss) = ev_stats;
 
     let points = decimate(
         &load_session(pool, session_id, CHART_WINDOW).await?,
@@ -429,9 +543,13 @@ pub async fn load_tournament_detail(
             ended,
             actions,
             hands,
+            hands_won,
             avg_ev_loss,
+            total_ev_loss,
             result,
             final_stack,
+            running_wins: 0,
+            running_decided: 0,
         },
         hands: total_hands,
         hands_won,
@@ -482,6 +600,7 @@ mod tests {
             played: "Call".to_string(),
             optimal: "Fold".to_string(),
             ev_loss,
+            ev_loss_pot: ev_loss,
         }
     }
 
@@ -582,10 +701,16 @@ mod tests {
             "session points are ordinals within the session"
         );
 
+        let recent_losses = load_recent_losses(&pool, CHART_WINDOW).await.unwrap();
+        let loss_tail = &recent_losses[recent_losses.len() - 3..];
         assert_eq!(
-            load_session_losses(&pool, session_id).await.unwrap(),
-            vec![(1, 0.0), (1, 30.0), (2, 10.0)],
-            "hand losses replay in play order for blunder hydration"
+            loss_tail,
+            &[
+                (session_id, 1, 0.0),
+                (session_id, 1, 30.0),
+                (session_id, 2, 10.0)
+            ],
+            "hand losses replay in play order across every session, newest last, for blunder hydration"
         );
 
         let recent = load_recent(&pool, CHART_WINDOW).await.unwrap();
@@ -633,6 +758,65 @@ mod tests {
             Vec::<ChartPoint>::new(),
             "decisions cascade with the session"
         );
+    }
+
+    #[tokio::test]
+    async fn running_win_rate_accumulates_chronologically_across_decided_sessions() {
+        let _guard = DB_TEST_LOCK.lock().await;
+        let pool = test_pool().await;
+
+        // Real (or earlier test) sessions may already be decided, so the
+        // running counts are read relative to whatever the most recent
+        // session already shows rather than assuming an empty history.
+        let baseline = list_finished_sessions(&pool, 1, 0)
+            .await
+            .unwrap()
+            .first()
+            .map(|summary| (summary.running_wins, summary.running_decided))
+            .unwrap_or((0, 0));
+
+        let mut ids = Vec::new();
+        for result in ["WIN", "LOSS", "WIN"] {
+            let session_id = start_session(&pool).await.unwrap();
+            persist_records(&pool, session_id, &[decision(1, Street::Preflop, 1.0)])
+                .await
+                .unwrap();
+            finalize_session(&pool, session_id, result, 0)
+                .await
+                .unwrap();
+            ids.push((session_id, result));
+        }
+
+        let all = list_finished_sessions(&pool, 1_000_000, 0).await.unwrap();
+        let by_id = |id: i32| all.iter().find(|summary| summary.id == id).unwrap();
+
+        let (base_wins, base_decided) = baseline;
+        assert_eq!(
+            (
+                by_id(ids[0].0).running_wins,
+                by_id(ids[0].0).running_decided
+            ),
+            (base_wins + 1, base_decided + 1),
+            "first WIN"
+        );
+        assert_eq!(
+            (
+                by_id(ids[1].0).running_wins,
+                by_id(ids[1].0).running_decided
+            ),
+            (base_wins + 1, base_decided + 2),
+            "then a LOSS: wins stay flat, decided climbs"
+        );
+        assert_eq!(
+            (
+                by_id(ids[2].0).running_wins,
+                by_id(ids[2].0).running_decided
+            ),
+            (base_wins + 2, base_decided + 3),
+            "then a WIN: both climb"
+        );
+
+        delete_sessions(&pool, &ids.iter().map(|(id, _)| *id).collect::<Vec<_>>()).await;
     }
 
     #[tokio::test]
@@ -702,6 +886,16 @@ mod tests {
         assert!((detail.total_ev_loss - 40.0).abs() < 1e-9);
         assert!((detail.max_ev_loss - 30.0).abs() < 1e-9);
         assert_eq!(detail.points.len(), 3);
+
+        let listing = list_finished_sessions(&pool, 1_000_000, 0).await.unwrap();
+        let row = listing
+            .iter()
+            .find(|summary| summary.id == session_id)
+            .expect("the finalized session is listed");
+        assert_eq!(
+            row.hands_won, 1,
+            "the listing's hands_won matches the detail page's"
+        );
 
         delete_sessions(&pool, &[session_id]).await;
         assert_eq!(

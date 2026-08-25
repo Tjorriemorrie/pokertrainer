@@ -5,25 +5,27 @@ use crate::error::{Error, Result};
 /// Calibration parameters for the blunder-intervention engine.
 ///
 /// Interventions are calibrated so that roughly one in `target_hands` hands
-/// is interrupted: after a warm-up phase the trigger threshold is the
-/// `(1 − p)`-quantile of the hero's own rolling EV-loss history, where
-/// `p = 1 / (target_hands · A_hand)` and `A_hand` is the rolling
-/// actions-per-hand ratio. All EV losses are measured in big blinds so a
-/// river mistake in a large pot does not drown out equally bad preflop play.
+/// is interrupted: the trigger threshold is always the `(1 − p)`-quantile of
+/// the hero's own rolling EV-loss history, where `p = 1 / (target_hands ·
+/// A_hand)` and `A_hand` is the rolling actions-per-hand ratio — there is no
+/// separate warm-up regime with its own fixed cutoff; with zero history
+/// nothing can fire, and from the very first recorded action the same
+/// percentile rule applies (so a lone early data point is itself the
+/// threshold until more history accumulates). EV losses are measured as a
+/// fraction of the pot at the decision point, not big blinds, so a river
+/// mistake in a big pot does not automatically outrank an equally bad
+/// preflop mistake just because more chips were on the table.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BlunderConfig {
     /// Interventions fire on roughly one hand in this many.
     pub target_hands: u32,
-    /// Rolling window of recent hero EV losses used for percentile selection.
+    /// Rolling window of recent hero EV losses used for percentile
+    /// selection — spans every session, not just the current game, so a new
+    /// game inherits the hero's established calibration instead of starting
+    /// cold.
     pub history_actions: usize,
     /// Rolling window of recent hands used for the actions-per-hand ratio.
     pub history_hands: usize,
-    /// Minimum number of recorded actions before the percentile threshold is
-    /// trusted; until then a big-blind floor applies.
-    pub warmup_actions: usize,
-    /// The warm-up threshold in big blinds: `ev_loss >= fallback_bb`
-    /// interrupts the decision.
-    pub fallback_bb: f64,
     /// Lower/upper clamps on the trigger ratio `p`.
     pub min_trigger_ratio: f64,
     pub max_trigger_ratio: f64,
@@ -33,10 +35,8 @@ impl Default for BlunderConfig {
     fn default() -> Self {
         Self {
             target_hands: 3,
-            history_actions: 300,
+            history_actions: 1000,
             history_hands: 300,
-            warmup_actions: 24,
-            fallback_bb: 2.0,
             min_trigger_ratio: 0.01,
             max_trigger_ratio: 0.5,
         }
@@ -51,8 +51,6 @@ impl BlunderConfig {
             target_hands: 3,
             history_actions: 8,
             history_hands: 8,
-            warmup_actions: 4,
-            fallback_bb: 2.0,
             min_trigger_ratio: 0.01,
             max_trigger_ratio: 0.5,
         }
@@ -72,16 +70,6 @@ impl BlunderConfig {
         if self.history_hands < 2 {
             return Err(Error::InvalidConfig(
                 "blunder: `history_hands` must be at least 2".into(),
-            ));
-        }
-        if self.warmup_actions == 0 {
-            return Err(Error::InvalidConfig(
-                "blunder: `warmup_actions` must be at least 1".into(),
-            ));
-        }
-        if !self.fallback_bb.is_finite() || self.fallback_bb < 0.0 {
-            return Err(Error::InvalidConfig(
-                "blunder: `fallback_bb` must be finite and non-negative".into(),
             ));
         }
         if !self.min_trigger_ratio.is_finite()
@@ -131,17 +119,32 @@ impl Tracker {
         self.current_hand_actions = self.current_hand_actions.saturating_add(1);
     }
 
-    /// Replays a session's stored decisions (hand number, EV loss — in play
-    /// order) to rebuild the rolling history after a table resume, so the
-    /// intervention threshold picks up exactly where it stopped.
-    pub fn hydrate(&mut self, history: &[(i64, f64)]) {
-        let mut previous_hand: Option<i64> = None;
-        for &(hand, loss) in history {
-            if previous_hand.is_some_and(|previous| previous != hand) {
+    /// Replays the hero's stored decisions (session id, hand number, EV
+    /// loss — in play order, spanning every session) to rebuild the rolling
+    /// history so a brand-new game starts already calibrated instead of
+    /// cold, and a resumed table picks up exactly where it stopped. The
+    /// session id is part of the hand-boundary key alongside the hand
+    /// number so two different sessions that happen to share a hand number
+    /// (every session restarts numbering at 1) are never mistaken for a
+    /// continuing hand.
+    pub fn hydrate(&mut self, history: &[(i32, i64, f64)]) {
+        let mut previous: Option<(i32, i64)> = None;
+        for &(session_id, hand, loss) in history {
+            let key = (session_id, hand);
+            if previous.is_some_and(|prev| prev != key) {
                 self.end_hand();
             }
-            previous_hand = Some(hand);
+            previous = Some(key);
             self.record_action(loss);
+        }
+        // The replayed history always ends a hand as far as the window is
+        // concerned: either it is a genuinely finished past hand (the common
+        // case — a new game hydrating from prior sessions), or a resumed
+        // table's in-progress hand, whose pre-disconnect actions still
+        // belong in the ratio even though a few more may follow live before
+        // the real `end_hand` call for this hand.
+        if previous.is_some() {
+            self.end_hand();
         }
     }
 
@@ -189,21 +192,19 @@ impl Tracker {
         ratio.clamp(self.config.min_trigger_ratio, self.config.max_trigger_ratio)
     }
 
-    /// The dynamic threshold in big blinds: an infinite threshold before any
-    /// history (nothing fires), the floor during warm-up, then the
-    /// `(1 − p)`-quantile of recent losses by nearest rank.
+    /// The dynamic threshold, as a fraction of pot: infinite before any
+    /// history (nothing fires), otherwise always the `(1 − p)`-quantile of
+    /// recent losses by nearest rank — no separate regime for a thin sample,
+    /// it is simply a noisier percentile until more history accumulates.
     pub fn threshold(&self) -> f64 {
         if self.losses.is_empty() {
             return f64::INFINITY;
         }
-        if self.losses.len() < self.config.warmup_actions {
-            return self.config.fallback_bb;
-        }
         kth_largest(&self.losses, self.trigger_rank())
     }
 
-    /// Whether the given EV loss (in big blinds) interrupts the current
-    /// decision.
+    /// Whether the given EV loss (as a fraction of pot) interrupts the
+    /// current decision.
     pub fn should_intercept(&self, ev_loss: f64) -> bool {
         if ev_loss <= 0.0 {
             return false;
@@ -236,8 +237,6 @@ mod tests {
             target_hands: 3,
             history_actions: 8,
             history_hands: 4,
-            warmup_actions: 4,
-            fallback_bb: 2.0,
             min_trigger_ratio: 0.05,
             max_trigger_ratio: 0.5,
         }
@@ -254,10 +253,8 @@ mod tests {
         let config = BlunderConfig::default();
         config.validate().unwrap();
         assert_eq!(config.target_hands, 3);
-        assert_eq!(config.history_actions, 300);
+        assert_eq!(config.history_actions, 1000);
         assert_eq!(config.history_hands, 300);
-        assert_eq!(config.warmup_actions, 24);
-        assert_eq!(config.fallback_bb, 2.0);
         // Config::test() stays fast enough for the test suite.
         BlunderConfig::test().validate().unwrap();
         assert!(BlunderConfig::test().history_actions <= 16);
@@ -287,25 +284,11 @@ mod tests {
                     ..config()
                 },
             ),
-            (
-                "warmup_actions",
-                BlunderConfig {
-                    warmup_actions: 0,
-                    ..config()
-                },
-            ),
         ] {
             assert!(
                 matches!(value.validate(), Err(Error::InvalidConfig(_))),
                 "{field} should be rejected"
             );
-        }
-        for fallback_bb in [-1.0, f64::NAN, f64::INFINITY] {
-            let bad = BlunderConfig {
-                fallback_bb,
-                ..config()
-            };
-            assert!(matches!(bad.validate(), Err(Error::InvalidConfig(_))));
         }
         for clamps in [(0.0, 0.5), (0.6, 0.5), (0.1, f64::NAN)] {
             let bad = BlunderConfig {
@@ -342,31 +325,41 @@ mod tests {
         );
     }
 
-    /// Replaying stored decisions rebuilds the same tracker as recording
-    /// them live — the key to an uninterrupted intervention threshold after
-    /// a table resume.
+    /// Replaying stored decisions rebuilds the rolling history across a
+    /// session boundary correctly: hand numbers restart at 1 in every new
+    /// session, so the boundary key must include the session id or a new
+    /// game's hand 1 would be read as a continuation of a past game's hand.
+    /// The trailing hand is always closed out (unlike plain live recording,
+    /// which leaves the in-progress hand open) since hydrated history is, by
+    /// construction, decisions that already happened.
     #[test]
-    fn hydration_matches_live_recording() {
-        let history = [(1, 0.5), (1, 3.0), (2, 1.0), (2, 0.0), (2, 12.0)];
-
-        let mut live = Tracker::new(config());
-        let mut previous_hand: Option<i64> = None;
-        for &(hand, loss) in &history {
-            if previous_hand.is_some_and(|previous| previous != hand) {
-                live.end_hand();
-            }
-            previous_hand = Some(hand);
-            live.record_action(loss);
-        }
+    fn hydration_rebuilds_the_rolling_history_across_session_boundaries() {
+        let history = [
+            (1, 1, 0.5),
+            (1, 1, 3.0),
+            (1, 2, 1.0),
+            (2, 1, 0.0),
+            (2, 1, 12.0),
+        ];
 
         let mut hydrated = Tracker::new(config());
         hydrated.hydrate(&history);
 
-        assert_eq!(hydrated.losses, live.losses);
-        assert_eq!(hydrated.hand_actions, live.hand_actions);
-        assert_eq!(hydrated.current_hand_actions, live.current_hand_actions);
-        assert_eq!(hydrated.actions_per_hand(), live.actions_per_hand());
-        assert_eq!(hydrated.threshold(), live.threshold());
+        assert_eq!(
+            hydrated.losses.iter().copied().collect::<Vec<_>>(),
+            vec![0.5, 3.0, 1.0, 0.0, 12.0]
+        );
+        assert_eq!(
+            hydrated.hand_actions.iter().copied().collect::<Vec<_>>(),
+            vec![2, 1, 2],
+            "session 1 hand 1 (2 actions), session 1 hand 2 (1 action), then \
+             session 2 hand 1 (2 actions) — three separate hands even though \
+             the hand number resets to 1 in the second session"
+        );
+        assert_eq!(
+            hydrated.current_hand_actions, 0,
+            "the trailing hand is closed out once hydration finishes replaying"
+        );
     }
 
     #[test]
@@ -399,38 +392,21 @@ mod tests {
     }
 
     #[test]
-    fn empty_history_never_intercepts_but_warmup_floor_applies_after_one_action() {
+    fn empty_history_never_intercepts_then_a_single_loss_is_its_own_threshold() {
         let empty = Tracker::new(config());
         assert!(
             !empty.should_intercept(1000.0),
-            "nothing fires before any history"
+            "nothing fires before any history — there is no fixed fallback"
         );
         assert_eq!(empty.threshold(), f64::INFINITY);
 
+        // With exactly one recorded loss, the nearest-rank percentile has
+        // nowhere else to land: that lone point is the threshold.
         let mut tracker = Tracker::new(config());
-        tracker.record_action(50.0);
-        assert_eq!(
-            tracker.threshold(),
-            config().fallback_bb,
-            "warm-up floor in big blinds"
-        );
-        assert!(!tracker.should_intercept(1.9));
-        assert!(tracker.should_intercept(2.0));
-    }
-
-    #[test]
-    fn warmup_uses_the_big_blind_floor() {
-        let mut tracker = Tracker::new(config());
-        record_many(&mut tracker, &[1.0, 1.0, 1.0]);
-        assert_eq!(tracker.recorded_actions(), 3);
-        assert!(tracker.recorded_actions() < tracker.config.warmup_actions);
-        assert_eq!(
-            tracker.threshold(),
-            config().fallback_bb,
-            "2BB floor while warming up"
-        );
-        assert!(!tracker.should_intercept(1.9));
-        assert!(tracker.should_intercept(2.0));
+        tracker.record_action(0.35);
+        assert_eq!(tracker.threshold(), 0.35);
+        assert!(!tracker.should_intercept(0.34));
+        assert!(tracker.should_intercept(0.35));
     }
 
     #[test]
@@ -445,7 +421,7 @@ mod tests {
     }
 
     #[test]
-    fn warmup_exit_uses_nearest_rank_percentile() {
+    fn threshold_uses_nearest_rank_percentile() {
         let mut tracker = Tracker::new(config());
         // 4 actions => 1 per hand => ratio 1/3, clamped up to 0.05;
         // k = ceil(0.05 * 4) = 1 -> the single worst loss (40.0).
@@ -521,15 +497,7 @@ mod tests {
         use rand::SeedableRng;
         use rand_chacha::ChaCha8Rng;
 
-        let config = BlunderConfig {
-            target_hands: 3,
-            history_actions: 300,
-            history_hands: 300,
-            warmup_actions: 24,
-            fallback_bb: 2.0,
-            min_trigger_ratio: 0.01,
-            max_trigger_ratio: 0.5,
-        };
+        let config = BlunderConfig::default();
         let mut tracker = Tracker::new(config);
         let mut rng = ChaCha8Rng::seed_from_u64(2026);
 

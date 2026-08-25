@@ -503,20 +503,20 @@ mod tests {
         );
         assert_eq!(
             ServerMessage::SessionFinished {
-                url: "/tournaments".into()
+                url: "/drill".into()
             }
             .to_json()
             .unwrap(),
-            r#"{"type":"SESSION_FINISHED","url":"/tournaments"}"#
+            r#"{"type":"SESSION_FINISHED","url":"/drill"}"#
         );
         assert_eq!(
             ServerMessage::TournamentFinished {
                 won: true,
-                url: "/tournaments/7".into()
+                url: "/drill/7".into()
             }
             .to_json()
             .unwrap(),
-            r#"{"type":"TOURNAMENT_FINISHED","won":true,"url":"/tournaments/7"}"#
+            r#"{"type":"TOURNAMENT_FINISHED","won":true,"url":"/drill/7"}"#
         );
         assert_eq!(
             ServerMessage::Error {

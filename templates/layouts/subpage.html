@@ -1,6 +1,7 @@
 {#
-The shape the six sub-pages share: a page-title header with a per-page nav, and a
-plain `pt-main`. Children override `heading`, `nav` and `content`.
+The shape the six sub-pages share: a page-title header, and a plain `pt-main`.
+Children override `heading` and `content` (and one of the base navbar's
+`nav_*` blocks to mark themselves active — see base.html).
 
 The dashboard and the play table do NOT use this layout — their headers share
 nothing with these pages (brand div, ev-chart canvas, skill chip, ws-status,
@@ -9,7 +10,7 @@ sound toggle, finish button), so they extend base.html directly.
 {% block body %}
 <header class="pt-topwrap">
   <h1 class="pt-page-title">{% block heading %}{% endblock %}</h1>
-{%- block nav %}{% endblock %}
+  {% block heading_action %}{% endblock %}
 </header>
 <main class="pt-main">
 {%- block content %}{% endblock %}</main>

@@ -732,6 +732,10 @@ pub struct ImportOutcome {
     pub failures: Vec<String>,
     /// Aggregates restricted to the newly imported hands.
     pub new_stats: NewHandStats,
+    /// Ids of every tournament that received at least one new hand this run,
+    /// sorted for a stable order — used to highlight them on the hand
+    /// history page after a scan.
+    pub affected_tournaments: Vec<String>,
 }
 
 /// Statistics over a set of hands (the newly imported ones on the results
@@ -1008,6 +1012,13 @@ pub async fn import_scan(pool: &PgPool, run: &ScanRun) -> Result<ImportOutcome> 
 
     let hands_new = new_hand_ids.len();
     let new_stats = aggregate_hands(&hands, Some(&new_hand_ids));
+    let affected_tournaments: Vec<String> = hands
+        .iter()
+        .filter(|hand| new_hand_ids.contains(&hand.hand_id))
+        .map(|hand| hand.tournament_id.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
 
     Ok(ImportOutcome {
         zips: run.zips,
@@ -1019,6 +1030,7 @@ pub async fn import_scan(pool: &PgPool, run: &ScanRun) -> Result<ImportOutcome> 
         tournaments_new,
         failures: run.failures.clone(),
         new_stats,
+        affected_tournaments,
     })
 }
 
@@ -1588,7 +1600,8 @@ You finished in 1st place.";
                 "7s".to_string()
             ])
         );
-        let verbs: Vec<(u8, EpisodeVerb, Option<i32>, Option<i32>, bool)> = episode
+        type ActionVerb = (u8, EpisodeVerb, Option<i32>, Option<i32>, bool);
+        let verbs: Vec<ActionVerb> = episode
             .actions
             .iter()
             .map(|action| {
@@ -2115,12 +2128,17 @@ Seat 3: 14c11a2a collected";
         assert!((outcome.new_stats.win_ratio - 50.0).abs() < 1e-9);
         assert_eq!(outcome.new_stats.net_chips, 100);
         assert_eq!(outcome.new_stats.tournaments, 1);
+        assert_eq!(outcome.affected_tournaments, vec![tournament_id.clone()]);
 
         let again = import_scan(&pool, &run).await.unwrap();
         assert_eq!(again.hands_new, 0);
         assert_eq!(again.hands_skipped, 2);
         assert_eq!(again.tournaments_new, 0);
         assert_eq!(again.new_stats.hands, 0);
+        assert!(
+            again.affected_tournaments.is_empty(),
+            "a re-scan with nothing new affects no tournaments"
+        );
 
         let stats = overall_stats(&pool).await.unwrap();
         assert_eq!(

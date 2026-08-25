@@ -1,17 +1,15 @@
 {#
 The dashboard landing page: either the resume card for the one active tournament
-or a fresh "Start tournament" button. A new tournament can only start once the
+or a fresh "Drill" button — both start/resume the same way the drill page's own
+action button does, landing on /play. A new tournament can only start once the
 previous one is finished (won, lost, or given up via "Finish table").
 #}{% extends "base.html" %}
 
 {% block title %}Poker Trainer{% endblock %}
 
+{% block nav_dashboard %} is-active{% endblock %}
+
 {% block body %}
-<header class="pt-topwrap">
-  <div class="pt-brand">Poker Trainer</div>
-  <a href="/tournaments" class="pt-link">Tournament history</a>
-  <a href="/history" class="pt-link">Hand history</a>
-</header>
 <main class="pt-main pt-dashboard">
 {%- if let Some(summary) = active %}
 <section class="pt-dash-card">
@@ -26,7 +24,7 @@ previous one is finished (won, lost, or given up via "Finish table").
     <div class="pt-stat-card"><span>Actions played</span><b>{{ summary.actions }}</b></div>
   </div>
   <p class="pt-dash-note">Resume continues the exact hand — street, bets, board, and stacks are all restored.</p>
-  <a class="action-btn pt-confirm pt-dash-action" href="/play">Resume tournament</a>
+  <a class="action-btn pt-secondary pt-dash-action" href="/play">Resume drill</a>
   <p class="pt-dash-note">A new tournament becomes available once this one ends — win it, lose it, or
   finish the table (which counts as giving up).</p>
 </section>
@@ -34,7 +32,7 @@ previous one is finished (won, lost, or given up via "Finish table").
 <section class="pt-dash-card">
   <h1 class="pt-dash-title">Spin &amp; Gold — 3-Max</h1>
   <p class="pt-dash-meta">One table at a time: play it to the end or finish the table to give up.</p>
-  <a class="action-btn pt-confirm pt-dash-action" href="/play">Start tournament</a>
+  <a class="action-btn pt-secondary pt-dash-action" href="/play">Drill</a>
 </section>
 {%- endif -%}
 </main>
