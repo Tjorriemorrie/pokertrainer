@@ -1,0 +1,11 @@
+{#
+Every client script tag, so each cache-buster version lives in exactly one
+place. Macros must stay on one line: a macro body's surrounding whitespace
+becomes output at every call site.
+
+Remember `{% import "partials/scripts.html" as scripts %}` in each template that
+calls these — imports are NOT inherited through `{% extends %}`.
+#}
+{% macro app_js() %}<script src="/assets/app.js?v=7"></script>{% endmacro %}
+{% macro chart_js() %}<script src="/assets/chart.js?v=1" defer></script>{% endmacro %}
+{% macro analysis_js() %}<script src="/assets/analysis.js?v=1" defer></script>{% endmacro %}

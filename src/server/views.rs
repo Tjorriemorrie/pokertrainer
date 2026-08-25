@@ -33,75 +33,6 @@ pub fn analysis_page() -> Result<String> {
     Ok(AnalysisTemplate.render()?)
 }
 
-#[cfg(test)]
-fn legacy_dashboard_page(active: Option<&ActiveSummary>) -> String {
-    let mut html = String::from(
-        r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Poker Trainer</title>
-<link rel="stylesheet" href="/assets/style.css?v=13">
-</head>
-<body class="pt-body">
-<header class="pt-topwrap">
-  <div class="pt-brand">Poker Trainer</div>
-  <a href="/tournaments" class="pt-link">Tournament history</a>
-  <a href="/history" class="pt-link">Hand history</a>
-</header>
-<main class="pt-main pt-dashboard">
-"#,
-    );
-
-    match active {
-        Some(summary) => {
-            html.push_str(&format!(
-                r##"<section class="pt-dash-card">
-  <h1 class="pt-dash-title">Tournament in progress</h1>
-  <p class="pt-dash-meta">Started {}</p>
-  <div class="pt-stat-grid">
-    <div class="pt-stat-card"><span>Hand</span><b>#{}</b></div>
-    <div class="pt-stat-card"><span>Street</span><b>{}</b></div>
-    <div class="pt-stat-card"><span>Blinds</span><b>{}/{}</b></div>
-    <div class="pt-stat-card"><span>Your stack</span><b>{}</b></div>
-    <div class="pt-stat-card"><span>Opponents left</span><b>{}</b></div>
-    <div class="pt-stat-card"><span>Actions played</span><b>{}</b></div>
-  </div>
-  <p class="pt-dash-note">Resume continues the exact hand — street, bets, board, and stacks are all restored.</p>
-  <a class="action-btn pt-confirm pt-dash-action" href="/play">Resume tournament</a>
-  <p class="pt-dash-note">A new tournament becomes available once this one ends — win it, lose it, or
-  finish the table (which counts as giving up).</p>
-</section>"##,
-                escape(&summary.started),
-                summary.hand_no,
-                escape(&summary.street.to_string()),
-                summary.blind_small,
-                summary.blind_big,
-                summary.hero_stack,
-                summary.active_opponents,
-                summary.actions,
-            ));
-        }
-        None => {
-            html.push_str(
-                r#"<section class="pt-dash-card">
-  <h1 class="pt-dash-title">Spin &amp; Gold — 3-Max</h1>
-  <p class="pt-dash-meta">One table at a time: play it to the end or finish the table to give up.</p>
-  <a class="action-btn pt-confirm pt-dash-action" href="/play">Start tournament</a>
-</section>"#,
-            );
-        }
-    }
-    html.push_str(
-        r#"</main>
-</body>
-</html>
-"#,
-    );
-    html
-}
-
 /// The full table shell page: GGPoker-dark skin, top-bar lifetime EV chart (with
 /// the hero-vs-field skill chip beside it), the table controls (finish,
 /// tournament history, sound toggle), the table column docked top-left, and the
@@ -184,221 +115,132 @@ fn format_skill(skill: Option<f64>) -> String {
         .unwrap_or_else(|| "—".to_string())
 }
 
+/// One card of the tournaments listing. Floats and the chart dataset are
+/// pre-formatted here so `std::fmt` (not the template) decides the rounding.
+struct TournamentCard {
+    id: i32,
+    /// Suffix appended to `pt-result-badge`, e.g. `" win"`. Empty with
+    /// `badge_label` means the session finished without a decided outcome and
+    /// the listing shows no badge at all.
+    badge_class: &'static str,
+    badge_label: &'static str,
+    started: String,
+    ended: String,
+    hands: i32,
+    actions: i64,
+    avg_ev_loss: String,
+    dataset: String,
+}
+
+impl TournamentCard {
+    fn new(summary: &SessionSummary, points: &[ChartPoint]) -> Self {
+        let (badge_class, badge_label) = match summary.result.as_deref() {
+            Some("WIN") => (" win", "WIN"),
+            Some("LOSS") => (" loss", "LOSS"),
+            _ => ("", ""),
+        };
+        Self {
+            id: summary.id,
+            badge_class,
+            badge_label,
+            started: summary.started.clone(),
+            ended: summary.ended.clone(),
+            hands: summary.hands,
+            actions: summary.actions,
+            avg_ev_loss: format!("{:.2}", summary.avg_ev_loss),
+            dataset: serde_json::to_string(points).unwrap_or_else(|_| "[]".to_string()),
+        }
+    }
+}
+
 /// The finished-tournament history page: a paginated listing (newest first)
 /// of one server-rendered card per finished session whose decimated EV
 /// dataset is drawn client-side with the same canvas style as the live
 /// top-bar chart. `page`/`pages` drive the Newer/Older navigation.
+#[derive(Template)]
+#[template(path = "pages/tournaments.html")]
+struct TournamentsTemplate {
+    cards: Vec<TournamentCard>,
+    page: u32,
+    pages: u32,
+}
+
 pub fn tournaments_page(
     sessions: &[(SessionSummary, Vec<ChartPoint>)],
     page: u32,
     pages: u32,
-) -> String {
-    let mut html = String::from(
-        r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Poker Trainer — Tournaments</title>
-<link rel="stylesheet" href="/assets/style.css?v=13">
-</head>
-<body class="pt-body">
-<header class="pt-topwrap">
-  <h1 class="pt-page-title">Tournaments</h1>
-  <a href="/" class="pt-link">Dashboard</a>
-</header>
-<main class="pt-main">
-"#,
-    );
-
-    html.push_str(&pagination_nav(page, pages));
-
-    if sessions.is_empty() {
-        html.push_str(
-            r#"<div class="pt-empty">No finished tournaments yet — play a table and finish it (or just close the tab) to see its EV history here.</div>"#,
-        );
-    } else {
-        for (summary, points) in sessions {
-            let dataset = serde_json::to_string(points).unwrap_or_else(|_| "[]".to_string());
-            let result_badge = match summary.result.as_deref() {
-                Some("WIN") => r#"<span class="pt-result-badge win">WIN</span>"#,
-                Some("LOSS") => r#"<span class="pt-result-badge loss">LOSS</span>"#,
-                _ => "",
-            };
-            html.push_str(&format!(
-                r#"<section class="pt-tournament" data-tournament-id="{}">
-  <div class="pt-tournament-head">
-    <a class="pt-tournament-title" href="/tournaments/{}">Tournament #{}</a>
-    {result_badge}
-    <span class="pt-tournament-meta">{} → {}</span>
-    <span class="pt-tournament-meta">{} hands · {} actions · avg EV loss {:.2} BB</span>
-  </div>
-  <canvas class="ev-chart" width="1200" height="48" data-points='{}'></canvas>
-</section>"#,
-                summary.id,
-                summary.id,
-                summary.id,
-                escape(&summary.started),
-                escape(&summary.ended),
-                summary.hands,
-                summary.actions,
-                summary.avg_ev_loss,
-                dataset
-            ));
-        }
-        html.push_str(
-            r##"<script>
-(() => {
-  "use strict";
-  document.querySelectorAll("canvas[data-points]").forEach((canvas) => {
-    const ctx = canvas.getContext("2d");
-    const values = JSON.parse(canvas.dataset.points || "[]").map((point) => point[1]);
-    if (values.length < 2) return;
-    const max = Math.max(1, ...values);
-    const step = canvas.width / (values.length - 1);
-    ctx.beginPath();
-    values.forEach((value, i) => {
-      const x = i * step;
-      const y = canvas.height - (value / max) * (canvas.height - 6) - 3;
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    });
-    ctx.strokeStyle = "#f59e0b";
-    ctx.lineWidth = 2;
-    ctx.stroke();
-  });
-})();
-</script>"##,
-        );
+) -> Result<String> {
+    Ok(TournamentsTemplate {
+        cards: sessions
+            .iter()
+            .map(|(summary, points)| TournamentCard::new(summary, points))
+            .collect(),
+        page,
+        pages,
     }
-
-    html.push_str("</main>\n</body>\n</html>\n");
-    html
-}
-
-/// The Newer/Older pagination bar of the tournaments page: links navigate
-/// between pages while the current page's position is spelled out. Disabled
-/// edges render as inert spans.
-fn pagination_nav(page: u32, pages: u32) -> String {
-    let newer = if page > 1 {
-        format!(
-            r#"<a class="pt-pagination-link" href="/tournaments?page={}">← Newer</a>"#,
-            page - 1
-        )
-    } else {
-        r#"<span class="pt-pagination-link is-disabled">← Newer</span>"#.to_string()
-    };
-    let older = if page < pages {
-        format!(
-            r#"<a class="pt-pagination-link" href="/tournaments?page={}">Older →</a>"#,
-            page + 1
-        )
-    } else {
-        r#"<span class="pt-pagination-link is-disabled">Older →</span>"#.to_string()
-    };
-    format!(
-        r#"<nav class="pt-pagination">{newer}<span class="pt-pagination-page">Page {page} of {pages}</span>{older}</nav>"#
-    )
+    .render()?)
 }
 
 /// The single-tournament detail page: the outcome, hand-level aggregates
 /// (hands, wins, losses, all-in frequency), EV stats, and the decimated
 /// action-EV chart.
-pub fn tournament_detail_page(detail: &TournamentDetail) -> String {
+#[derive(Template)]
+#[template(path = "pages/tournament_detail.html")]
+struct TournamentDetailTemplate {
+    id: i32,
+    /// Unlike the listing, this page always shows a badge — an em dash stands
+    /// in for a session that ended without a decided outcome.
+    badge_class: &'static str,
+    badge_label: &'static str,
+    started: String,
+    ended: String,
+    final_stack: String,
+    hands: i64,
+    hands_won: i64,
+    hands_lost: i64,
+    win_rate: String,
+    all_ins: i64,
+    all_in_pct: String,
+    avg_ev_loss: String,
+    total_ev_loss: String,
+    max_ev_loss: String,
+    dataset: String,
+}
+
+pub fn tournament_detail_page(detail: &TournamentDetail) -> Result<String> {
     let summary = &detail.summary;
-    let dataset = serde_json::to_string(&detail.points).unwrap_or_else(|_| "[]".to_string());
     let win_rate = if detail.hands > 0 {
         detail.hands_won as f64 * 100.0 / detail.hands as f64
     } else {
         0.0
     };
-
-    let result_badge = match summary.result.as_deref() {
-        Some("WIN") => r#"<span class="pt-result-badge win">WIN</span>"#,
-        Some("LOSS") => r#"<span class="pt-result-badge loss">LOSS</span>"#,
-        _ => r#"<span class="pt-result-badge">—</span>"#,
+    let (badge_class, badge_label) = match summary.result.as_deref() {
+        Some("WIN") => (" win", "WIN"),
+        Some("LOSS") => (" loss", "LOSS"),
+        _ => ("", "—"),
     };
-    let final_stack = summary
-        .final_stack
-        .map(|stack| format!("{stack} chips"))
-        .unwrap_or_else(|| "—".to_string());
-
-    format!(
-        r##"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Poker Trainer — Tournament #{}</title>
-<link rel="stylesheet" href="/assets/style.css?v=13">
-</head>
-<body class="pt-body">
-<header class="pt-topwrap">
-  <h1 class="pt-page-title">Tournament #{}</h1>
-  <a href="/tournaments" class="pt-link">All tournaments</a>
-  <a href="/" class="pt-link">Dashboard</a>
-</header>
-<main class="pt-main">
-  <section class="pt-detail">
-    <div class="pt-detail-head">
-      {result_badge}
-      <span class="pt-detail-meta">{} → {}</span>
-      <span class="pt-detail-meta">Final stack: {}</span>
-    </div>
-    <div class="pt-stat-grid">
-      <div class="pt-stat-card"><span>Hands</span><b>{}</b></div>
-      <div class="pt-stat-card"><span>Hands won</span><b>{}</b></div>
-      <div class="pt-stat-card"><span>Hands lost</span><b>{}</b></div>
-      <div class="pt-stat-card"><span>Win rate</span><b>{:.0}%</b></div>
-      <div class="pt-stat-card"><span>All-ins</span><b>{}</b></div>
-      <div class="pt-stat-card"><span>All-in %</span><b>{:.0}%</b></div>
-      <div class="pt-stat-card"><span>Avg EV loss</span><b>{:.2} BB</b></div>
-      <div class="pt-stat-card"><span>Total EV lost</span><b>{:.2} BB</b></div>
-      <div class="pt-stat-card"><span>Biggest blunder</span><b>{:.2} BB</b></div>
-    </div>
-    <canvas class="ev-chart" width="1200" height="48" data-points='{}'></canvas>
-  </section>
-</main>
-<script>
-(() => {{
-  "use strict";
-  document.querySelectorAll("canvas[data-points]").forEach((canvas) => {{
-    const ctx = canvas.getContext("2d");
-    const values = JSON.parse(canvas.dataset.points || "[]").map((point) => point[1]);
-    if (values.length < 2) return;
-    const max = Math.max(1, ...values);
-    const step = canvas.width / (values.length - 1);
-    ctx.beginPath();
-    values.forEach((value, i) => {{
-      const x = i * step;
-      const y = canvas.height - (value / max) * (canvas.height - 6) - 3;
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    }});
-    ctx.strokeStyle = "#f59e0b";
-    ctx.lineWidth = 2;
-    ctx.stroke();
-  }});
-}})();
-</script>
-</body>
-</html>"##,
-        summary.id,
-        summary.id,
-        escape(&summary.started),
-        escape(&summary.ended),
-        escape(&final_stack),
-        detail.hands,
-        detail.hands_won,
-        detail.hands_lost,
-        win_rate,
-        detail.all_ins,
-        detail.all_in_pct,
-        summary.avg_ev_loss,
-        detail.total_ev_loss,
-        detail.max_ev_loss,
-        dataset
-    )
+    Ok(TournamentDetailTemplate {
+        id: summary.id,
+        badge_class,
+        badge_label,
+        started: summary.started.clone(),
+        ended: summary.ended.clone(),
+        final_stack: summary
+            .final_stack
+            .map(|stack| format!("{stack} chips"))
+            .unwrap_or_else(|| "—".to_string()),
+        hands: detail.hands,
+        hands_won: detail.hands_won,
+        hands_lost: detail.hands_lost,
+        win_rate: format!("{win_rate:.0}"),
+        all_ins: detail.all_ins,
+        all_in_pct: format!("{:.0}", detail.all_in_pct),
+        avg_ev_loss: format!("{:.2}", summary.avg_ev_loss),
+        total_ev_loss: format!("{:.2}", detail.total_ev_loss),
+        max_ev_loss: format!("{:.2}", detail.max_ev_loss),
+        dataset: serde_json::to_string(&detail.points).unwrap_or_else(|_| "[]".to_string()),
+    }
+    .render()?)
 }
 
 /// The GGPoker hand-history page: the scan trigger, the opponent-skill
@@ -669,52 +511,6 @@ pub fn history_scan_result_page(outcome: &crate::hh::ImportOutcome) -> String {
         net = card("Chips won/lost", &signed(stats.net_chips)),
         touched = card("Tournaments", &stats.tournaments.to_string()),
     )
-}
-
-#[cfg(test)]
-fn legacy_analysis_page() -> String {
-    r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Poker Trainer — Opponent analysis</title>
-<link rel="stylesheet" href="/assets/style.css?v=13">
-</head>
-<body class="pt-body">
-<header class="pt-topwrap">
-  <h1 class="pt-page-title">Opponent analysis</h1>
-  <a href="/history" class="pt-link">Hand history</a>
-  <a href="/" class="pt-link">Dashboard</a>
-</header>
-<main class="pt-main">
-<section class="pt-detail">
-  <div class="pt-detail-head"><h2 class="pt-hh-title">Field skill</h2></div>
-  <p class="pt-detail-meta">Every opponent decision in your last 1,000 imported hands is replayed and
-  graded against the solver; the pooled average big-blind loss becomes the field skill. Save it as
-  the template the two local bots play with, and compare it against your own lifetime skill in the
-  table header.</p>
-  <div id="analysis-status"><div class="pt-empty">Loading…</div></div>
-</section>
-</main>
-<script>
-(function () {
-  var box = document.getElementById('analysis-status');
-  function poll() {
-    fetch('/history/analyze-status')
-      .then(function (r) { return r.json(); })
-      .then(function (status) {
-        box.innerHTML = status.html;
-        if (status.state === 'running') { setTimeout(poll, 1500); }
-      })
-      .catch(function () { box.innerHTML = '<div class="pt-empty">Status unavailable.</div>'; });
-  }
-  poll();
-})();
-</script>
-</body>
-</html>"#
-        .to_string()
 }
 
 /// The status fragment swapped into the analysis page: idle nudge, live
@@ -1760,37 +1556,6 @@ mod tests {
         })
     }
 
-    /// Askama strips one trailing newline from a template file, and the eight
-    /// hand-built pages were themselves inconsistent about it (the dashboard
-    /// ended `</html>\n`, the play and history pages ended `</html>`). No
-    /// assertion can observe it, so the migration guards compare modulo the
-    /// final newline and hold every other byte exactly.
-    fn same_html(rendered: &str, legacy: &str) {
-        assert_eq!(
-            rendered.trim_end_matches('\n'),
-            legacy.trim_end_matches('\n')
-        );
-    }
-
-    /// Temporary migration guard: proves the Askama template renders the exact
-    /// same bytes the hand-built `format!` version did, on both branches.
-    /// Deleted together with `legacy_dashboard_page` once the page is settled.
-    #[test]
-    fn dashboard_template_matches_legacy() {
-        let summary = active_summary(true).unwrap();
-        same_html(
-            &dashboard_page(Some(&summary)).unwrap(),
-            &legacy_dashboard_page(Some(&summary)),
-        );
-        same_html(&dashboard_page(None).unwrap(), &legacy_dashboard_page(None));
-    }
-
-    /// Temporary migration guard; see [`dashboard_template_matches_legacy`].
-    #[test]
-    fn analysis_template_matches_legacy() {
-        same_html(&analysis_page().unwrap(), &legacy_analysis_page());
-    }
-
     #[test]
     fn dashboard_without_an_active_tournament_offers_a_start() {
         let page = dashboard_page(None).unwrap();
@@ -1867,7 +1632,7 @@ mod tests {
     #[test]
     fn tournaments_page_has_an_empty_state() {
         let empty: Vec<(SessionSummary, Vec<ChartPoint>)> = Vec::new();
-        let page = tournaments_page(&empty, 1, 1);
+        let page = tournaments_page(&empty, 1, 1).unwrap();
         assert!(page.contains("<title>Poker Trainer — Tournaments</title>"));
         assert!(page.contains("No finished tournaments yet"));
         assert!(
@@ -1902,7 +1667,7 @@ mod tests {
                 vec![(1, 4.5), (2, 0.0)],
             ),
         ];
-        let page = tournaments_page(&sessions, 1, 1);
+        let page = tournaments_page(&sessions, 1, 1).unwrap();
         assert!(page.contains(r#"data-tournament-id="7""#));
         assert!(page.contains("Tournament #7"));
         assert!(
@@ -1917,7 +1682,7 @@ mod tests {
             "decimated datasets are embedded for the client chart"
         );
         assert!(page.contains(r#"data-points='[[1,4.5],[2,0.0]]'"#));
-        assert!(page.contains("canvas[data-points]"));
+        assert!(page.contains(r#"src="/assets/chart.js"#));
     }
 
     #[test]
@@ -1926,16 +1691,16 @@ mod tests {
             summary(1, r#"<script>"evil"</script>"#, "end", 1, 1, 0.0),
             vec![(1, 0.0)],
         )];
-        let page = tournaments_page(&sessions, 1, 1);
+        let page = tournaments_page(&sessions, 1, 1).unwrap();
         assert!(!page.contains(r#"<script>"evil""#));
-        assert!(page.contains("&lt;script&gt;"));
+        assert!(page.contains("&#60;script&#62;"));
     }
 
     #[test]
     fn tournaments_page_renders_pagination_controls() {
         let empty: Vec<(SessionSummary, Vec<ChartPoint>)> = Vec::new();
 
-        let first = tournaments_page(&empty, 1, 1);
+        let first = tournaments_page(&empty, 1, 1).unwrap();
         assert!(first.contains(r#"class="pt-pagination""#));
         assert!(first.contains("Page 1 of 1"));
         assert!(
@@ -1947,7 +1712,7 @@ mod tests {
             "a single page has no older page: {first}"
         );
 
-        let middle = tournaments_page(&empty, 2, 3);
+        let middle = tournaments_page(&empty, 2, 3).unwrap();
         assert!(middle.contains("Page 2 of 3"));
         assert!(
             middle.contains(r#"href="/tournaments?page=1"#),
@@ -1958,7 +1723,7 @@ mod tests {
             "the older link points at the next page: {middle}"
         );
 
-        let last = tournaments_page(&empty, 3, 3);
+        let last = tournaments_page(&empty, 3, 3).unwrap();
         assert!(last.contains(r#"href="/tournaments?page=2"#));
         assert!(
             last.contains(r#"<span class="pt-pagination-link is-disabled">Older →</span>"#),
@@ -1991,7 +1756,7 @@ mod tests {
 
     #[test]
     fn tournament_detail_page_renders_the_stat_grid() {
-        let page = tournament_detail_page(&detail(7, Some("WIN"), Some(1500)));
+        let page = tournament_detail_page(&detail(7, Some("WIN"), Some(1500))).unwrap();
         assert!(page.contains("<title>Poker Trainer — Tournament #7</title>"));
         assert!(page.contains(r#"class="pt-result-badge win">WIN</span>"#));
         assert!(page.contains("Final stack: 1500 chips"));
@@ -2009,10 +1774,10 @@ mod tests {
 
     #[test]
     fn tournament_detail_page_marks_losses_and_missing_results() {
-        let loss = tournament_detail_page(&detail(9, Some("LOSS"), Some(0)));
+        let loss = tournament_detail_page(&detail(9, Some("LOSS"), Some(0))).unwrap();
         assert!(loss.contains(r#"class="pt-result-badge loss">LOSS</span>"#));
 
-        let unknown = tournament_detail_page(&detail(9, None, None));
+        let unknown = tournament_detail_page(&detail(9, None, None)).unwrap();
         assert!(unknown.contains(r#"class="pt-result-badge">—</span>"#));
         assert!(unknown.contains("Final stack: —"));
     }
@@ -3132,7 +2897,7 @@ mod tests {
     fn analysis_page_shell_polls_the_status_endpoint() {
         let page = analysis_page().unwrap();
         assert!(page.contains("<title>Poker Trainer — Opponent analysis</title>"));
-        assert!(page.contains("/history/analyze-status"));
+        assert!(page.contains(r#"src="/assets/analysis.js"#));
         assert!(page.contains("id=\"analysis-status\""), "{page}");
     }
 

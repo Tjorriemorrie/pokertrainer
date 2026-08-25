@@ -1,0 +1,40 @@
+{#
+The single-tournament detail page: the outcome, hand-level aggregates, EV stats,
+and the decimated EV chart drawn client-side.
+#}{% extends "layouts/subpage.html" %}
+{% import "partials/scripts.html" as scripts %}
+
+{% block title %}Poker Trainer — Tournament #{{ id }}{% endblock %}
+
+{% block heading %}Tournament #{{ id }}{% endblock %}
+
+{% block nav %}
+  <a href="/tournaments" class="pt-link">All tournaments</a>
+  <a href="/" class="pt-link">Dashboard</a>
+{%- endblock %}
+
+{% block content %}
+  <section class="pt-detail">
+    <div class="pt-detail-head">
+      <span class="pt-result-badge{{ badge_class }}">{{ badge_label }}</span>
+      <span class="pt-detail-meta">{{ started }} → {{ ended }}</span>
+      <span class="pt-detail-meta">Final stack: {{ final_stack }}</span>
+    </div>
+    <div class="pt-stat-grid">
+      <div class="pt-stat-card"><span>Hands</span><b>{{ hands }}</b></div>
+      <div class="pt-stat-card"><span>Hands won</span><b>{{ hands_won }}</b></div>
+      <div class="pt-stat-card"><span>Hands lost</span><b>{{ hands_lost }}</b></div>
+      <div class="pt-stat-card"><span>Win rate</span><b>{{ win_rate }}%</b></div>
+      <div class="pt-stat-card"><span>All-ins</span><b>{{ all_ins }}</b></div>
+      <div class="pt-stat-card"><span>All-in %</span><b>{{ all_in_pct }}%</b></div>
+      <div class="pt-stat-card"><span>Avg EV loss</span><b>{{ avg_ev_loss }} BB</b></div>
+      <div class="pt-stat-card"><span>Total EV lost</span><b>{{ total_ev_loss }} BB</b></div>
+      <div class="pt-stat-card"><span>Biggest blunder</span><b>{{ max_ev_loss }} BB</b></div>
+    </div>
+    <canvas class="ev-chart" width="1200" height="48" data-points='{{ dataset|safe }}'></canvas>
+  </section>
+{% endblock %}
+
+{% block scripts %}
+{{ scripts::chart_js() }}
+{%- endblock %}

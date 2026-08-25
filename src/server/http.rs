@@ -104,7 +104,7 @@ impl ServeListener {
 /// contract every other failing handler already uses. A template only fails to
 /// render if a `Display` impl fails, so this is a "cannot happen" path that must
 /// still not panic (see AGENTS.md).
-fn page(rendered: Result<String>) -> Response {
+fn html(rendered: Result<String>) -> Response {
     match rendered {
         Ok(html) => Html(html).into_response(),
         Err(error) => {
@@ -133,7 +133,7 @@ async fn dashboard(State(app): State<Arc<AppState>>) -> Response {
         },
         None => None,
     };
-    page(views::dashboard_page(active.as_ref()))
+    html(views::dashboard_page(active.as_ref()))
 }
 
 async fn play(State(app): State<Arc<AppState>>) -> Response {
@@ -198,12 +198,11 @@ async fn tournaments(
     };
     let page = params.page.unwrap_or(1).max(1);
     match render_tournaments(&pool, page).await {
-        Ok(pageview) => Html(views::tournaments_page(
+        Ok(pageview) => html(views::tournaments_page(
             &pageview.sessions,
             pageview.page,
             pageview.pages,
-        ))
-        .into_response(),
+        )),
         Err(error) => {
             tracing::warn!(%error, page, "tournaments page failed to render");
             (
@@ -248,7 +247,7 @@ async fn tournament_detail(State(app): State<Arc<AppState>>, Path(id): Path<i32>
             .into_response();
     };
     match analytics::load_tournament_detail(&pool, id).await {
-        Ok(Some(detail)) => Html(views::tournament_detail_page(&detail)).into_response(),
+        Ok(Some(detail)) => html(views::tournament_detail_page(&detail)),
         Ok(None) => (
             StatusCode::NOT_FOUND,
             axum::Json(json!({ "error": "tournament not found" })),
@@ -334,7 +333,7 @@ fn scan_failure(error: crate::error::Error) -> Response {
 /// The opponent-analysis page: a polling shell whose status fragment is
 /// refreshed from `/history/analyze-status`.
 async fn history_analyze_page() -> Response {
-    page(views::analysis_page())
+    html(views::analysis_page())
 }
 
 /// One JSON status payload for the analysis page: the job state plus the
@@ -895,7 +894,7 @@ mod tests {
     /// error shape as every other failing handler rather than panic.
     #[test]
     fn a_failed_render_becomes_a_json_500() {
-        let response = page(Err(crate::error::Error::Analytics("boom".to_string())));
+        let response = html(Err(crate::error::Error::Analytics("boom".to_string())));
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(
             response
@@ -1217,7 +1216,7 @@ You finished in 1st place.
 
         let (status, body) = get("/history/analyze").await;
         assert_eq!(status, StatusCode::OK);
-        assert!(body.contains("/history/analyze-status"), "{body}");
+        assert!(body.contains(r#"src="/assets/analysis.js"#), "{body}");
     }
 
     #[tokio::test]

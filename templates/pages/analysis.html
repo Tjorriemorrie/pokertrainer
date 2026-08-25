@@ -1,4 +1,5 @@
 {% extends "layouts/subpage.html" %}
+{% import "partials/scripts.html" as scripts %}
 
 {% block title %}Poker Trainer — Opponent analysis{% endblock %}
 
@@ -18,22 +19,8 @@
   table header.</p>
   <div id="analysis-status"><div class="pt-empty">Loading…</div></div>
 </section>
-{%- endblock %}
+{% endblock %}
 
 {% block scripts %}
-<script>
-(function () {
-  var box = document.getElementById('analysis-status');
-  function poll() {
-    fetch('/history/analyze-status')
-      .then(function (r) { return r.json(); })
-      .then(function (status) {
-        box.innerHTML = status.html;
-        if (status.state === 'running') { setTimeout(poll, 1500); }
-      })
-      .catch(function () { box.innerHTML = '<div class="pt-empty">Status unavailable.</div>'; });
-  }
-  poll();
-})();
-</script>
+{{ scripts::analysis_js() }}
 {%- endblock %}
