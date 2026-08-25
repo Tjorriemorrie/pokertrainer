@@ -37,74 +37,32 @@ pub fn analysis_page() -> Result<String> {
 /// the hero-vs-field skill chip beside it), the table controls (finish,
 /// tournament history, sound toggle), the table column docked top-left, and the
 /// coach-feedback panel beside it (never covering the table).
-pub fn play_page(you: Option<f64>, bots: Option<f64>) -> String {
-    let skill_chip = skill_chip(you, bots);
-    format!(
-        r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Poker Trainer</title>
-<link rel="stylesheet" href="/assets/style.css?v=13">
-</head>
-<body class="pt-body">
-  <header class="pt-topwrap">
-    <a href="/" class="pt-link">Dashboard</a>
-    <div class="pt-brand">Poker Trainer</div>
-    <canvas id="ev-chart" width="1200" height="48" class="ev-chart"></canvas>
-    {skill_chip}
-    <div id="ws-status" class="status-wait">connecting…</div>
-    <button id="sound-toggle" class="pt-icon-btn" type="button" title="Toggle table sounds">🔊</button>
-    <a href="/tournaments" class="pt-link">Tournament history</a>
-    <a href="/history" class="pt-link">Hand history</a>
-    <button id="finish-table" class="action-btn" type="button">Finish table</button>
-  </header>
-  <main class="pt-main">
-    <div class="pt-layout">
-      <section class="pt-table-col"><div id="table"></div></section>
-      <aside class="pt-feedback-col">
-        <h2 class="pt-feedback-heading">Coach feedback</h2>
-        <div id="feedback">
-          <div class="pt-feedback-empty">
-            <b>No mistakes flagged yet.</b>
-            When a decision costs enough equity, the played-vs-optimal breakdown
-            appears here together with what the coach has learned about your
-            opponents so far — and the table stays fully visible next to it.
-          </div>
-        </div>
-      </aside>
-    </div>
-  </main>
-  <div id="tournament-modal" class="pt-modal" hidden>
-    <div class="pt-modal-card">
-      <h2 id="tournament-modal-title" class="pt-modal-title">Tournament over</h2>
-      <p id="tournament-modal-body" class="pt-modal-body"></p>
-      <button id="tournament-modal-continue" class="action-btn pt-confirm" type="button">Continue</button>
-    </div>
-  </div>
-  <script src="/assets/app.js?v=7"></script>
-</body>
-</html>"#,
-        skill_chip = if skill_chip.is_empty() {
-            String::new()
-        } else {
-            format!("    {skill_chip}\n")
-        }
-    )
+#[derive(Template)]
+#[template(path = "pages/play.html")]
+struct PlayTemplate {
+    /// `None` when the app has no analytics store to derive either number from,
+    /// which suppresses the header chip entirely.
+    skill: Option<SkillChip>,
 }
 
 /// The top-bar chip comparing the hero's lifetime skill against the bot
-/// template's field skill, on the same 0..1 scale. Empty when the app has no
-/// analytics store to derive either number from.
-fn skill_chip(you: Option<f64>, bots: Option<f64>) -> String {
-    let (you, bots) = match (you, bots) {
-        (None, None) => return String::new(),
-        (you, bots) => (format_skill(you), format_skill(bots)),
-    };
-    format!(
-        r#"<div class="pt-skill-chip" title="Skill on a 0..1 scale: how close your decisions average to the solver vs the imported opponents both bots play like. Generate the field skill under Hand history → Analyze imported opponents.">You <b>{you}</b> · Bots <b>{bots}</b></div>"#
-    )
+/// template's field skill, on the same 0..1 scale.
+struct SkillChip {
+    you: String,
+    bots: String,
+}
+
+pub fn play_page(you: Option<f64>, bots: Option<f64>) -> Result<String> {
+    Ok(PlayTemplate {
+        skill: match (you, bots) {
+            (None, None) => None,
+            (you, bots) => Some(SkillChip {
+                you: format_skill(you),
+                bots: format_skill(bots),
+            }),
+        },
+    }
+    .render()?)
 }
 
 /// Formats one skill value for the header chip: two decimals, or an em dash
@@ -438,14 +396,44 @@ pub fn history_scan_result_page(outcome: &crate::hh::ImportOutcome) -> Result<St
 
 /// The status fragment swapped into the analysis page: idle nudge, live
 /// progress, or the finished report with the save-template action.
-pub fn analysis_status_html(status: &crate::opponent_analysis::JobState) -> String {
+#[derive(Template)]
+#[template(path = "fragments/analysis_idle.html")]
+struct AnalysisIdleFragment;
+
+#[derive(Template)]
+#[template(path = "fragments/analysis_running.html")]
+struct AnalysisRunningFragment {
+    hands_done: u32,
+    hands_total: u32,
+    pct: String,
+}
+
+/// One opponent's row in the finished report.
+struct PlayerRowView {
+    name: String,
+    decisions: u32,
+    avg_ev_loss_bb: String,
+}
+
+#[derive(Template)]
+#[template(path = "fragments/analysis_done.html")]
+struct AnalysisDoneFragment {
+    cards: Vec<Stat>,
+    players: Vec<PlayerRowView>,
+    problems: Vec<String>,
+    /// `Some` only when the run graded at least one decision, which is what
+    /// gates the save-template action.
+    save_skill: Option<String>,
+}
+
+/// The status fragment swapped into the analysis page: idle nudge, live
+/// progress, or the finished report with the save-template action. Each shape
+/// is its own template, so the variants stay independently checked.
+pub fn analysis_status_html(status: &crate::opponent_analysis::JobState) -> Result<String> {
     use crate::opponent_analysis::JobState;
 
-    match status {
-        JobState::Idle => r#"<div class="pt-empty">No analysis running.
-  <a class="pt-link" href="/history">Back to hand history</a> and press
-  <b>Analyze imported opponents</b> to start.</div>"#
-            .to_string(),
+    Ok(match status {
+        JobState::Idle => AnalysisIdleFragment.render()?,
         JobState::Running {
             hands_done,
             hands_total,
@@ -455,69 +443,39 @@ pub fn analysis_status_html(status: &crate::opponent_analysis::JobState) -> Stri
             } else {
                 (*hands_done as f64 * 100.0) / (*hands_total as f64)
             };
-            format!(
-                r#"<div class="pt-status-running">Analyzing opponents — hand {} of {} ({pct:.0}%).
-Grading one decision per possible opponent action is solver work, so a full pass can take a few minutes; already-analyzed hands are skipped.</div>"#,
-                hands_done, hands_total,
-            )
+            AnalysisRunningFragment {
+                hands_done: *hands_done,
+                hands_total: *hands_total,
+                pct: format!("{pct:.0}"),
+            }
+            .render()?
         }
-        JobState::Done(report) => {
-            let card = |label: &str, value: String| -> String {
-                format!(
-                    r#"<div class="pt-stat-card"><span>{}</span><b>{}</b></div>"#,
-                    label,
-                    escape(&value)
-                )
-            };
-            let mut html = format!(
-                r#"<div class="pt-stat-grid">
-  {hands}{graded}{failed}{decisions}{avg}{skill}
-</div>"#,
-                hands = card("Hands in window", report.hands_total.to_string()),
-                graded = card("Hands graded", report.hands_graded.to_string()),
-                failed = card("Hands skipped", report.hands_failed.to_string()),
-                decisions = card("Opponent decisions", report.decisions.to_string()),
-                avg = card(
+        JobState::Done(report) => AnalysisDoneFragment {
+            cards: vec![
+                Stat::new("Hands in window", report.hands_total),
+                Stat::new("Hands graded", report.hands_graded),
+                Stat::new("Hands skipped", report.hands_failed),
+                Stat::new("Opponent decisions", report.decisions),
+                Stat::new(
                     "Avg BB lost per decision",
-                    format!("{:.3}", report.avg_ev_loss_bb)
+                    format!("{:.3}", report.avg_ev_loss_bb),
                 ),
-                skill = card("Field skill", format!("{:.2}", report.skill)),
-            );
-            if !report.players.is_empty() {
-                html.push_str(
-                    r#"<table class="pt-hh-table">
-<tr><th>Opponent</th><th>Decisions</th><th>Avg BB lost</th></tr>"#,
-                );
-                for player in &report.players {
-                    html.push_str(&format!(
-                        "<tr><td>{}</td><td>{}</td><td>{:.3}</td></tr>",
-                        escape(&player.name),
-                        player.decisions,
-                        player.avg_ev_loss_bb
-                    ));
-                }
-                html.push_str("</table>");
-            }
-            if !report.problems.is_empty() {
-                html.push_str(r#"<div class="pt-hh-failures">Skipped hands:<ul>"#);
-                for problem in &report.problems {
-                    html.push_str(&format!("<li>{}</li>", escape(problem)));
-                }
-                html.push_str("</ul></div>");
-            }
-            if report.decisions > 0 {
-                html.push_str(&format!(
-                    r#"<form method="post" action="/history/save-template" class="pt-save-template">
-  <button class="action-btn pt-confirm" type="submit">Use field skill {:.2} as the bot template</button>
-</form>
-<p class="pt-detail-meta">Both local bots will make their decisions at this skill level — press
-<b>Start tournament</b> on the dashboard and the header chip shows how you compare.</p>"#,
-                    report.skill
-                ));
-            }
-            html
+                Stat::new("Field skill", format!("{:.2}", report.skill)),
+            ],
+            players: report
+                .players
+                .iter()
+                .map(|player| PlayerRowView {
+                    name: player.name.clone(),
+                    decisions: player.decisions,
+                    avg_ev_loss_bb: format!("{:.3}", player.avg_ev_loss_bb),
+                })
+                .collect(),
+            problems: report.problems.clone(),
+            save_skill: (report.decisions > 0).then(|| format!("{:.2}", report.skill)),
         }
-    }
+        .render()?,
+    })
 }
 
 /// One imported tournament's detail page: the stored summary, its aggregate
@@ -1410,7 +1368,7 @@ mod tests {
 
     #[test]
     fn play_page_shell_points_at_the_ws_client() {
-        let page = play_page(None, None);
+        let page = play_page(None, None).unwrap();
         assert!(page.contains("<title>Poker Trainer</title>"));
         assert!(page.contains(r#"<div id="table"></div>"#));
         assert!(page.contains(r#"<div id="feedback">"#));
@@ -2738,20 +2696,20 @@ mod tests {
 
     #[test]
     fn play_page_shows_the_hero_vs_field_skill_chip() {
-        let page = play_page(Some(0.71), Some(0.62));
+        let page = play_page(Some(0.71), Some(0.62)).unwrap();
         assert!(page.contains("pt-skill-chip"), "{page}");
         assert!(
             page.contains("You <b>0.71</b> · Bots <b>0.62</b>"),
             "{page}"
         );
 
-        let missing = play_page(None, Some(0.62));
+        let missing = play_page(None, Some(0.62)).unwrap();
         assert!(
             missing.contains("You <b>—</b> · Bots <b>0.62</b>"),
             "{missing}"
         );
 
-        let none = play_page(None, None);
+        let none = play_page(None, None).unwrap();
         assert!(!none.contains("pt-skill-chip"), "no store, no chip: {none}");
     }
 
@@ -2804,16 +2762,17 @@ mod tests {
     fn analysis_status_html_covers_every_job_state() {
         use crate::opponent_analysis::{FieldReport, JobState};
 
-        let idle = analysis_status_html(&JobState::Idle);
+        let idle = analysis_status_html(&JobState::Idle).unwrap();
         assert!(idle.contains("Analyze imported opponents"), "{idle}");
 
         let running = analysis_status_html(&JobState::Running {
             hands_done: 30,
             hands_total: 100,
-        });
+        })
+        .unwrap();
         assert!(running.contains("hand 30 of 100"), "{running}");
 
-        let done = analysis_status_html(&JobState::Done(report_fixture()));
+        let done = analysis_status_html(&JobState::Done(report_fixture())).unwrap();
         assert!(done.contains("Hands in window</span><b>100</b>"), "{done}");
         assert!(done.contains("Field skill</span><b>0.62</b>"), "{done}");
         assert!(done.contains("14c11a2a"), "{done}");
@@ -2822,7 +2781,7 @@ mod tests {
         assert!(done.contains("engine call amount 40 differs"), "{done}");
 
         // A report without graded decisions never offers a save action.
-        let empty = analysis_status_html(&JobState::Done(FieldReport::empty()));
+        let empty = analysis_status_html(&JobState::Done(FieldReport::empty())).unwrap();
         assert!(!empty.contains("save-template"), "{empty}");
     }
 }

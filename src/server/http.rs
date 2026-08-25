@@ -158,7 +158,7 @@ async fn play(State(app): State<Arc<AppState>>) -> Response {
         }
         None => (None, None),
     };
-    Html(views::play_page(you, bots)).into_response()
+    html(views::play_page(you, bots))
 }
 
 async fn health() -> impl IntoResponse {
@@ -339,7 +339,7 @@ async fn history_analyze_page() -> Response {
 /// One JSON status payload for the analysis page: the job state plus the
 /// rendered HTML fragment to swap in.
 async fn history_analyze_status(State(app): State<Arc<AppState>>) -> Response {
-    let (state, html) = match job_guard(&app.analysis) {
+    let (state, rendered) = match job_guard(&app.analysis) {
         Ok(status) => (
             match &*status {
                 JobState::Idle => "idle",
@@ -353,7 +353,13 @@ async fn history_analyze_status(State(app): State<Arc<AppState>>) -> Response {
             ("idle", views::analysis_status_html(&JobState::Idle))
         }
     };
-    axum::Json(json!({ "state": state, "html": html })).into_response()
+    // Degrade to the same message the client's own `.catch` renders rather than
+    // failing the whole polling endpoint over a fragment that would not render.
+    let fragment = rendered.unwrap_or_else(|error| {
+        tracing::warn!(%error, "analysis status fragment failed to render");
+        r#"<div class="pt-empty">Status unavailable.</div>"#.to_string()
+    });
+    axum::Json(json!({ "state": state, "html": fragment })).into_response()
 }
 
 /// Starts the background opponent analyzer when no job is running, then

@@ -1,0 +1,30 @@
+{#
+The finished opponent-analysis report: the aggregate grid, the per-opponent
+breakdown, any skipped hands, and the save-template action. A fragment, not a
+document — it is returned inside a JSON body and injected with innerHTML.
+#}{% import "partials/macros.html" as macros -%}
+<div class="pt-stat-grid">
+  {% for stat in cards %}{{ macros::stat_card(stat.label, stat.value) }}{% endfor %}
+</div>
+{%- if !players.is_empty() -%}
+<table class="pt-hh-table">
+<tr><th>Opponent</th><th>Decisions</th><th>Avg BB lost</th></tr>
+{%- for player in players -%}
+<tr><td>{{ player.name }}</td><td>{{ player.decisions }}</td><td>{{ player.avg_ev_loss_bb }}</td></tr>
+{%- endfor -%}
+</table>
+{%- endif -%}
+{%- if !problems.is_empty() -%}
+<div class="pt-hh-failures">Skipped hands:<ul>
+{%- for problem in problems -%}
+<li>{{ problem }}</li>
+{%- endfor -%}
+</ul></div>
+{%- endif -%}
+{%- if let Some(skill) = save_skill -%}
+<form method="post" action="/history/save-template" class="pt-save-template">
+  <button class="action-btn pt-confirm" type="submit">Use field skill {{ skill }} as the bot template</button>
+</form>
+<p class="pt-detail-meta">Both local bots will make their decisions at this skill level — press
+<b>Start tournament</b> on the dashboard and the header chip shows how you compare.</p>
+{%- endif %}
