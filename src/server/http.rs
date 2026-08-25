@@ -100,6 +100,24 @@ impl ServeListener {
     }
 }
 
+/// Turns a rendered page into an HTML response, mirroring the JSON error
+/// contract every other failing handler already uses. A template only fails to
+/// render if a `Display` impl fails, so this is a "cannot happen" path that must
+/// still not panic (see AGENTS.md).
+fn page(rendered: Result<String>) -> Response {
+    match rendered {
+        Ok(html) => Html(html).into_response(),
+        Err(error) => {
+            tracing::warn!(%error, "page failed to render");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(json!({ "error": error.to_string() })),
+            )
+                .into_response()
+        }
+    }
+}
+
 /// The dashboard landing page: the resume card for the active tournament (if
 /// any) or a start button. Without a database the dashboard has nothing to
 /// read, so it always offers a fresh start.
@@ -115,7 +133,7 @@ async fn dashboard(State(app): State<Arc<AppState>>) -> Response {
         },
         None => None,
     };
-    Html(views::dashboard_page(active.as_ref())).into_response()
+    page(views::dashboard_page(active.as_ref()))
 }
 
 async fn play(State(app): State<Arc<AppState>>) -> Response {
@@ -316,7 +334,7 @@ fn scan_failure(error: crate::error::Error) -> Response {
 /// The opponent-analysis page: a polling shell whose status fragment is
 /// refreshed from `/history/analyze-status`.
 async fn history_analyze_page() -> Response {
-    Html(views::analysis_page()).into_response()
+    page(views::analysis_page())
 }
 
 /// One JSON status payload for the analysis page: the job state plus the
@@ -870,6 +888,22 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+    }
+
+    /// A template only fails to render if a `Display` impl fails, so no route
+    /// can reach this branch in practice — but it must degrade to the same JSON
+    /// error shape as every other failing handler rather than panic.
+    #[test]
+    fn a_failed_render_becomes_a_json_500() {
+        let response = page(Err(crate::error::Error::Analytics("boom".to_string())));
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/json")
+        );
     }
 
     #[tokio::test]

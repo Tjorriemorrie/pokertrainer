@@ -28,4 +28,6 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("serialization error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("template render error: {0}")]
+    Template(#[from] askama::Error),
 }

@@ -1,0 +1,9 @@
+[general]
+# A single template root, so every `#[template(path = "...")]` is unambiguous.
+# A glob here (`templates/**`) would make `templates/` and `templates/pages/` both
+# roots, and path resolution turns ambiguous the moment two files share a basename.
+dirs = ["templates"]
+# "preserve" means the template file is the output, character for character, apart
+# from the tags themselves. That is what keeps the rendered HTML byte-identical to
+# the hand-built strings this replaced.
+whitespace = "preserve"

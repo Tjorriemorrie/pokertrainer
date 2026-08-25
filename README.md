@@ -376,3 +376,38 @@ cargo test
 Database integration tests need the local PostgreSQL instance running
 (`.\pg.ps1`). They run against a separate `pokertrainer_test` database (created
 by `pg.ps1`), so they never touch your real data.
+
+### How the HTML pages are built
+
+Pages are [Askama](https://askama.rs) templates under `templates/`, compiled into
+the binary at build time. A typo in a template is a **compile error**, not a
+broken page at runtime, and `{{ value }}` is HTML-escaped automatically.
+
+```
+templates/
+  base.html              doctype, <head>, closing tags — the stylesheet cache-buster lives here
+  layouts/subpage.html   the shared header + <main> shape for the sub-pages
+  pages/*.html           one file per page, each `{% extends %}` one of the above
+```
+
+Each template is paired with a struct in `src/server/views.rs`:
+
+```rust
+#[derive(Template)]
+#[template(path = "pages/dashboard.html")]
+struct DashboardTemplate<'a> {
+    active: Option<&'a ActiveSummary>,
+}
+```
+
+Conventions when editing templates (nothing lints `.html`, so these are by hand):
+
+- **2-space indentation**, matching the markup already there.
+- A control tag alone on its own line is written `{%- if … %}` — leading dash, no
+  trailing dash — so the line the tag sits on leaves no trace in the output.
+- **Compute in Rust, present in the template.** Number formatting especially:
+  pre-format floats into `String` fields so `std::fmt` decides the rounding.
+- `{% import %}` is **not** inherited through `{% extends %}` — a template that
+  calls a macro needs its own import line even if its parent has one.
+- If a template edit seems to have no effect, the build cached it: run
+  `cargo clean -p pokertrainer` and rebuild.

@@ -1,0 +1,39 @@
+{% extends "layouts/subpage.html" %}
+
+{% block title %}Poker Trainer — Opponent analysis{% endblock %}
+
+{% block heading %}Opponent analysis{% endblock %}
+
+{% block nav %}
+  <a href="/history" class="pt-link">Hand history</a>
+  <a href="/" class="pt-link">Dashboard</a>
+{%- endblock %}
+
+{% block content %}
+<section class="pt-detail">
+  <div class="pt-detail-head"><h2 class="pt-hh-title">Field skill</h2></div>
+  <p class="pt-detail-meta">Every opponent decision in your last 1,000 imported hands is replayed and
+  graded against the solver; the pooled average big-blind loss becomes the field skill. Save it as
+  the template the two local bots play with, and compare it against your own lifetime skill in the
+  table header.</p>
+  <div id="analysis-status"><div class="pt-empty">Loading…</div></div>
+</section>
+{%- endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  var box = document.getElementById('analysis-status');
+  function poll() {
+    fetch('/history/analyze-status')
+      .then(function (r) { return r.json(); })
+      .then(function (status) {
+        box.innerHTML = status.html;
+        if (status.state === 'running') { setTimeout(poll, 1500); }
+      })
+      .catch(function () { box.innerHTML = '<div class="pt-empty">Status unavailable.</div>'; });
+  }
+  poll();
+})();
+</script>
+{%- endblock %}

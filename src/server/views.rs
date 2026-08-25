@@ -1,17 +1,40 @@
 use crate::analytics::{ChartPoint, SessionSummary, TournamentDetail};
 use crate::card::{Card, Suit};
 use crate::decision::{Analysis, AnalyzedDecision, SearchReport};
+use crate::error::Result;
 use crate::game::{Action, GameState, Seat, Street};
 use crate::opponent::OpponentSnapshot;
 use crate::range::BetSize;
 use crate::server::session::Sound;
 use crate::snapshot::ActiveSummary;
+use askama::Template;
 
 /// The dashboard landing page: either the resume card for the one active
 /// tournament or a fresh **Start tournament** button. A new tournament can
 /// only start once the previous one is finished (won, lost, or given up via
 /// **Finish table**).
-pub fn dashboard_page(active: Option<&ActiveSummary>) -> String {
+#[derive(Template)]
+#[template(path = "pages/dashboard.html")]
+struct DashboardTemplate<'a> {
+    active: Option<&'a ActiveSummary>,
+}
+
+pub fn dashboard_page(active: Option<&ActiveSummary>) -> Result<String> {
+    Ok(DashboardTemplate { active }.render()?)
+}
+
+/// The opponent-analysis page shell: a polling container filled by
+/// [`analysis_status_html`] fragments fetched from the status endpoint.
+#[derive(Template)]
+#[template(path = "pages/analysis.html")]
+struct AnalysisTemplate;
+
+pub fn analysis_page() -> Result<String> {
+    Ok(AnalysisTemplate.render()?)
+}
+
+#[cfg(test)]
+fn legacy_dashboard_page(active: Option<&ActiveSummary>) -> String {
     let mut html = String::from(
         r#"<!doctype html>
 <html lang="en">
@@ -648,9 +671,8 @@ pub fn history_scan_result_page(outcome: &crate::hh::ImportOutcome) -> String {
     )
 }
 
-/// The opponent-analysis page shell: a polling container filled by
-/// [`analysis_status_html`] fragments fetched from the status endpoint.
-pub fn analysis_page() -> String {
+#[cfg(test)]
+fn legacy_analysis_page() -> String {
     r#"<!doctype html>
 <html lang="en">
 <head>
@@ -1738,9 +1760,40 @@ mod tests {
         })
     }
 
+    /// Askama strips one trailing newline from a template file, and the eight
+    /// hand-built pages were themselves inconsistent about it (the dashboard
+    /// ended `</html>\n`, the play and history pages ended `</html>`). No
+    /// assertion can observe it, so the migration guards compare modulo the
+    /// final newline and hold every other byte exactly.
+    fn same_html(rendered: &str, legacy: &str) {
+        assert_eq!(
+            rendered.trim_end_matches('\n'),
+            legacy.trim_end_matches('\n')
+        );
+    }
+
+    /// Temporary migration guard: proves the Askama template renders the exact
+    /// same bytes the hand-built `format!` version did, on both branches.
+    /// Deleted together with `legacy_dashboard_page` once the page is settled.
+    #[test]
+    fn dashboard_template_matches_legacy() {
+        let summary = active_summary(true).unwrap();
+        same_html(
+            &dashboard_page(Some(&summary)).unwrap(),
+            &legacy_dashboard_page(Some(&summary)),
+        );
+        same_html(&dashboard_page(None).unwrap(), &legacy_dashboard_page(None));
+    }
+
+    /// Temporary migration guard; see [`dashboard_template_matches_legacy`].
+    #[test]
+    fn analysis_template_matches_legacy() {
+        same_html(&analysis_page().unwrap(), &legacy_analysis_page());
+    }
+
     #[test]
     fn dashboard_without_an_active_tournament_offers_a_start() {
-        let page = dashboard_page(None);
+        let page = dashboard_page(None).unwrap();
         assert!(page.contains("<title>Poker Trainer</title>"));
         assert!(
             page.contains(r#"href="/play">Start tournament</a>"#),
@@ -1758,7 +1811,7 @@ mod tests {
 
     #[test]
     fn dashboard_with_an_active_tournament_offers_only_a_resume() {
-        let page = dashboard_page(active_summary(true).as_ref());
+        let page = dashboard_page(active_summary(true).as_ref()).unwrap();
         assert!(page.contains("Tournament in progress"));
         assert!(
             page.contains(r#"href="/play">Resume tournament</a>"#),
@@ -1781,9 +1834,14 @@ mod tests {
     fn dashboard_escapes_stored_strings() {
         let mut summary = active_summary(true).unwrap();
         summary.started = r#"<script>"evil"</script>"#.to_string();
-        let page = dashboard_page(Some(&summary));
+        let page = dashboard_page(Some(&summary)).unwrap();
         assert!(!page.contains(r#"<script>"evil""#));
-        assert!(page.contains("&lt;script&gt;"));
+        // Askama's escaper emits numeric entities (`&#60;`) where the old
+        // hand-rolled `escape()` emitted named ones (`&lt;`). Both are
+        // identical to a browser; unlike the old helper, Askama also escapes
+        // `'` and cannot be forgotten at a call site.
+        assert!(page.contains("&#60;script&#62;"));
+        assert!(page.contains("&#34;evil&#34;"));
     }
 
     fn summary(
@@ -3072,7 +3130,7 @@ mod tests {
 
     #[test]
     fn analysis_page_shell_polls_the_status_endpoint() {
-        let page = analysis_page();
+        let page = analysis_page().unwrap();
         assert!(page.contains("<title>Poker Trainer — Opponent analysis</title>"));
         assert!(page.contains("/history/analyze-status"));
         assert!(page.contains("id=\"analysis-status\""), "{page}");

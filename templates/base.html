@@ -1,0 +1,21 @@
+{#
+The document shell every page shares: doctype, head, and the closing tags.
+The stylesheet cache-buster lives here and nowhere else — bumping it is a
+one-character edit.
+
+Whitespace convention (see AGENTS.md / README): a control tag alone on its own
+line is written `{%- tag %}` — leading dash, no trailing dash — so the line the
+tag sits on disappears from the output entirely.
+#}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Poker Trainer{% endblock %}</title>
+<link rel="stylesheet" href="/assets/style.css?v=13">
+</head>
+<body class="pt-body">
+{%- block body %}{% endblock %}
+{%- block scripts %}{% endblock %}
+</body>
+</html>
