@@ -754,7 +754,7 @@ fn state_message(session: &mut TableSession) -> Result<String> {
             session.action_no(),
             session.log(),
             &sounds,
-        ),
+        )?,
     }
     .to_json()
 }
@@ -923,16 +923,14 @@ fn events_to_messages(session: &mut TableSession, events: Vec<TableEvent>) -> Ve
         let serialized = match event {
             TableEvent::State => {
                 let sounds = session.take_sounds();
-                ServerMessage::TableStateUpdate {
-                    fragment: views::table_fragment(
-                        session.state(),
-                        session.hand_no(),
-                        session.action_no(),
-                        session.log(),
-                        &sounds,
-                    ),
-                }
-                .to_json()
+                views::table_fragment(
+                    session.state(),
+                    session.hand_no(),
+                    session.action_no(),
+                    session.log(),
+                    &sounds,
+                )
+                .and_then(|fragment| ServerMessage::TableStateUpdate { fragment }.to_json())
             }
             TableEvent::TacticalOverlay {
                 decision,

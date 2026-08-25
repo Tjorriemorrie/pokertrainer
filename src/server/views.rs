@@ -201,10 +201,17 @@ pub fn tournament_detail_page(detail: &TournamentDetail) -> Result<String> {
     .render()?)
 }
 
-/// The GGPoker hand-history page: the scan trigger, the opponent-skill
-/// analyzer entry and the current bot template, the lifetime
-/// profit/win-rate aggregates, and one row per imported tournament (newest
-/// first) linking to its hand-level detail page.
+/// Formats a stack pill: chips first, then the big-blind equivalent hidden
+/// behind a `?` placeholder — holding Alt reveals the real value, so the
+/// player learns to convert chips to blinds without the client doing it.
+/// Still used by the tactical overlay's opponent HUD cards.
+fn stack_text(stack: u32, big_blind: u32) -> String {
+    let bb = stack as f32 / big_blind as f32;
+    format!(
+        "{stack}<span class=\"pt-bb\"><span class=\"pt-bb-q\">?</span><span class=\"pt-bb-real\" data-bb=\"{bb:.1}\">{bb:.1}&nbsp;BB</span></span>"
+    )
+}
+
 /// One `pt-stat-card`. Values arrive pre-formatted so `std::fmt` (not the
 /// template) decides the rounding.
 struct Stat {
@@ -661,38 +668,9 @@ fn suit_symbol(suit: Suit) -> char {
     }
 }
 
-fn card_html(card: Card) -> String {
-    let suit = card.suit();
-    let suit_class = match suit {
-        Suit::Hearts => " red",
-        Suit::Diamonds => " blue",
-        Suit::Clubs => " green",
-        Suit::Spades => "",
-    };
-    let code = card.to_code();
-    let rank = &code[..1];
-    format!(
-        r#"<span class="pt-card{suit_class}" data-suit="{:?}" data-code="{}"><b>{}</b><i>{}</i></span>"#,
-        suit,
-        escape(&code),
-        escape(rank),
-        suit_symbol(suit)
-    )
-}
-
 fn sounds_json(sounds: &[Sound]) -> String {
     let tags: Vec<&str> = sounds.iter().map(|sound| sound.tag()).collect();
     serde_json::to_string(&tags).unwrap_or_else(|_| "[]".to_string())
-}
-
-/// Formats a stack pill: chips first, then the big-blind equivalent hidden
-/// behind a `?` placeholder — holding Alt reveals the real value, so the
-/// player learns to convert chips to blinds without the client doing it.
-fn stack_text(stack: u32, big_blind: u32) -> String {
-    let bb = stack as f32 / big_blind as f32;
-    format!(
-        "{stack}<span class=\"pt-bb\"><span class=\"pt-bb-q\">?</span><span class=\"pt-bb-real\" data-bb=\"{bb:.1}\">{bb:.1}&nbsp;BB</span></span>"
-    )
 }
 
 /// The raw table-state HTML fragment swapped into the DOM on every state
@@ -703,176 +681,312 @@ fn stack_text(stack: u32, big_blind: u32) -> String {
 /// an always-visible action log docked to the left of the oval, exactly
 /// as tall as the table. `sounds` carries the WebAudio cues the client
 /// synthesizes for this update.
+/// One playing card, ready for the `card` macro. `suit_debug` is the `Debug`
+/// spelling of the suit, which is what `assets/app.js` reads off `data-suit`.
+struct CardView {
+    suit_class: &'static str,
+    suit_debug: String,
+    code: String,
+    rank: String,
+    symbol: char,
+}
+
+impl CardView {
+    fn new(card: Card) -> Self {
+        let suit = card.suit();
+        let code = card.to_code();
+        Self {
+            suit_class: match suit {
+                Suit::Hearts => " red",
+                Suit::Diamonds => " blue",
+                Suit::Clubs => " green",
+                Suit::Spades => "",
+            },
+            suit_debug: format!("{suit:?}"),
+            rank: code[..1].to_string(),
+            code,
+            symbol: suit_symbol(suit),
+        }
+    }
+}
+
+/// One seat on the felt.
+#[derive(Template)]
+#[template(path = "fragments/seat.html")]
+struct SeatFragment {
+    cls: &'static str,
+    name: String,
+    is_button: bool,
+    is_small_blind: bool,
+    is_big_blind: bool,
+    /// The shown hole cards, empty when the seat is eliminated or face-down.
+    cards: Vec<CardView>,
+    /// Face-down placeholders instead of `cards`.
+    backs: bool,
+    /// Empty `flag_label` means no flag at all.
+    flag_class: &'static str,
+    flag_label: &'static str,
+    stack: u32,
+    stack_bb: String,
+    /// Zero suppresses the bet chip.
+    bet: u32,
+    win: Option<u32>,
+}
+
+impl SeatFragment {
+    fn new(state: &GameState, seat: Seat) -> Self {
+        let level = state.blind_level();
+        let active = !state.is_hand_over() && state.to_act() == seat;
+        let eliminated = state.eliminated(seat);
+
+        let (cards, backs) = match seat {
+            Seat::Hero => (
+                state
+                    .hero_cards()
+                    .iter()
+                    .copied()
+                    .map(CardView::new)
+                    .collect(),
+                false,
+            ),
+            _ => match state.hole_cards(seat) {
+                Some(cards) => (cards.iter().copied().map(CardView::new).collect(), false),
+                None if eliminated => (Vec::new(), false),
+                None => (Vec::new(), true),
+            },
+        };
+
+        let (flag_class, flag_label) = if state.folded(seat) {
+            ("", "Fold")
+        } else if state.all_in(seat) {
+            (" allin", "All-in")
+        } else if eliminated {
+            (" bust", "OUT")
+        } else {
+            ("", "")
+        };
+
+        let win = state.hand_result().and_then(|result| {
+            result
+                .awards
+                .iter()
+                .find(|award| award.seat == seat)
+                .map(|award| award.amount)
+        });
+
+        let stack = state.stack(seat);
+        Self {
+            cls: match (active, win.is_some()) {
+                (true, _) => "pt-seat pt-active",
+                (false, true) => "pt-seat pt-winner",
+                (false, false) => "pt-seat",
+            },
+            name: seat.to_string(),
+            is_button: state.button() == seat,
+            is_small_blind: seat == state.small_blind_seat(),
+            is_big_blind: seat == state.big_blind_seat(),
+            cards,
+            backs,
+            flag_class,
+            flag_label,
+            stack,
+            stack_bb: format!("{:.1}", stack as f32 / level.big_blind as f32),
+            bet: state.street_contribution(seat),
+            win,
+        }
+    }
+}
+
+/// One pot-fraction or fixed sizing chip in the action dock.
+struct SizeChip {
+    bucket: &'static str,
+    amount: u32,
+    label: String,
+}
+
+/// The bet-sizing half of the action dock, present only when betting or raising
+/// is legal. Which chips survive (clamping and dedup) and the slider bounds are
+/// decided in Rust — that is real logic, not presentation.
+struct SizingView {
+    chips: Vec<SizeChip>,
+    can_all_in: bool,
+    min: u32,
+    max: u32,
+    initial: u32,
+    kind: &'static str,
+    is_bet: bool,
+}
+
+#[derive(Template)]
+#[template(path = "fragments/action_panel.html")]
+struct ActionPanelFragment {
+    sizing: Option<SizingView>,
+    can_fold: bool,
+    can_check: bool,
+    can_call: bool,
+    call_amount: u32,
+    /// The hero's stack, when an all-in button belongs in the action row rather
+    /// than among the sizing chips.
+    bare_all_in: Option<u32>,
+}
+
+impl ActionPanelFragment {
+    fn new(state: &GameState) -> Self {
+        let legal = state.legal_actions();
+        let level = state.blind_level();
+        let betting = legal.can_bet;
+        let raising = legal.can_raise;
+        let sizing = betting || raising;
+
+        let sizing = sizing.then(|| {
+            let to_call = if betting { 0 } else { legal.call_amount };
+            let (min, max) = if betting {
+                (legal.min_bet, legal.max_bet)
+            } else {
+                (legal.min_raise_to, legal.max_raise_to)
+            };
+            let stack = state.stack(Seat::Hero);
+            let preflop = state.street() == Street::Preflop;
+            let facing_raise =
+                raising && to_call > 0 && (!preflop || state.current_bet() > level.big_blind);
+            let pot_fractions = facing_raise || !preflop;
+            let buckets: &[BetSize] = if pot_fractions {
+                &[
+                    BetSize::ThirdPot,
+                    BetSize::HalfPot,
+                    BetSize::ThreeQuarterPot,
+                    BetSize::Pot,
+                ]
+            } else {
+                &[
+                    BetSize::Min,
+                    BetSize::ThreeBb,
+                    BetSize::FourBb,
+                    BetSize::Pot,
+                ]
+            };
+            let mut chips: Vec<SizeChip> = Vec::new();
+            for bucket in buckets {
+                let amount = bucket
+                    .to_raise_to(state.total_pot(), to_call, level.big_blind, min, stack)
+                    .clamp(min, max);
+                if amount >= stack || chips.iter().any(|chip| chip.amount == amount) {
+                    continue;
+                }
+                chips.push(SizeChip {
+                    bucket: bucket.label(),
+                    amount,
+                    label: if pot_fractions {
+                        pot_percent_label(*bucket).to_string()
+                    } else {
+                        amount.to_string()
+                    },
+                });
+            }
+            let default_bucket = if facing_raise && preflop {
+                BetSize::TwoX
+            } else if preflop {
+                BetSize::ThreeBb
+            } else {
+                BetSize::HalfPot
+            };
+            SizingView {
+                chips,
+                can_all_in: legal.can_all_in,
+                min,
+                max,
+                initial: default_bucket
+                    .to_raise_to(state.total_pot(), to_call, level.big_blind, min, stack)
+                    .clamp(min, max),
+                kind: if betting { "bet" } else { "raise" },
+                is_bet: betting,
+            }
+        });
+
+        Self {
+            can_fold: legal.can_fold,
+            can_check: legal.can_check,
+            can_call: legal.can_call,
+            call_amount: legal.call_amount,
+            bare_all_in: (sizing.is_none() && legal.can_all_in).then(|| state.stack(Seat::Hero)),
+            sizing,
+        }
+    }
+}
+
+/// One line of the action log. Hand markers (`— Hand #N …`) get gold emphasis so
+/// deals stand out between actions.
+struct LogLine {
+    class: &'static str,
+    text: String,
+}
+
+/// The hero's turn: the decision token the client echoes back, plus the dock.
+struct ActionBlockView {
+    decision: String,
+    panel: ActionPanelFragment,
+}
+
+#[derive(Template)]
+#[template(path = "fragments/table.html")]
+struct TableFragment {
+    hand_no: u64,
+    sounds_json: String,
+    small_blind: u32,
+    big_blind: u32,
+    street: String,
+    log: Vec<LogLine>,
+    seats: Vec<SeatFragment>,
+    /// Zero suppresses the pot chip.
+    pot: u32,
+    board: Vec<CardView>,
+    waiting_for: Option<String>,
+    action_block: Option<ActionBlockView>,
+}
+
 pub fn table_fragment(
     state: &GameState,
     hand_no: u64,
     action_no: u64,
     log: &[String],
     sounds: &[Sound],
-) -> String {
+) -> Result<String> {
     let level = state.blind_level();
-    let mut html = String::new();
-
-    html.push_str(&format!(
-        r#"<div id="table-state" class="table-shell" data-hand="{hand_no}" data-sounds='{}'>"#,
-        sounds_json(sounds)
-    ));
-    html.push_str(&format!(
-        r#"<div class="pt-topbar"><span class="pt-pill">Hand #{hand_no}</span><span>Blinds {}/{} · {}</span><span class="pt-lvl-meta">Spin &amp; Gold · 3-Max</span></div>"#,
-        level.small_blind,
-        level.big_blind,
-        escape(&state.street().to_string())
-    ));
-
-    html.push_str(r#"<div class="pt-table-body">"#);
-    html.push_str(&action_log_panel(log));
-    html.push_str(r#"<div class="pt-oval"><div class="pt-felt">"#);
-    for seat in Seat::ALL {
-        html.push_str(&seat_html(state, seat));
-    }
-
-    if state.total_pot() > 0 {
-        html.push_str(&format!(
-            r#"<div class="pt-pot">{}</div>"#,
-            state.total_pot()
-        ));
-    }
-
-    if !state.board().is_empty() {
-        html.push_str(r#"<div class="pt-board">"#);
-        for card in state.board() {
-            html.push_str(&card_html(*card));
-        }
-        html.push_str("</div>");
-    }
-
-    if !state.is_hand_over() && state.to_act() != Seat::Hero {
-        html.push_str(&format!(
-            r#"<div class="pt-wait">Waiting for {}…</div>"#,
-            escape(&state.to_act().to_string())
-        ));
-    }
-
-    html.push_str("</div></div>");
-    html.push_str("</div>");
-
-    if !state.is_hand_over() && state.to_act() == Seat::Hero {
-        let decision = format!(
-            "h{hand_no}-a{action_no}-{}",
-            state.street().to_string().to_lowercase()
-        );
-        html.push_str(&format!(
-            r#"<div class="pt-action-block" data-decision="{decision}">"#
-        ));
-        html.push_str(r#"<div id="mcts-status" class="mcts-status status-bad">solver idle</div>"#);
-        html.push_str(&action_panel(state));
-        html.push_str("</div>");
-    }
-
-    html.push_str("</div>");
-    html
-}
-
-/// The always-visible action log docked to the left of the oval, exactly as
-/// tall as the table. Lines render top-to-bottom in chronological order — new
-/// entries are inserted below older ones — and the client auto-scrolls the
-/// panel so the newest line stays in view. Hand markers (`— Hand #N …`) get
-/// gold emphasis so deals stand out between actions.
-fn action_log_panel(log: &[String]) -> String {
-    let mut html = String::from(
-        r#"<aside class="pt-hlog"><div class="pt-hlog-title">Action log</div><div id="pt-hlog-lines" class="pt-hlog-lines">"#,
-    );
-    for line in log {
-        let class = if line.starts_with('—') {
-            "pt-hlog-line marker"
-        } else {
-            "pt-hlog-line"
-        };
-        html.push_str(&format!("<div class=\"{class}\">{}</div>", escape(line)));
-    }
-    html.push_str("</div></aside>");
-    html
-}
-
-fn seat_html(state: &GameState, seat: Seat) -> String {
-    let active = !state.is_hand_over() && state.to_act() == seat;
-    let level = state.blind_level();
-    let folded = state.folded(seat);
-    let all_in = state.all_in(seat);
-    let stack = state.stack(seat);
-    let stack_pill = stack_text(stack, level.big_blind);
-
-    let cards = match seat {
-        Seat::Hero => format!(
-            "{} {}",
-            card_html(state.hero_cards()[0]),
-            card_html(state.hero_cards()[1])
-        ),
-        _ => match state.hole_cards(seat) {
-            Some(cards) => format!("{} {}", card_html(cards[0]), card_html(cards[1])),
-            None if state.eliminated(seat) => String::new(),
-            None => r#"<span class="pt-card back"></span><span class="pt-card back"></span>"#
-                .to_string(),
-        },
-    };
-
-    let small_blind = state.small_blind_seat();
-    let big_blind = state.big_blind_seat();
-    let mut badges = String::new();
-    if state.button() == seat {
-        badges.push_str(r#"<span class="pt-badge btn">BTN</span>"#);
-    }
-    if seat == small_blind {
-        badges.push_str(r#"<span class="pt-badge sb">SB</span>"#);
-    }
-    if seat == big_blind {
-        badges.push_str(r#"<span class="pt-badge bb">BB</span>"#);
-    }
-
-    let flag = if folded {
-        r#"<span class="pt-flag">Fold</span>"#
-    } else if all_in {
-        r#"<span class="pt-flag allin">All-in</span>"#
-    } else if state.eliminated(seat) {
-        r#"<span class="pt-flag bust">OUT</span>"#
-    } else {
-        ""
-    };
-
-    let bet = state.street_contribution(seat);
-    let bet_html = if bet > 0 {
-        format!(r#"<div class="pt-bet">{bet}</div>"#)
-    } else {
-        String::new()
-    };
-
-    let win = state.hand_result().and_then(|result| {
-        result
-            .awards
+    let hero_turn = !state.is_hand_over() && state.to_act() == Seat::Hero;
+    Ok(TableFragment {
+        hand_no,
+        sounds_json: sounds_json(sounds),
+        small_blind: level.small_blind,
+        big_blind: level.big_blind,
+        street: state.street().to_string(),
+        log: log
             .iter()
-            .find(|award| award.seat == seat)
-            .map(|award| award.amount)
-    });
-    let win_html = match win {
-        Some(amount) => format!(r#"<div class="pt-win"><b>WIN</b><span>+{amount}</span></div>"#),
-        None => String::new(),
-    };
-
-    let cls = match (active, win.is_some()) {
-        (true, _) => "pt-seat pt-active",
-        (false, true) => "pt-seat pt-winner",
-        (false, false) => "pt-seat",
-    };
-    let seat_name = escape(&seat.to_string());
-    format!(
-        r#"<div class="{cls}" data-seat="{seat_name}">
-<div class="pt-seat-name">{seat_name}{badges}</div>
-<div class="pt-seat-cards">{cards}{flag}</div>
-<div class="pt-stack"><i class="pt-chip-dot"></i>{stack_pill}</div>
-{bet_html}
-{win_html}
-</div>"#
-    )
+            .map(|line| LogLine {
+                class: if line.starts_with('—') {
+                    "pt-hlog-line marker"
+                } else {
+                    "pt-hlog-line"
+                },
+                text: line.clone(),
+            })
+            .collect(),
+        seats: Seat::ALL
+            .iter()
+            .map(|seat| SeatFragment::new(state, *seat))
+            .collect(),
+        pot: state.total_pot(),
+        board: state.board().iter().copied().map(CardView::new).collect(),
+        waiting_for: (!state.is_hand_over() && state.to_act() != Seat::Hero)
+            .then(|| state.to_act().to_string()),
+        action_block: hero_turn.then(|| ActionBlockView {
+            decision: format!(
+                "h{hand_no}-a{action_no}-{}",
+                state.street().to_string().to_lowercase()
+            ),
+            panel: ActionPanelFragment::new(state),
+        }),
+    }
+    .render()?)
 }
 
 /// The GGPoker-style percentage label for a pot-fraction sizing chip.
@@ -884,143 +998,6 @@ fn pot_percent_label(bucket: BetSize) -> &'static str {
         BetSize::Pot => "100%",
         _ => "",
     }
-}
-
-/// The GGPoker-style bottom dock overlaid on the felt: sizing chips (chip
-/// values only — no BB labels), a golden bet slider with fine-grain wheel
-/// control, and the Fold / Check-Call / Bet-Raise buttons.
-fn action_panel(state: &GameState) -> String {
-    let legal = state.legal_actions();
-    let level = state.blind_level();
-    let mut html = String::from(r#"<div id="action-panel" class="pt-action-dock">"#);
-    html.push_str(
-        r#"<div class="pt-dock-wait">Simulating — actions unlock when the depth badge turns green.</div>"#,
-    );
-
-    let betting = legal.can_bet;
-    let raising = legal.can_raise;
-    let sizing = betting || raising;
-    let kind = if betting {
-        "bet"
-    } else if raising {
-        "raise"
-    } else {
-        ""
-    };
-
-    let mut initial = 0u32;
-    if sizing {
-        let to_call = if betting { 0 } else { legal.call_amount };
-        let (min, max) = if betting {
-            (legal.min_bet, legal.max_bet)
-        } else {
-            (legal.min_raise_to, legal.max_raise_to)
-        };
-        let stack = state.stack(Seat::Hero);
-        let preflop = state.street() == Street::Preflop;
-        let facing_raise =
-            raising && to_call > 0 && (!preflop || state.current_bet() > level.big_blind);
-        let pot_fractions = facing_raise || !preflop;
-
-        html.push_str(r#"<div class="pt-bet-row">"#);
-        let buckets: &[BetSize] = if pot_fractions {
-            &[
-                BetSize::ThirdPot,
-                BetSize::HalfPot,
-                BetSize::ThreeQuarterPot,
-                BetSize::Pot,
-            ]
-        } else {
-            &[
-                BetSize::Min,
-                BetSize::ThreeBb,
-                BetSize::FourBb,
-                BetSize::Pot,
-            ]
-        };
-        let mut seen = Vec::new();
-        for bucket in buckets {
-            let raw = bucket.to_raise_to(state.total_pot(), to_call, level.big_blind, min, stack);
-            let amount = raw.clamp(min, max);
-            if amount >= stack || seen.contains(&amount) {
-                continue;
-            }
-            seen.push(amount);
-            let label = if pot_fractions {
-                pot_percent_label(*bucket).to_string()
-            } else {
-                amount.to_string()
-            };
-            html.push_str(&format!(
-                r#"<button type="button" class="pt-chip-size" data-bucket="{}" data-size="{amount}">{label}</button>"#,
-                escape(bucket.label())
-            ));
-        }
-        if legal.can_all_in {
-            html.push_str(&format!(
-                r#"<button type="button" class="pt-chip-size allin" data-bucket="ALLIN" data-size="{max}">All-in</button>"#
-            ));
-        }
-        html.push_str("</div>");
-
-        let default_bucket: BetSize = if facing_raise && preflop {
-            BetSize::TwoX
-        } else if preflop {
-            BetSize::ThreeBb
-        } else {
-            BetSize::HalfPot
-        };
-        initial = default_bucket
-            .to_raise_to(state.total_pot(), to_call, level.big_blind, min, stack)
-            .clamp(min, max);
-
-        html.push_str(&format!(
-            r#"<div class="pt-slider-row">
-<button type="button" class="pt-stepper" data-step="-1">−</button>
-<input id="custom-amount" class="bet-slider" type="range" min="{min}" max="{max}" step="5" value="{initial}">
-<button type="button" class="pt-stepper" data-step="1">+</button>
-<input id="custom-amount-num" class="bet-number" type="number" min="{min}" max="{max}" value="{initial}">
-</div>"#
-        ));
-    }
-
-    html.push_str(r#"<div class="pt-action-row">"#);
-    if legal.can_fold {
-        html.push_str(
-            r#"<button type="button" class="action-btn red" data-kind="fold">Fold</button>"#,
-        );
-    }
-    if legal.can_check {
-        html.push_str(
-            r#"<button type="button" class="action-btn red" data-kind="check">Check</button>"#,
-        );
-    }
-    if legal.can_call {
-        html.push_str(&format!(
-            r#"<button type="button" class="action-btn red" data-kind="call">Call<span class="amt">{}</span></button>"#,
-            legal.call_amount
-        ));
-    }
-    if !sizing && legal.can_all_in {
-        html.push_str(&format!(
-            r#"<button type="button" class="action-btn red" data-kind="all_in">All-in<span class="amt">{}</span></button>"#,
-            state.stack(Seat::Hero)
-        ));
-    }
-    if sizing {
-        let red_label = if betting {
-            format!(r#"Bet<span class="amt">{initial}</span>"#)
-        } else {
-            format!(r#"Raise to<span class="amt">{initial}</span>"#)
-        };
-        html.push_str(&format!(
-            r#"<button type="button" class="action-btn red" id="raise-btn" data-kind="{kind}">{red_label}</button>"#
-        ));
-    }
-    html.push_str("</div>");
-
-    html.push_str("</div>");
-    html
 }
 
 /// The tactical-breakdown fragment rendered into the coach-feedback panel
@@ -1646,7 +1623,7 @@ mod tests {
             .start_hand(&mut Deck::shuffled(&mut seeded_rng(37)))
             .unwrap();
         state.set_eliminated(Seat::Opponent1, true);
-        let fragment = table_fragment(&state, 1, 0, &[], &[]);
+        let fragment = table_fragment(&state, 1, 0, &[], &[]).unwrap();
         assert!(
             fragment.contains(r#"class="pt-flag bust">OUT</span>"#),
             "an eliminated seat is flagged OUT: {fragment}"
@@ -1667,7 +1644,7 @@ mod tests {
         state.apply_action(Action::Call).unwrap();
         assert_eq!(state.to_act(), Seat::Hero);
 
-        let fragment = table_fragment(&state, 3, 0, &["You check".to_string()], &[]);
+        let fragment = table_fragment(&state, 3, 0, &["You check".to_string()], &[]).unwrap();
         assert!(fragment.contains(r#"id="table-state""#));
         assert!(fragment.contains("Hand #3"));
         assert!(fragment.contains("Blinds 10/20 · Preflop"));
@@ -1716,7 +1693,7 @@ mod tests {
             .start_hand(&mut Deck::shuffled(&mut seeded_rng(32)))
             .unwrap();
         state.apply_action(Action::Fold).unwrap();
-        let fragment = table_fragment(&state, 1, 0, &[], &[]);
+        let fragment = table_fragment(&state, 1, 0, &[], &[]).unwrap();
         assert!(
             fragment.contains(r#"class="pt-seat pt-active" data-seat="Hero""#)
                 || fragment.contains(r#"class="pt-seat" data-seat="Opponent 2""#),
@@ -1739,7 +1716,7 @@ mod tests {
             .start_hand(&mut Deck::shuffled(&mut seeded_rng(33)))
             .unwrap();
         state.apply_action(Action::Call).unwrap();
-        let fragment = table_fragment(&state, 1, 0, &[], &[]);
+        let fragment = table_fragment(&state, 1, 0, &[], &[]).unwrap();
         assert!(
             !fragment.contains(">3BB<")
                 && !fragment.contains(">4BB<")
@@ -1770,7 +1747,7 @@ mod tests {
         state.apply_action(Action::Fold).unwrap();
         assert_eq!(state.to_act(), Seat::Hero);
 
-        let fragment = table_fragment(&state, 1, 0, &[], &[]);
+        let fragment = table_fragment(&state, 1, 0, &[], &[]).unwrap();
         assert!(
             fragment.contains(r#"data-kind="call">Call<span class="amt">80</span>"#),
             "{fragment}"
@@ -1800,7 +1777,7 @@ mod tests {
         state.apply_action(Action::Raise(300)).unwrap();
         assert_eq!(state.to_act(), Seat::Hero);
 
-        let fragment = table_fragment(&state, 1, 0, &[], &[]);
+        let fragment = table_fragment(&state, 1, 0, &[], &[]).unwrap();
         assert!(
             fragment.contains(r#"data-kind="all_in""#),
             "a hero who can only call for the whole stack still gets an all-in button: {fragment}"
@@ -1823,7 +1800,8 @@ mod tests {
             0,
             &[],
             &[Sound::Deal, Sound::Chip, Sound::Fold, Sound::Win],
-        );
+        )
+        .unwrap();
         assert!(
             fragment.contains(r#"data-sounds='["deal","chip","fold","win"]'"#),
             "{fragment}"
@@ -1837,13 +1815,13 @@ mod tests {
             .start_hand(&mut Deck::shuffled(&mut seeded_rng(35)))
             .unwrap();
         assert_ne!(state.to_act(), Seat::Hero);
-        let waiting = table_fragment(&state, 1, 0, &[], &[]);
+        let waiting = table_fragment(&state, 1, 0, &[], &[]).unwrap();
         assert!(waiting.contains("Waiting for"));
 
         state.apply_action(Action::Fold).unwrap();
         state.apply_action(Action::Fold).unwrap();
         assert!(state.is_hand_over());
-        let finished = table_fragment(&state, 1, 0, &[], &[]);
+        let finished = table_fragment(&state, 1, 0, &[], &[]).unwrap();
         assert!(
             finished.contains(r#"class="pt-win"><b>WIN</b><span>+30</span>"#),
             "the win is shown next to the winner, not in the centre: {finished}"
@@ -1871,7 +1849,7 @@ mod tests {
             .start_hand(&mut Deck::shuffled(&mut seeded_rng(35)))
             .unwrap();
         assert_ne!(state.to_act(), Seat::Hero);
-        let waiting = table_fragment(&state, 1, 0, &[], &[]);
+        let waiting = table_fragment(&state, 1, 0, &[], &[]).unwrap();
         assert!(
             !waiting.contains("data-decision"),
             "no decision token while an opponent acts: {waiting}"
@@ -1883,7 +1861,7 @@ mod tests {
             .unwrap();
         hero_state.apply_action(Action::Call).unwrap();
         assert_eq!(hero_state.to_act(), Seat::Hero);
-        let hero_turn = table_fragment(&hero_state, 1, 2, &[], &[]);
+        let hero_turn = table_fragment(&hero_state, 1, 2, &[], &[]).unwrap();
         assert!(
             hero_turn.contains(r#"data-decision="h1-a2-preflop""#),
             "the decision token names hand, action count, and street: {hero_turn}",
@@ -1892,7 +1870,7 @@ mod tests {
         state.apply_action(Action::Fold).unwrap();
         state.apply_action(Action::Fold).unwrap();
         assert!(state.is_hand_over());
-        let finished = table_fragment(&state, 1, 2, &[], &[]);
+        let finished = table_fragment(&state, 1, 2, &[], &[]).unwrap();
         assert!(
             !finished.contains("data-decision"),
             "no decision token once the hand is over: {finished}"
@@ -1902,16 +1880,18 @@ mod tests {
     #[test]
     fn cards_render_with_four_deck_colors() {
         for (rank, suit, class) in [
-            (Rank::Ace, Suit::Hearts, "pt-card red"),
-            (Rank::King, Suit::Diamonds, "pt-card blue"),
-            (Rank::Queen, Suit::Clubs, "pt-card green"),
-            (Rank::Jack, Suit::Spades, "pt-card"),
+            (Rank::Ace, Suit::Hearts, " red"),
+            (Rank::King, Suit::Diamonds, " blue"),
+            (Rank::Queen, Suit::Clubs, " green"),
+            (Rank::Jack, Suit::Spades, ""),
         ] {
-            let html = card_html(Card::new(rank, suit));
-            assert!(
-                html.starts_with(&format!(r#"<span class="{class}""#)),
-                "suit {suit:?} maps to `{class}`: {html}"
+            let card = CardView::new(Card::new(rank, suit));
+            assert_eq!(
+                card.suit_class, class,
+                "suit {suit:?} maps to `pt-card{class}`"
             );
+            // `assets/app.js` reads the Debug spelling off `data-suit`.
+            assert_eq!(card.suit_debug, format!("{suit:?}"));
         }
     }
 
@@ -1924,7 +1904,7 @@ mod tests {
         state.apply_action(Action::Call).unwrap();
         assert_eq!(state.to_act(), Seat::Hero);
 
-        let fragment = table_fragment(&state, 2, 0, &[], &[]);
+        let fragment = table_fragment(&state, 2, 0, &[], &[]).unwrap();
         let oval_marker = fragment.find(r#"<div class="pt-oval""#).unwrap();
         let dock = fragment.find(r#"id="action-panel""#).unwrap();
         assert!(
@@ -1945,7 +1925,7 @@ mod tests {
             .start_hand(&mut Deck::shuffled(&mut seeded_rng(39)))
             .unwrap();
         state.apply_action(Action::Call).unwrap();
-        let fragment = table_fragment(&state, 4, 0, &[], &[]);
+        let fragment = table_fragment(&state, 4, 0, &[], &[]).unwrap();
         assert!(
             !fragment.contains(r#"class="pt-avatar""#),
             "no round avatar icons for any seat: {fragment}"
@@ -1970,7 +1950,7 @@ mod tests {
             "You raise to 60".to_string(),
         ];
 
-        let fragment = table_fragment(&state, 1, 0, &log, &[]);
+        let fragment = table_fragment(&state, 1, 0, &log, &[]).unwrap();
         let panel = fragment.find(r#"class="pt-hlog""#).unwrap();
         let oval = fragment.find(r#"<div class="pt-oval""#).unwrap();
         assert!(
@@ -2001,7 +1981,7 @@ mod tests {
         state.start_hand(&mut deck).unwrap();
 
         // Blinds count as street bets: the button (hero) posted 10, the BB 20.
-        let fragment = table_fragment(&state, 5, 0, &[], &[]);
+        let fragment = table_fragment(&state, 5, 0, &[], &[]).unwrap();
         assert!(
             fragment.contains(r#"class="pt-bet">10</div>"#),
             "the small blind shows in front of the hero: {fragment}"
@@ -2013,7 +1993,7 @@ mod tests {
 
         // Opponent 2 raises to 60: their street bet badge reads 60.
         state.apply_action(Action::Raise(60)).unwrap();
-        let raised = table_fragment(&state, 5, 0, &[], &[]);
+        let raised = table_fragment(&state, 5, 0, &[], &[]).unwrap();
         assert!(
             raised.contains(r#"class="pt-bet">60</div>"#),
             "the raise amount shows in front of the raiser: {raised}"
@@ -2023,7 +2003,7 @@ mod tests {
         state.apply_action(Action::Call).unwrap();
         state.apply_action(Action::Call).unwrap();
         state.advance_street(&mut deck).unwrap();
-        let settled = table_fragment(&state, 5, 0, &[], &[]);
+        let settled = table_fragment(&state, 5, 0, &[], &[]).unwrap();
         assert!(
             !settled.contains("pt-bet"),
             "street bets are gone once the round closes: {settled}"
@@ -2382,7 +2362,7 @@ mod tests {
         state.showdown(&mut deck).unwrap();
         assert!(state.is_hand_over());
 
-        let fragment = table_fragment(&state, 1, 0, &[], &[]);
+        let fragment = table_fragment(&state, 1, 0, &[], &[]).unwrap();
         assert!(
             fragment.contains(r#"class="pt-win"><b>WIN</b>"#),
             "winners carry a WIN badge at their seat: {fragment}"
@@ -2447,7 +2427,7 @@ mod tests {
             }),
         };
         let state = GameState::from_snapshot(&snapshot).unwrap();
-        let fragment = table_fragment(&state, 1, 0, &[], &[]);
+        let fragment = table_fragment(&state, 1, 0, &[], &[]).unwrap();
         assert!(
             fragment.contains(r#"class="pt-win"><b>WIN</b><span>+430</span>"#),
             "the real winner carries the WIN badge: {fragment}"

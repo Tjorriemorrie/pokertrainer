@@ -1,0 +1,45 @@
+{#
+The raw table-state fragment swapped into the DOM on every state change: a
+GGPoker-style oval felt with fixed seat positions (folded and busted players stay
+seated), the board, the pot, the action dock in its own right-aligned block below
+the oval (never covering the hero's cards) with the live solver-depth badge
+docked top-left of the same block, and an always-visible action log docked to the
+left of the oval, exactly as tall as the table.
+
+Authored on single lines where the fragment it replaced concatenated with no
+separator: `assets/app.js` swaps this in with innerHTML, and the ws.rs tests
+parse it by string surgery on exact substrings.
+
+Two kinds of `|safe` appear here, both deliberate:
+  - `seats` and `panel` are nested *template structs*, already rendered with
+    their own escaping applied. `|safe` stops the composed markup being escaped
+    a second time. Never put `|safe` on raw data.
+  - `data-sounds` is serde_json output. Double-escaping it would still parse in
+    the browser, so the ws.rs assertion on its exact text is the only guard.
+#}{% import "partials/table.html" as t -%}
+<div id="table-state" class="table-shell" data-hand="{{ hand_no }}" data-sounds='{{ sounds_json|safe }}'><div class="pt-topbar"><span class="pt-pill">Hand #{{ hand_no }}</span><span>Blinds {{ small_blind }}/{{ big_blind }} · {{ street }}</span><span class="pt-lvl-meta">Spin &amp; Gold · 3-Max</span></div><div class="pt-table-body"><aside class="pt-hlog"><div class="pt-hlog-title">Action log</div><div id="pt-hlog-lines" class="pt-hlog-lines">
+{%- for line in log -%}
+<div class="{{ line.class }}">{{ line.text }}</div>
+{%- endfor -%}
+</div></aside><div class="pt-oval"><div class="pt-felt">
+{%- for seat in seats -%}
+{{ seat|safe }}
+{%- endfor -%}
+{%- if pot > 0 -%}
+<div class="pt-pot">{{ pot }}</div>
+{%- endif -%}
+{%- if !board.is_empty() -%}
+<div class="pt-board">
+{%- for c in board -%}
+{{ t::card(c) }}
+{%- endfor -%}
+</div>
+{%- endif -%}
+{%- if let Some(waiting) = waiting_for -%}
+<div class="pt-wait">Waiting for {{ waiting }}…</div>
+{%- endif -%}
+</div></div></div>
+{%- if let Some(block) = action_block -%}
+<div class="pt-action-block" data-decision="{{ block.decision }}"><div id="mcts-status" class="mcts-status status-bad">solver idle</div>{{ block.panel|safe }}</div>
+{%- endif -%}
+</div>

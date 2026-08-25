@@ -1,0 +1,11 @@
+{#
+Table pieces shared by the live fragment. Macros must stay on ONE line: a macro
+body's surrounding whitespace becomes output at every call site.
+
+`stack_pill` has to be a macro rather than a Rust-formatted string because it
+emits `&nbsp;` — as static template text that passes through untouched, whereas a
+Rust-returned string would need `|safe` and lose its escaping.
+#}
+{% macro card(c) %}<span class="pt-card{{ c.suit_class }}" data-suit="{{ c.suit_debug }}" data-code="{{ c.code }}"><b>{{ c.rank }}</b><i>{{ c.symbol }}</i></span>{% endmacro %}
+{% macro card_back() %}<span class="pt-card back"></span>{% endmacro %}
+{% macro stack_pill(stack, bb) %}{{ stack }}<span class="pt-bb"><span class="pt-bb-q">?</span><span class="pt-bb-real" data-bb="{{ bb }}">{{ bb }}&nbsp;BB</span></span>{% endmacro %}

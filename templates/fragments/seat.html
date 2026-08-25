@@ -1,0 +1,11 @@
+{#
+One seat on the felt. Folded and busted players stay seated, so every seat always
+renders. Output is multi-line, matching the fragment it replaced exactly.
+#}{% import "partials/table.html" as t -%}
+<div class="{{ cls }}" data-seat="{{ name }}">
+<div class="pt-seat-name">{{ name }}{% if is_button %}<span class="pt-badge btn">BTN</span>{% endif %}{% if is_small_blind %}<span class="pt-badge sb">SB</span>{% endif %}{% if is_big_blind %}<span class="pt-badge bb">BB</span>{% endif %}</div>
+<div class="pt-seat-cards">{% if backs %}{{ t::card_back() }}{{ t::card_back() }}{% else %}{% for c in cards %}{% if !loop.first %} {% endif %}{{ t::card(c) }}{% endfor %}{% endif %}{% if !flag_label.is_empty() %}<span class="pt-flag{{ flag_class }}">{{ flag_label }}</span>{% endif %}</div>
+<div class="pt-stack"><i class="pt-chip-dot"></i>{{ t::stack_pill(stack, stack_bb) }}</div>
+{% if bet > 0 %}<div class="pt-bet">{{ bet }}</div>{% endif %}
+{% if let Some(win) = win %}<div class="pt-win"><b>WIN</b><span>+{{ win }}</span></div>{% endif %}
+</div>
