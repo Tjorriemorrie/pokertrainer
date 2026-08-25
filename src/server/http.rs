@@ -284,7 +284,7 @@ async fn history(State(app): State<Arc<AppState>>) -> Response {
                 .into_response();
         }
     };
-    Html(page).into_response()
+    html(page)
 }
 
 /// Loads the data driving the history page: lifetime stats, the listing, and
@@ -313,7 +313,7 @@ async fn history_scan(State(app): State<Arc<AppState>>) -> Response {
         Err(error) => return scan_failure(error),
     };
     match hh::import_scan(&pool, &run).await {
-        Ok(outcome) => Html(views::history_scan_result_page(&outcome)).into_response(),
+        Ok(outcome) => html(views::history_scan_result_page(&outcome)),
         Err(error) => {
             tracing::warn!(%error, "hand history scan failed to import");
             scan_failure(error)
@@ -463,7 +463,7 @@ async fn history_tournament_detail(
         return unavailable("analytics store is unavailable");
     };
     match hh::load_tournament(&pool, &id).await {
-        Ok(Some(detail)) => Html(views::history_tournament_detail_page(&detail)).into_response(),
+        Ok(Some(detail)) => html(views::history_tournament_detail_page(&detail)),
         Ok(None) => (
             StatusCode::NOT_FOUND,
             axum::Json(json!({ "error": "tournament not found" })),

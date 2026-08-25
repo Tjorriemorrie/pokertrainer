@@ -1,0 +1,33 @@
+{#
+The scan-results page: what the scan found and stored, plus statistics over the
+newly imported hands only (already-imported hands add nothing).
+#}{% extends "layouts/subpage.html" %}
+{% import "partials/macros.html" as macros %}
+
+{% block title %}Poker Trainer — Scan results{% endblock %}
+
+{% block heading %}Scan results{% endblock %}
+
+{% block nav %}
+  <a href="/history" class="pt-link">Hand history</a>
+  <a href="/" class="pt-link">Dashboard</a>
+{%- endblock %}
+
+{% block content %}
+<section class="pt-detail">
+  <div class="pt-detail-head"><h2 class="pt-hh-title">Import summary</h2></div>
+  <div class="pt-stat-grid">
+    {% for stat in summary_cards %}{{ macros::stat_card(stat.label, stat.value) }}{% endfor %}
+  </div>
+  {% if failures.is_empty() %}<p class="pt-detail-meta">No problems were found.</p>{% else %}<div class="pt-hh-failures">Skipped files:<ul>{% for failure in failures %}<li>{{ failure }}</li>{% endfor %}</ul></div>{% endif %}
+</section>
+<section class="pt-detail">
+  <div class="pt-detail-head"><h2 class="pt-hh-title">Stats of the new hands</h2></div>
+  <p class="pt-detail-meta">These numbers cover only the hands imported by this scan — hands that were already
+  in the database are not counted.</p>
+  <div class="pt-stat-grid">
+    {% for stat in hand_cards %}{{ macros::stat_card(stat.label, stat.value) }}{% endfor %}
+  </div>
+  <a class="pt-link" href="/history">Back to hand history</a>
+</section>
+{% endblock %}

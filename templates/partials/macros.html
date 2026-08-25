@@ -1,0 +1,11 @@
+{#
+Components repeated across pages. Macros must stay on ONE line: a macro body's
+surrounding whitespace becomes output at every call site, so callers own the
+indentation.
+
+Remember `{% import "partials/macros.html" as macros %}` in each template that
+calls these — imports are NOT inherited through `{% extends %}`.
+#}
+{% macro stat_card(label, value) %}<div class="pt-stat-card"><span>{{ label }}</span><b>{{ value }}</b></div>{% endmacro %}
+{% macro result_badge(class, label) %}<span class="pt-result-badge{{ class }}">{{ label }}</span>{% endmacro %}
+{% macro empty(body) %}<div class="pt-empty">{{ body|safe }}</div>{% endmacro %}

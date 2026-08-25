@@ -1,0 +1,33 @@
+{#
+One imported tournament's detail page: the stored summary, its aggregate stats,
+and every hand newest first.
+#}{% extends "layouts/subpage.html" %}
+{% import "partials/macros.html" as macros %}
+
+{% block title %}Poker Trainer — {{ name }}{% endblock %}
+
+{% block heading %}{{ name }} — Tournament #{{ id }}{% endblock %}
+
+{% block nav %}
+  <a href="/history" class="pt-link">Hand history</a>
+  <a href="/" class="pt-link">Dashboard</a>
+{%- endblock %}
+
+{% block content %}
+<section class="pt-detail">
+  <div class="pt-detail-head">
+    {{ macros::result_badge(badge_class, badge_label) }}
+    <span class="pt-detail-meta">{{ started }} → {{ finished }}</span>
+    <span class="pt-detail-meta">Buy-in {{ buy_in }}</span>
+    <span class="pt-detail-meta">Prize {{ prize }}</span>
+    <span class="pt-detail-meta">Profit {{ profit }}</span>
+  </div>
+  <div class="pt-stat-grid">
+{% for stat in cards %}    {{ macros::stat_card(stat.label, stat.value) }}
+{% endfor %}  </div>
+  {% if hands.is_empty() %}<div class="pt-empty">No hands stored for this tournament yet — scan the hand-history zips again and they will appear here.</div>{% else %}<table class="pt-hh-table">
+<tr><th>Time</th><th>Blinds</th><th>Pos</th><th>Table</th><th>Cards</th><th>All-in</th><th>Showdown</th><th>Invested</th><th>Collected</th><th>Result</th><th>Board</th></tr>
+{% for hand in hands %}<tr><td class="pt-hh-date">{{ hand.played_at }}</td><td>{{ hand.sb }}/{{ hand.bb }}</td><td>{{ hand.position }}</td><td>{{ hand.table_size }}-max</td><td>{{ hand.cards }}</td><td>{{ hand.all_in }}</td><td>{{ hand.showdown }}</td><td>{{ hand.invested }}</td><td>{{ hand.collected }}</td><td class="{{ hand.net_class }}">{{ hand.net }}</td><td class="pt-hh-board">{{ hand.board }}</td></tr>
+{% endfor %}</table>{% endif %}
+</section>
+{% endblock %}

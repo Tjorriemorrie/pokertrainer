@@ -247,270 +247,193 @@ pub fn tournament_detail_page(detail: &TournamentDetail) -> Result<String> {
 /// analyzer entry and the current bot template, the lifetime
 /// profit/win-rate aggregates, and one row per imported tournament (newest
 /// first) linking to its hand-level detail page.
-pub fn history_page(
-    stats: &crate::hh::OverallStats,
-    tournaments: &[crate::hh::TournamentListing],
-    template: Option<&crate::opponent_analysis::DrillTemplate>,
-) -> String {
-    let tournament_win_ratio = pct(stats.tournaments_won, stats.tournaments);
-    let hand_win_ratio = pct(stats.hands_won, stats.hands);
-    let profit = stats.prize_cents - stats.buy_in_cents;
+/// One `pt-stat-card`. Values arrive pre-formatted so `std::fmt` (not the
+/// template) decides the rounding.
+struct Stat {
+    label: &'static str,
+    value: String,
+}
 
-    let mut html = String::from(
-        r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Poker Trainer — Hand history</title>
-<link rel="stylesheet" href="/assets/style.css?v=13">
-</head>
-<body class="pt-body">
-<header class="pt-topwrap">
-  <h1 class="pt-page-title">Hand history</h1>
-  <a href="/" class="pt-link">Dashboard</a>
-  <a href="/tournaments" class="pt-link">Tournament history</a>
-</header>
-<main class="pt-main">
-"#,
-    );
-
-    let stat_card = |label: &str, value: &str| -> String {
-        format!(
-            r#"<div class="pt-stat-card"><span>{}</span><b>{}</b></div>"#,
+impl Stat {
+    fn new(label: &'static str, value: impl std::fmt::Display) -> Self {
+        Self {
             label,
-            escape(value)
-        )
-    };
-
-    let all_cards = format!(
-        "{}{}{}{}{}{}{}{}{}{}",
-        stat_card("Tournaments", &stats.tournaments.to_string()),
-        stat_card(
-            "Tournaments won",
-            &format!(
-                "{} ({}%)",
-                stats.tournaments_won,
-                round1(tournament_win_ratio)
-            )
-        ),
-        stat_card("Hands", &stats.hands.to_string()),
-        stat_card(
-            "Hands won",
-            &format!("{} ({}%)", stats.hands_won, round1(hand_win_ratio))
-        ),
-        stat_card("Net profit", &crate::hh::money(profit)),
-        stat_card("Buy-ins", &crate::hh::money(stats.buy_in_cents)),
-        stat_card("Prizes", &crate::hh::money(stats.prize_cents)),
-        stat_card("All-ins", &stats.all_ins.to_string()),
-        stat_card("Showdowns", &stats.showdowns.to_string()),
-        stat_card("Net chips", &signed(stats.net_chips)),
-    );
-
-    html.push_str(&format!(
-        r#"<section class="pt-detail">
-  <div class="pt-detail-head">
-    <h2 class="pt-hh-title">GGPoker hand histories</h2>
-    <div class="pt-hh-actions">
-      <form method="post" action="/history/scan">
-        <button class="action-btn pt-confirm" type="submit">Scan for new hand histories</button>
-      </form>
-      <form method="post" action="/history/analyze-opponents">
-        <button class="action-btn pt-confirm" type="submit">Analyze imported opponents</button>
-      </form>
-    </div>
-  </div>
-  <p class="pt-detail-meta">Reads the PokerCraft zip exports in the history/ folder and imports the hands into
-  the database. Hands that were already imported are skipped, so re-scanning is always safe.</p>
-  <p class="pt-detail-meta">Analyze imported opponents grades every opponent decision in your last
-  1,000 imported hands against the solver and turns the average big-blind loss into the field skill
-  level both bots play with.</p>
-  {template_html}
-  <div class="pt-stat-grid">
-    {all_cards}
-  </div>
-</section>
-<section class="pt-detail">
-  <div class="pt-detail-head"><h2 class="pt-hh-title">Tournaments</h2></div>
-  {}
-</section>
-</main>
-</body>
-</html>"#,
-        tournaments_html(tournaments),
-        all_cards = all_cards,
-        template_html = template_html(template),
-    ));
-
-    html
-}
-
-/// The chip showing the stored bot template (and its clear action) when one
-/// exists.
-fn template_html(template: Option<&crate::opponent_analysis::DrillTemplate>) -> String {
-    let Some(template) = template else {
-        return String::new();
-    };
-    format!(
-        r#"<div class="pt-template-chip"><span>Bots trained on: {} — skill <b>{:.2}</b> ({:.2} BB lost/decision over {} decisions)</span>
-  <form method="post" action="/history/clear-template">
-    <button class="pt-link-btn" type="submit">Clear template</button>
-  </form>
-</div>"#,
-        escape(&template.label),
-        template.skill,
-        template.avg_ev_loss_bb,
-        template.decisions,
-    )
-}
-
-/// The tournament listing table: one row per imported tournament, newest
-/// first, with an empty state when nothing has been imported yet.
-fn tournaments_html(tournaments: &[crate::hh::TournamentListing]) -> String {
-    if tournaments.is_empty() {
-        return r#"<div class="pt-empty">No imported hand histories yet — press <b>Scan for new hand histories</b> to read the zips in your history/ folder.</div>"#
-            .to_string();
+            value: value.to_string(),
+        }
     }
-    let mut html = String::from(
-        r#"<table class="pt-hh-table">
-<tr><th>Date</th><th>Tournament</th><th>Buy-in</th><th>Place</th><th>Prize</th><th>Profit</th><th>Hands</th><th>Won</th><th>Win %</th><th>Net chips</th></tr>
-"#,
-    );
-    for row in tournaments {
+}
+
+/// The chip describing the stored bot template, shown only when one exists.
+struct TemplateChip {
+    label: String,
+    skill: String,
+    avg_ev_loss_bb: String,
+    decisions: i32,
+}
+
+/// One row of the imported-tournament listing.
+struct TournamentRow {
+    date: String,
+    id: String,
+    name: String,
+    game_type: Option<String>,
+    entrants: String,
+    buy_in: String,
+    place: String,
+    prize: String,
+    profit: String,
+    profit_class: &'static str,
+    hands: i64,
+    hands_won: i64,
+    win_pct: String,
+    net_class: &'static str,
+    net_chips: String,
+}
+
+impl TournamentRow {
+    fn new(row: &crate::hh::TournamentListing) -> Self {
         let tournament = &row.tournament;
-        let buy_in = tournament
-            .buy_in_cents
-            .map(|cents| crate::hh::money(i64::from(cents)))
-            .unwrap_or_else(|| "—".to_string());
-        let prize = tournament
-            .prize_cents
-            .map(|cents| crate::hh::money(i64::from(cents)))
-            .unwrap_or_else(|| "—".to_string());
         let profit = match (tournament.buy_in_cents, tournament.prize_cents) {
             (Some(buy), Some(prize)) => crate::hh::money(i64::from(prize) - i64::from(buy)),
             _ => "—".to_string(),
         };
-        let profit_class = if profit.starts_with('-') {
-            "pt-neg"
-        } else if profit.starts_with('$') {
-            "pt-pos"
-        } else {
-            ""
-        };
-        let place = tournament
-            .place
-            .map(ordinal)
-            .unwrap_or_else(|| "—".to_string());
-        let win_pct = pct(row.hands_won, row.hands);
-        let date = tournament
-            .finished
-            .clone()
-            .unwrap_or_else(|| tournament.started.clone());
-        html.push_str(&format!(
-            r#"<tr><td class="pt-hh-date">{}</td><td><a class="pt-link" href="/history/tournaments/{}">{}</a>{}<span class="pt-hh-sub">{}</span></td><td>{}</td><td>{}</td><td>{}</td><td class="{profit_class}">{}</td><td>{}</td><td>{}</td><td>{:.0}%</td><td class="{}">{}</td></tr>
-"#,
-            escape(&date),
-            escape(&tournament.id),
-            escape(&tournament.name),
-            tournament
-                .game_type
-                .as_deref()
-                .map_or_else(String::new, |game| format!(r#"<span class="pt-hh-sub">{} </span>"#, escape(game))),
-            escape(
-                &tournament
-                    .entrants
-                    .map_or_else(String::new, |n| format!("{n} players"))
-            ),
-            escape(&buy_in),
-            place,
-            escape(&prize),
+        Self {
+            date: tournament
+                .finished
+                .clone()
+                .unwrap_or_else(|| tournament.started.clone()),
+            id: tournament.id.clone(),
+            name: tournament.name.clone(),
+            game_type: tournament.game_type.clone(),
+            entrants: tournament
+                .entrants
+                .map_or_else(String::new, |n| format!("{n} players")),
+            buy_in: cents_or_dash(tournament.buy_in_cents),
+            place: tournament
+                .place
+                .map(ordinal)
+                .unwrap_or_else(|| "—".to_string()),
+            prize: cents_or_dash(tournament.prize_cents),
+            profit_class: if profit.starts_with('-') {
+                "pt-neg"
+            } else if profit.starts_with('$') {
+                "pt-pos"
+            } else {
+                ""
+            },
             profit,
-            row.hands,
-            row.hands_won,
-            win_pct,
-            if row.net_chips < 0 { "pt-neg" } else { "pt-pos" },
-            signed(row.net_chips),
-        ));
+            hands: row.hands,
+            hands_won: row.hands_won,
+            win_pct: format!("{:.0}", pct(row.hands_won, row.hands)),
+            net_class: if row.net_chips < 0 {
+                "pt-neg"
+            } else {
+                "pt-pos"
+            },
+            net_chips: signed(row.net_chips),
+        }
     }
-    html.push_str("</table>");
-    html
+}
+
+/// Formats an optional cent amount as money, or an em dash when absent.
+fn cents_or_dash(cents: Option<i32>) -> String {
+    cents
+        .map(|cents| crate::hh::money(i64::from(cents)))
+        .unwrap_or_else(|| "—".to_string())
+}
+
+/// The GGPoker hand-history page: the scan trigger, the opponent-skill
+/// analyzer entry and the current bot template, the lifetime
+/// profit/win-rate aggregates, and one row per imported tournament (newest
+/// first) linking to its hand-level detail page.
+#[derive(Template)]
+#[template(path = "pages/history.html")]
+struct HistoryTemplate {
+    cards: Vec<Stat>,
+    chip: Option<TemplateChip>,
+    rows: Vec<TournamentRow>,
+}
+
+pub fn history_page(
+    stats: &crate::hh::OverallStats,
+    tournaments: &[crate::hh::TournamentListing],
+    template: Option<&crate::opponent_analysis::DrillTemplate>,
+) -> Result<String> {
+    let profit = stats.prize_cents - stats.buy_in_cents;
+    Ok(HistoryTemplate {
+        cards: vec![
+            Stat::new("Tournaments", stats.tournaments),
+            Stat::new(
+                "Tournaments won",
+                format!(
+                    "{} ({}%)",
+                    stats.tournaments_won,
+                    round1(pct(stats.tournaments_won, stats.tournaments))
+                ),
+            ),
+            Stat::new("Hands", stats.hands),
+            Stat::new(
+                "Hands won",
+                format!(
+                    "{} ({}%)",
+                    stats.hands_won,
+                    round1(pct(stats.hands_won, stats.hands))
+                ),
+            ),
+            Stat::new("Net profit", crate::hh::money(profit)),
+            Stat::new("Buy-ins", crate::hh::money(stats.buy_in_cents)),
+            Stat::new("Prizes", crate::hh::money(stats.prize_cents)),
+            Stat::new("All-ins", stats.all_ins),
+            Stat::new("Showdowns", stats.showdowns),
+            Stat::new("Net chips", signed(stats.net_chips)),
+        ],
+        chip: template.map(|template| TemplateChip {
+            label: template.label.clone(),
+            skill: format!("{:.2}", template.skill),
+            avg_ev_loss_bb: format!("{:.2}", template.avg_ev_loss_bb),
+            decisions: template.decisions,
+        }),
+        rows: tournaments.iter().map(TournamentRow::new).collect(),
+    }
+    .render()?)
 }
 
 /// The scan-results page: what the scan found and stored, plus statistics
 /// over the newly imported hands only (already-imported hands add nothing).
-pub fn history_scan_result_page(outcome: &crate::hh::ImportOutcome) -> String {
-    let stats = &outcome.new_stats;
-    let card = |label: &str, value: &str| -> String {
-        format!(
-            r#"<div class="pt-stat-card"><span>{}</span><b>{}</b></div>"#,
-            label,
-            escape(value)
-        )
-    };
-    let failures = if outcome.failures.is_empty() {
-        r#"<p class="pt-detail-meta">No problems were found.</p>"#.to_string()
-    } else {
-        let mut list = String::from(r#"<div class="pt-hh-failures">Skipped files:<ul>"#);
-        for failure in &outcome.failures {
-            list.push_str(&format!("<li>{}</li>", escape(failure)));
-        }
-        list.push_str("</ul></div>");
-        list
-    };
+#[derive(Template)]
+#[template(path = "pages/history_scan_result.html")]
+struct HistoryScanResultTemplate {
+    summary_cards: Vec<Stat>,
+    hand_cards: Vec<Stat>,
+    failures: Vec<String>,
+}
 
-    format!(
-        r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Poker Trainer — Scan results</title>
-<link rel="stylesheet" href="/assets/style.css?v=13">
-</head>
-<body class="pt-body">
-<header class="pt-topwrap">
-  <h1 class="pt-page-title">Scan results</h1>
-  <a href="/history" class="pt-link">Hand history</a>
-  <a href="/" class="pt-link">Dashboard</a>
-</header>
-<main class="pt-main">
-<section class="pt-detail">
-  <div class="pt-detail-head"><h2 class="pt-hh-title">Import summary</h2></div>
-  <div class="pt-stat-grid">
-    {zips}{files}{parsed}{new}{skipped}{tournaments_new}
-  </div>
-  {failures}
-</section>
-<section class="pt-detail">
-  <div class="pt-detail-head"><h2 class="pt-hh-title">Stats of the new hands</h2></div>
-  <p class="pt-detail-meta">These numbers cover only the hands imported by this scan — hands that were already
-  in the database are not counted.</p>
-  <div class="pt-stat-grid">
-    {hands}{won}{lost}{win_ratio}{all_ins}{showdowns}{invested}{collected}{net}{touched}
-  </div>
-  <a class="pt-link" href="/history">Back to hand history</a>
-</section>
-</main>
-</body>
-</html>"#,
-        zips = card("ZIPs scanned", &outcome.zips.to_string()),
-        files = card("Files read", &outcome.files.to_string()),
-        parsed = card("Hands parsed", &outcome.hands_parsed.to_string()),
-        new = card("New hands", &outcome.hands_new.to_string()),
-        skipped = card("Already imported", &outcome.hands_skipped.to_string()),
-        tournaments_new = card("New tournaments", &outcome.tournaments_new.to_string()),
-        failures = failures,
-        hands = card("Hands", &stats.hands.to_string()),
-        won = card("Won", &stats.won.to_string()),
-        lost = card("Lost", &stats.lost.to_string()),
-        win_ratio = card("Win ratio", &format!("{}%", round1(stats.win_ratio))),
-        all_ins = card("All-ins", &stats.all_ins.to_string()),
-        showdowns = card("Showdowns", &stats.showdowns.to_string()),
-        invested = card("Chips invested", &stats.invested.to_string()),
-        collected = card("Chips collected", &stats.collected.to_string()),
-        net = card("Chips won/lost", &signed(stats.net_chips)),
-        touched = card("Tournaments", &stats.tournaments.to_string()),
-    )
+pub fn history_scan_result_page(outcome: &crate::hh::ImportOutcome) -> Result<String> {
+    let stats = &outcome.new_stats;
+    Ok(HistoryScanResultTemplate {
+        summary_cards: vec![
+            Stat::new("ZIPs scanned", outcome.zips),
+            Stat::new("Files read", outcome.files),
+            Stat::new("Hands parsed", outcome.hands_parsed),
+            Stat::new("New hands", outcome.hands_new),
+            Stat::new("Already imported", outcome.hands_skipped),
+            Stat::new("New tournaments", outcome.tournaments_new),
+        ],
+        hand_cards: vec![
+            Stat::new("Hands", stats.hands),
+            Stat::new("Won", stats.won),
+            Stat::new("Lost", stats.lost),
+            Stat::new("Win ratio", format!("{}%", round1(stats.win_ratio))),
+            Stat::new("All-ins", stats.all_ins),
+            Stat::new("Showdowns", stats.showdowns),
+            Stat::new("Chips invested", stats.invested),
+            Stat::new("Chips collected", stats.collected),
+            Stat::new("Chips won/lost", signed(stats.net_chips)),
+            Stat::new("Tournaments", stats.tournaments),
+        ],
+        failures: outcome.failures.clone(),
+    }
+    .render()?)
 }
 
 /// The status fragment swapped into the analysis page: idle nudge, live
@@ -599,121 +522,97 @@ Grading one decision per possible opponent action is solver work, so a full pass
 
 /// One imported tournament's detail page: the stored summary, its aggregate
 /// stats, and every hand newest first.
-pub fn history_tournament_detail_page(detail: &crate::hh::TournamentDetail) -> String {
+/// One row of a tournament's hand table, pre-formatted.
+struct HandRowView {
+    played_at: String,
+    sb: i32,
+    bb: i32,
+    position: String,
+    table_size: i32,
+    cards: String,
+    all_in: String,
+    showdown: String,
+    invested: i32,
+    collected: i32,
+    net_class: &'static str,
+    net: String,
+    board: String,
+}
+
+#[derive(Template)]
+#[template(path = "pages/history_tournament_detail.html")]
+struct HistoryTournamentDetailTemplate {
+    id: String,
+    name: String,
+    /// This page derives the badge from the finishing place: 1st is a WIN, any
+    /// other place a LOSS, and an unknown place an em dash.
+    badge_class: &'static str,
+    badge_label: &'static str,
+    started: String,
+    finished: String,
+    buy_in: String,
+    prize: String,
+    profit: String,
+    cards: Vec<Stat>,
+    hands: Vec<HandRowView>,
+}
+
+pub fn history_tournament_detail_page(detail: &crate::hh::TournamentDetail) -> Result<String> {
     let listing = &detail.listing;
     let tournament = &listing.tournament;
-    let buy_in = tournament
-        .buy_in_cents
-        .map(|cents| crate::hh::money(i64::from(cents)))
-        .unwrap_or_else(|| "—".to_string());
-    let prize = tournament
-        .prize_cents
-        .map(|cents| crate::hh::money(i64::from(cents)))
-        .unwrap_or_else(|| "—".to_string());
-    let profit = match (tournament.buy_in_cents, tournament.prize_cents) {
-        (Some(buy), Some(prize)) => crate::hh::money(i64::from(prize) - i64::from(buy)),
-        _ => "—".to_string(),
+    let (badge_class, badge_label) = match tournament.place {
+        Some(1) => (" win", "WIN"),
+        Some(_) => (" loss", "LOSS"),
+        None => ("", "—"),
     };
-
-    let html = format!(
-        r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Poker Trainer — {}</title>
-<link rel="stylesheet" href="/assets/style.css?v=13">
-</head>
-<body class="pt-body">
-<header class="pt-topwrap">
-  <h1 class="pt-page-title">{} — Tournament #{}</h1>
-  <a href="/history" class="pt-link">Hand history</a>
-  <a href="/" class="pt-link">Dashboard</a>
-</header>
-<main class="pt-main">
-<section class="pt-detail">
-  <div class="pt-detail-head">
-    {}
-    <span class="pt-detail-meta">{} → {}</span>
-    <span class="pt-detail-meta">Buy-in {}</span>
-    <span class="pt-detail-meta">Prize {}</span>
-    <span class="pt-detail-meta">Profit {}</span>
-  </div>
-  <div class="pt-stat-grid">
-    <div class="pt-stat-card"><span>Hands</span><b>{}</b></div>
-    <div class="pt-stat-card"><span>Hands won</span><b>{}</b></div>
-    <div class="pt-stat-card"><span>Win rate</span><b>{:.0}%</b></div>
-    <div class="pt-stat-card"><span>All-ins</span><b>{}</b></div>
-    <div class="pt-stat-card"><span>Showdowns</span><b>{}</b></div>
-    <div class="pt-stat-card"><span>Net chips</span><b>{}</b></div>
-  </div>
-  {hands_table}
-</section>
-</main>
-</body>
-</html>"#,
-        escape(&tournament.name),
-        escape(&tournament.name),
-        escape(&tournament.id),
-        result_badge(detail),
-        escape(&tournament.started),
-        escape(tournament.finished.as_deref().unwrap_or("?")),
-        escape(&buy_in),
-        escape(&prize),
-        escape(&profit),
-        listing.hands,
-        listing.hands_won,
-        pct(listing.hands_won, listing.hands),
-        listing.all_ins,
-        listing.showdowns,
-        signed(listing.net_chips),
-        hands_table = hands_table(&detail.hands),
-    );
-    html
-}
-
-/// WIN/LOSS badge for a tournament detail: WIN when the hero finished 1st.
-fn result_badge(detail: &crate::hh::TournamentDetail) -> String {
-    match detail.listing.tournament.place {
-        Some(1) => r#"<span class="pt-result-badge win">WIN</span>"#.to_string(),
-        Some(_) => r#"<span class="pt-result-badge loss">LOSS</span>"#.to_string(),
-        None => r#"<span class="pt-result-badge">—</span>"#.to_string(),
+    Ok(HistoryTournamentDetailTemplate {
+        id: tournament.id.clone(),
+        name: tournament.name.clone(),
+        badge_class,
+        badge_label,
+        started: tournament.started.clone(),
+        finished: tournament
+            .finished
+            .clone()
+            .unwrap_or_else(|| "?".to_string()),
+        buy_in: cents_or_dash(tournament.buy_in_cents),
+        prize: cents_or_dash(tournament.prize_cents),
+        profit: match (tournament.buy_in_cents, tournament.prize_cents) {
+            (Some(buy), Some(prize)) => crate::hh::money(i64::from(prize) - i64::from(buy)),
+            _ => "—".to_string(),
+        },
+        cards: vec![
+            Stat::new("Hands", listing.hands),
+            Stat::new("Hands won", listing.hands_won),
+            Stat::new(
+                "Win rate",
+                format!("{:.0}%", pct(listing.hands_won, listing.hands)),
+            ),
+            Stat::new("All-ins", listing.all_ins),
+            Stat::new("Showdowns", listing.showdowns),
+            Stat::new("Net chips", signed(listing.net_chips)),
+        ],
+        hands: detail
+            .hands
+            .iter()
+            .map(|hand| HandRowView {
+                played_at: hand.played_at.clone(),
+                sb: hand.sb,
+                bb: hand.bb,
+                position: hand.position.clone(),
+                table_size: hand.table_size,
+                cards: hand.hero_cards.clone().unwrap_or_else(|| "—".to_string()),
+                all_in: yes_no(hand.all_in),
+                showdown: yes_no(hand.showdown),
+                invested: hand.invested,
+                collected: hand.collected,
+                net_class: if hand.net < 0 { "pt-neg" } else { "pt-pos" },
+                net: signed(i64::from(hand.net)),
+                board: hand.board.clone().unwrap_or_default(),
+            })
+            .collect(),
     }
-}
-
-/// The hand-level table of one tournament: every hand newest first with its
-/// chips result.
-fn hands_table(hands: &[crate::hh::HandRow]) -> String {
-    if hands.is_empty() {
-        return r#"<div class="pt-empty">No hands stored for this tournament yet — scan the hand-history zips again and they will appear here.</div>"#
-            .to_string();
-    }
-    let mut html = String::from(
-        r#"<table class="pt-hh-table">
-<tr><th>Time</th><th>Blinds</th><th>Pos</th><th>Table</th><th>Cards</th><th>All-in</th><th>Showdown</th><th>Invested</th><th>Collected</th><th>Result</th><th>Board</th></tr>
-"#,
-    );
-    for hand in hands {
-        let net_class = if hand.net < 0 { "pt-neg" } else { "pt-pos" };
-        html.push_str(&format!(
-            r#"<tr><td class="pt-hh-date">{}</td><td>{}/{}</td><td>{}</td><td>{}-max</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td class="{net_class}">{}</td><td class="pt-hh-board">{}</td></tr>
-"#,
-            escape(&hand.played_at),
-            hand.sb,
-            hand.bb,
-            escape(&hand.position),
-            hand.table_size,
-            escape(&hand.hero_cards.clone().unwrap_or_else(|| "—".to_string())),
-            yes_no(hand.all_in),
-            yes_no(hand.showdown),
-            hand.invested,
-            hand.collected,
-            signed(i64::from(hand.net)),
-            escape(&hand.board.clone().unwrap_or_default()),
-        ));
-    }
-    html.push_str("</table>");
-    html
+    .render()?)
 }
 
 fn yes_no(value: bool) -> String {
@@ -2643,7 +2542,7 @@ mod tests {
 
     #[test]
     fn history_page_renders_the_scan_button_stats_and_listing() {
-        let page = history_page(&hh_stats(), &hh_listing(), None);
+        let page = history_page(&hh_stats(), &hh_listing(), None).unwrap();
         assert!(page.contains("<title>Poker Trainer — Hand history</title>"));
         assert!(
             page.contains(r#"action="/history/scan""#)
@@ -2665,7 +2564,7 @@ mod tests {
 
     #[test]
     fn history_page_has_an_empty_state_without_tournaments() {
-        let page = history_page(&hh_stats(), &[], None);
+        let page = history_page(&hh_stats(), &[], None).unwrap();
         assert!(page.contains("No imported hand histories yet"));
         assert!(!page.contains("pt-hh-table"));
     }
@@ -2676,9 +2575,9 @@ mod tests {
         stats.net_chips = -15;
         let mut listing = hh_listing();
         listing[0].tournament.name = r#"<script>"evil"</script>"#.to_string();
-        let page = history_page(&stats, &listing, None);
+        let page = history_page(&stats, &listing, None).unwrap();
         assert!(!page.contains(r#"<script>"evil""#));
-        assert!(page.contains("&lt;script&gt;"));
+        assert!(page.contains("&#60;script&#62;"));
     }
 
     fn hh_outcome() -> crate::hh::ImportOutcome {
@@ -2708,7 +2607,7 @@ mod tests {
 
     #[test]
     fn scan_result_page_counts_only_the_new_hands() {
-        let page = history_scan_result_page(&hh_outcome());
+        let page = history_scan_result_page(&hh_outcome()).unwrap();
         assert!(page.contains("<title>Poker Trainer — Scan results</title>"));
         assert!(page.contains("<span>New hands</span><b>12</b>"));
         assert!(page.contains("<span>Already imported</span><b>8</b>"));
@@ -2727,12 +2626,12 @@ mod tests {
     fn scan_result_page_shows_a_clean_run_and_escapes_failures() {
         let mut outcome = hh_outcome();
         outcome.failures = vec![r#"<script>"bad"</script>"#.to_string()];
-        let page = history_scan_result_page(&outcome);
+        let page = history_scan_result_page(&outcome).unwrap();
         assert!(!page.contains(r#"<script>"bad""#));
 
         let mut clean = hh_outcome();
         clean.failures = Vec::new();
-        let page = history_scan_result_page(&clean);
+        let page = history_scan_result_page(&clean).unwrap();
         assert!(page.contains("No problems were found."));
         assert!(page.contains("0"));
     }
@@ -2781,8 +2680,8 @@ mod tests {
 
     #[test]
     fn history_tournament_detail_page_renders_stats_and_hands() {
-        let page = history_tournament_detail_page(&hh_detail());
-        assert!(page.contains("<title>Poker Trainer — Spin&amp;Gold #7</title>"));
+        let page = history_tournament_detail_page(&hh_detail()).unwrap();
+        assert!(page.contains("<title>Poker Trainer — Spin&#38;Gold #7</title>"));
         assert!(page.contains(r#"class="pt-result-badge win">WIN</span>"#));
         assert!(page.contains("Buy-in $0.25"));
         assert!(page.contains("Prize $0.75"));
@@ -2804,7 +2703,7 @@ mod tests {
         detail.listing.tournament.prize_cents = None;
         detail.listing.tournament.place = None;
         detail.hands.clear();
-        let page = history_tournament_detail_page(&detail);
+        let page = history_tournament_detail_page(&detail).unwrap();
         assert!(page.contains(r#"class="pt-result-badge">—</span>"#));
         assert!(page.contains("Buy-in —"));
         assert!(page.contains("No hands stored for this tournament yet"));
@@ -2858,7 +2757,7 @@ mod tests {
 
     #[test]
     fn history_page_offers_the_analyzer_and_the_current_template() {
-        let page = history_page(&hh_stats(), &hh_listing(), None);
+        let page = history_page(&hh_stats(), &hh_listing(), None).unwrap();
         assert!(
             page.contains(r#"action="/history/analyze-opponents""#)
                 && page.contains("Analyze imported opponents"),
@@ -2870,7 +2769,7 @@ mod tests {
         );
 
         let template = template_fixture();
-        let page = history_page(&hh_stats(), &[], Some(&template));
+        let page = history_page(&hh_stats(), &[], Some(&template)).unwrap();
         assert!(page.contains("Bots trained on: Imported field (132 decisions)"));
         assert!(page.contains("skill <b>0.62</b>"), "{page}");
         assert!(page.contains(r#"action="/history/clear-template""#));
