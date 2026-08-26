@@ -838,6 +838,9 @@ struct ActionPanelFragment {
     sizing: Option<SizingView>,
     can_fold: bool,
     can_check: bool,
+    /// A "check now, auto-fold if raised before it's my turn again" button —
+    /// offered only postflop, when checking is legal.
+    can_check_fold: bool,
     can_call: bool,
     call_amount: u32,
     /// The hero's stack, when an all-in button belongs in the action row rather
@@ -903,7 +906,7 @@ impl ActionPanelFragment {
             } else if preflop {
                 BetSize::ThreeBb
             } else {
-                BetSize::HalfPot
+                BetSize::Min
             };
             SizingView {
                 chips,
@@ -921,6 +924,7 @@ impl ActionPanelFragment {
         Self {
             can_fold: legal.can_fold,
             can_check: legal.can_check,
+            can_check_fold: legal.can_check && state.street() != Street::Preflop,
             can_call: legal.can_call,
             call_amount: legal.call_amount,
             bare_all_in: (sizing.is_none() && legal.can_all_in).then(|| state.stack(Seat::Hero)),

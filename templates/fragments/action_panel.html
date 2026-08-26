@@ -24,7 +24,10 @@ separator. Which chips survive, and the slider bounds, are decided in Rust
 {%- endif -%}
 <div class="pt-action-row">
 {%- if can_fold -%}
-<button type="button" class="action-btn red" data-kind="fold">{% if can_check %}Check / Fold{% else %}Fold{% endif %}</button>
+<button type="button" class="action-btn red" data-kind="fold">Fold</button>
+{%- endif -%}
+{%- if can_check_fold -%}
+<button type="button" class="action-btn red" data-kind="check_fold">Check / Fold</button>
 {%- endif -%}
 {%- if can_check -%}
 <button type="button" class="action-btn red" data-kind="check">Check</button>

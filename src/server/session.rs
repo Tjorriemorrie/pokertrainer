@@ -112,6 +112,14 @@ pub struct TableSession {
     rng: SeededRng,
     blunder_tracker: Tracker,
     pending: Option<PendingInterception>,
+    /// Set just before submitting a check-fold's `Check`, consumed exactly
+    /// once (in [`Self::apply_submission`]) when that action is actually
+    /// applied to the table.
+    check_fold_requested: bool,
+    /// The street on which a check-fold Check was applied — armed until the
+    /// hero's next decision on that street, when [`Self::pump`] auto-folds if
+    /// an opponent has raised, or expires unused if the street changes first.
+    pending_check_fold: Option<Street>,
     records: Vec<PendingDecision>,
     /// Per-hand results (winner, hero all-in, hero bust) queued for
     /// persistence; the tournament detail page aggregates them.
@@ -158,6 +166,8 @@ impl TableSession {
             rng,
             blunder_tracker: Tracker::new(blunder),
             pending: None,
+            check_fold_requested: false,
+            pending_check_fold: None,
             records: Vec::new(),
             hand_results: Vec::new(),
             hero_all_in_this_hand: false,
@@ -192,6 +202,8 @@ impl TableSession {
             rng: crate::rng::seeded_rng(seed),
             blunder_tracker: Tracker::new(blunder),
             pending: None,
+            check_fold_requested: false,
+            pending_check_fold: None,
             records: Vec::new(),
             hand_results: Vec::new(),
             hero_all_in_this_hand: false,
@@ -239,6 +251,8 @@ impl TableSession {
             rng: crate::rng::seeded_rng(seed),
             blunder_tracker: Tracker::new(blunder),
             pending: None,
+            check_fold_requested: false,
+            pending_check_fold: None,
             records: Vec::new(),
             hand_results: Vec::new(),
             hero_all_in_this_hand: false,
@@ -521,6 +535,8 @@ impl TableSession {
             "result pause over — dealing the next hand"
         );
         self.deal_next_hand()?;
+        // pending_check_fold is always None right after a fresh deal, so
+        // pump()'s events can never be non-empty here.
         self.pump()?;
         Ok(())
     }
@@ -529,15 +545,24 @@ impl TableSession {
     /// reached. When the hand ends the result is logged and the win sound
     /// queued, but the next deal is deferred to [`Self::advance_after_result`]
     /// so the winner stays on screen for a beat. Returns whether anything
-    /// happened.
-    pub fn pump(&mut self) -> Result<bool> {
+    /// happened, plus any table events produced by an auto-resolved
+    /// check-fold (a pending check-fold folding once an opponent raises) —
+    /// most callers have no such events and can ignore the second element.
+    pub fn pump(&mut self) -> Result<(bool, Vec<TableEvent>)> {
         let mut acted = false;
         if self.state.is_hand_over() {
-            return Ok(acted);
+            return Ok((acted, Vec::new()));
         }
         loop {
             if self.state.to_act() == Seat::Hero {
-                return Ok(acted);
+                if self.pending_check_fold == Some(self.state.street())
+                    && self.state.legal_actions().call_amount > 0
+                {
+                    self.pending_check_fold = None;
+                    let events = self.submit(Action::Fold)?;
+                    return Ok((true, events));
+                }
+                return Ok((acted, Vec::new()));
             }
             let actor = self.state.to_act();
             let legal = self.state.legal_actions();
@@ -569,7 +594,7 @@ impl TableSession {
             acted = true;
             if self.state.is_hand_over() {
                 self.log_hand_result();
-                return Ok(acted);
+                return Ok((acted, Vec::new()));
             }
         }
     }
@@ -629,6 +654,34 @@ impl TableSession {
                 )?,
             };
         self.finish_submission(action, analyzed)
+    }
+
+    /// Checks now, arming an auto-fold for the hero's next decision on this
+    /// street if an opponent raises before action returns. The check itself
+    /// is graded exactly like [`Self::submit`] (including blunder
+    /// interception); the later auto-fold, if triggered, is graded the same
+    /// way in turn — see [`Self::pump`].
+    pub fn submit_check_fold(&mut self) -> Result<Vec<TableEvent>> {
+        self.check_fold_requested = true;
+        let result = self.submit(Action::Check);
+        if result.is_err() {
+            self.check_fold_requested = false;
+        }
+        result
+    }
+
+    /// Like [`Self::submit_check_fold`], but scored against the background
+    /// solver's snapshot — see [`Self::submit_with_snapshot`].
+    pub fn submit_check_fold_with_snapshot(
+        &mut self,
+        snapshot: &crate::mcts::SolveResult,
+    ) -> Result<Vec<TableEvent>> {
+        self.check_fold_requested = true;
+        let result = self.submit_with_snapshot(Action::Check, snapshot);
+        if result.is_err() {
+            self.check_fold_requested = false;
+        }
+        result
     }
 
     /// The interception-and-apply pipeline shared by both submission paths.
@@ -730,7 +783,12 @@ impl TableSession {
         if let Some(sound) = Self::sound_for(action) {
             self.push_sound(sound);
         }
+        let street = self.state.street();
+        let check_fold_wanted = std::mem::take(&mut self.check_fold_requested);
         let outcome = self.settle_action(action)?;
+        if action == Action::Check && check_fold_wanted {
+            self.pending_check_fold = Some(street);
+        }
         tracing::info!(
             hand_no = self.hand_no,
             action_index,
@@ -746,15 +804,15 @@ impl TableSession {
         if self.state.is_hand_over() {
             self.log_hand_result();
         }
-        self.pump()?;
+        let (_, extra_events) = self.pump()?;
 
-        Ok(vec![
-            TableEvent::ChartTick {
-                action_index,
-                ev_loss,
-            },
-            TableEvent::State,
-        ])
+        let mut events = vec![TableEvent::ChartTick {
+            action_index,
+            ev_loss,
+        }];
+        events.extend(extra_events);
+        events.push(TableEvent::State);
+        Ok(events)
     }
 
     /// Applies one action and settles the street/hand boundaries it creates,
@@ -1237,7 +1295,7 @@ mod tests {
             never_intercepts(),
             None,
         );
-        assert!(!session.pump().unwrap());
+        assert!(!session.pump().unwrap().0);
         assert_eq!(session.state().to_act(), Seat::Hero);
         assert_eq!(session.hand_no(), 3);
     }
@@ -2381,5 +2439,134 @@ mod tests {
             ),
             Err(Error::Game(_))
         ));
+    }
+
+    /// Deals a hand with the button on Opponent 2 (so Hero, the small blind,
+    /// acts first postflop) and plays preflop to a flop where Hero faces no
+    /// action yet this street.
+    fn hero_checked_to_on_flop(seed: u64) -> GameState {
+        let mut state = GameState::new(Seat::Opponent2, level());
+        state
+            .start_hand(&mut Deck::shuffled(&mut seeded_rng(seed)))
+            .unwrap();
+        state.apply_action(Action::Call).unwrap();
+        state.apply_action(Action::Call).unwrap();
+        state.apply_action(Action::Check).unwrap();
+        state
+            .advance_street(&mut Deck::shuffled(&mut seeded_rng(seed + 1)))
+            .unwrap();
+        assert_eq!(state.to_act(), Seat::Hero);
+        assert!(state.legal_actions().can_check);
+        state
+    }
+
+    /// Seed 0: Hero checks the flop first to act, Opponent 1 bets, Opponent 2
+    /// folds, and action returns to Hero facing the bet.
+    #[test]
+    fn check_fold_auto_folds_when_an_opponent_raises() {
+        let state = hero_checked_to_on_flop(0);
+        let mut session = TableSession::resume(
+            state,
+            Deck::default(),
+            1,
+            0,
+            probe_config(),
+            survival(),
+            never_intercepts(),
+            None,
+        );
+
+        let events = session.submit_check_fold().unwrap();
+
+        assert_eq!(
+            session.log(),
+            [
+                "You check",
+                "Opponent 1 bet 20",
+                "Opponent 2 fold",
+                "You fold",
+                "Opponent 1 wins 80 — everyone else folded",
+            ],
+            "the pre-armed fold fires the moment action returns to the hero"
+        );
+        assert!(session.state().is_hand_over());
+        assert_eq!(
+            events.iter().filter(|e| matches!(e, TableEvent::ChartTick { .. })).count(),
+            2,
+            "the check and the auto-fold are each graded and charted separately: {events:?}"
+        );
+        assert_eq!(events.last(), Some(&TableEvent::State));
+
+        let records = session.take_records();
+        assert_eq!(
+            records.len(),
+            2,
+            "the coach grades the check and the later fold as two separate decisions"
+        );
+        assert_eq!(records[0].played, views::action_label(Action::Check));
+        assert_eq!(records[1].played, views::action_label(Action::Fold));
+    }
+
+    /// Like [`check_fold_auto_folds_when_an_opponent_raises`], but with a
+    /// zero-chip blunder threshold: the auto-fold is intercepted exactly like
+    /// a manually-submitted Fold would be, freezing the table for review
+    /// instead of silently applying.
+    #[test]
+    fn check_fold_auto_fold_can_be_intercepted_like_a_live_decision() {
+        let state = hero_checked_to_on_flop(105);
+        let mut session = TableSession::resume(
+            state,
+            Deck::default(),
+            1,
+            105,
+            probe_config(),
+            survival(),
+            always_intercepts(),
+            None,
+        );
+        session.prime_blunder_history(&[0.0]);
+
+        let events = session.submit_check_fold().unwrap();
+
+        assert_eq!(
+            session.log(),
+            ["You check", "Opponent 1 bet 30", "Opponent 2 call 30"],
+            "the auto-fold is held back, not logged, while the review is pending"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                TableEvent::TacticalOverlay {
+                    intercepted: true,
+                    ..
+                }
+            )),
+            "the pre-armed fold must go through the same interception pipeline as a live fold: {events:?}"
+        );
+        assert!(session.has_pending_interception());
+        assert_eq!(
+            session.state().to_act(),
+            Seat::Hero,
+            "the table is frozen facing the bet, awaiting review"
+        );
+        assert!(session.state().legal_actions().call_amount > 0);
+
+        session.confirm_review().unwrap();
+        assert!(
+            !session.has_pending_interception(),
+            "confirming the review replays the coach's optimal action"
+        );
+        let records = session.take_records();
+        assert_eq!(
+            records.len(),
+            2,
+            "both the check and the (intercepted) fold are recorded"
+        );
+        assert_eq!(records[1].played, views::action_label(Action::Fold));
+        assert_ne!(
+            records[1].optimal,
+            views::action_label(Action::Fold),
+            "the coach's optimal action replaces the blunder on the table"
+        );
     }
 }

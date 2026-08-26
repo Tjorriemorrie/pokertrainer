@@ -828,6 +828,26 @@ fn handle_client_message(
             let hand_no = session.hand_no();
             let street = session.state().street();
             let to_act = session.state().to_act();
+            if action.kind.trim().eq_ignore_ascii_case("check_fold") {
+                let submitted = match snapshot {
+                    Some(snapshot) => session.submit_check_fold_with_snapshot(snapshot),
+                    None => session.submit_check_fold(),
+                };
+                return match submitted {
+                    Ok(events) => outcome(session, events, Some(Action::Check)),
+                    Err(error) => {
+                        tracing::warn!(
+                            hand_no,
+                            street = %street,
+                            to_act = %to_act,
+                            submitted = ?action,
+                            %error,
+                            "action submission failed"
+                        );
+                        error_outcome(&error.to_string())
+                    }
+                };
+            }
             match protocol::resolve_action(&action, session.state()) {
                 Ok(resolved) => {
                     tracing::info!(
