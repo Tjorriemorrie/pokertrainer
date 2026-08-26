@@ -80,6 +80,43 @@ async fn reject_socket(mut socket: WebSocket, reason: &str) {
     let _ = socket.close().await;
 }
 
+/// Loads the opponent's model for a fresh session: refreshes the historic
+/// window (writing the updated range model and producing the coach panel's
+/// historic read and starting-hand table), then resolves the gated per-node
+/// range priors the bots' own solve uses. Falls back to an empty
+/// (all-uniform, no history) model when there is no pool or any step fails —
+/// bots then play exactly as before this feature existed.
+async fn load_opponent_model(pool: Option<&PgPool>) -> crate::opponent_history::OpponentModel {
+    let Some(pool) = pool else {
+        return crate::opponent_history::OpponentModel::default();
+    };
+    let historic = match crate::opponent_history::refresh(pool).await {
+        Ok(summary) => summary,
+        Err(error) => {
+            tracing::warn!(%error, "opponent history refresh failed — bots play with a uniform prior");
+            return crate::opponent_history::OpponentModel::default();
+        }
+    };
+    let profile_id = match crate::opponent_history::pooled_profile_id(pool).await {
+        Ok(id) => id,
+        Err(error) => {
+            tracing::warn!(%error, "opponent profile unavailable — bots play with a uniform prior");
+            return crate::opponent_history::OpponentModel {
+                ranges: Default::default(),
+                historic,
+            };
+        }
+    };
+    let ranges = match crate::opponent_history::load_range_model(pool, profile_id).await {
+        Ok(model) => model,
+        Err(error) => {
+            tracing::warn!(%error, "opponent range model unavailable — bots play with a uniform prior");
+            Default::default()
+        }
+    };
+    crate::opponent_history::OpponentModel { ranges, historic }
+}
+
 async fn handle_socket(socket: WebSocket, app: Arc<AppState>) {
     let (session_id, snapshot) = match claim_table(app.pool.as_ref()).await {
         Ok(claim) => claim,
@@ -89,6 +126,7 @@ async fn handle_socket(socket: WebSocket, app: Arc<AppState>) {
             return;
         }
     };
+    let opponent_model = load_opponent_model(app.pool.as_ref()).await;
 
     let mut session = match snapshot {
         Some(snapshot) => {
@@ -98,6 +136,7 @@ async fn handle_socket(socket: WebSocket, app: Arc<AppState>) {
                 app.mcts,
                 app.survival,
                 app.blunder,
+                opponent_model,
             ) {
                 Ok(mut session) => {
                     hydrate_blunder(app.pool.as_ref(), session_id, app.blunder, &mut session).await;
@@ -156,6 +195,7 @@ async fn handle_socket(socket: WebSocket, app: Arc<AppState>) {
                 app.blunder,
                 template,
                 starting_stack,
+                opponent_model,
             );
             if let Err(error) = bootstrap(&mut session) {
                 tracing::warn!(%error, "table session bootstrap failed; closing connection");
@@ -322,6 +362,7 @@ async fn play_socket(
                 let outcome = handle_client_message(&mut *session, text.as_str(), latest_snapshot.as_ref());
                 ticks_since_snapshot += outcome.chart_ticks;
                 persist_records(app.pool.as_ref(), session_id, session).await;
+                persist_local_actions(app.pool.as_ref(), session).await;
                 // Save before the frames leave, so a disconnect triggered by
                 // the rendered state resumes exactly that state.
                 save_table(app.pool.as_ref(), session_id, session).await;
@@ -629,6 +670,27 @@ async fn persist_records(
             session_id,
             dropped = records.len(),
             "decisions could not be persisted — the table keeps playing"
+        );
+    }
+}
+
+/// Persists every local bot decision queued by the table since the last
+/// frame, into `local_opponent_actions` (no `session_id` — the window pools
+/// across every session). Failures are logged and dropped — the game never
+/// blocks on the database.
+async fn persist_local_actions(pool: Option<&PgPool>, session: &mut TableSession) {
+    let actions = session.take_local_actions();
+    if actions.is_empty() {
+        return;
+    }
+    let Some(pool) = pool else {
+        return;
+    };
+    if let Err(error) = crate::db::insert_local_opponent_actions(pool, &actions).await {
+        tracing::warn!(
+            %error,
+            dropped = actions.len(),
+            "local opponent actions could not be persisted — the table keeps playing"
         );
     }
 }
@@ -969,8 +1031,8 @@ fn events_to_messages(session: &mut TableSession, events: Vec<TableEvent>) -> Ve
                 hand_no,
                 &decision,
                 intercepted,
-                &session.opponent_snapshots(),
-                session.state().blind_level().big_blind,
+                &session.merged_opponent_snapshot(),
+                session.opponent_history(),
                 session.state().legal_actions().call_amount,
                 session.state().stack(Seat::Hero),
             )
@@ -1041,6 +1103,7 @@ mod tests {
             BlunderConfig::default(),
             None,
             crate::game::STARTING_STACK,
+            crate::opponent_history::OpponentModel::default(),
         );
         bootstrap(&mut session).unwrap();
         session

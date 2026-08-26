@@ -534,6 +534,10 @@ pub struct Episode {
     /// `Board [...]` from the summary, as a fallback when street markers
     /// carry no board.
     pub summary_board: Option<Vec<String>>,
+    /// Hole cards revealed at showdown (`"<name>: shows [Xy Zw]"`), by seat
+    /// number. Most hands reveal nothing for seats that folded — this is
+    /// only ever populated for the minority that showed.
+    pub shown: Vec<(u8, [String; 2])>,
 }
 
 /// Splits a hand block into its full action timeline.
@@ -545,6 +549,7 @@ pub fn parse_episode(block: &str) -> Option<Episode> {
     let mut button = None;
     let mut summary_board = None;
     let mut at_summary = false;
+    let mut shown: Vec<(u8, [String; 2])> = Vec::new();
 
     for (index, line) in block.lines().map(str::trim).enumerate() {
         // The stored raw blocks drop the `Poker Hand #` prefix: the header is
@@ -588,6 +593,13 @@ pub fn parse_episode(block: &str) -> Option<Episode> {
         }
         if let Some((name, text)) = line.split_once(": ") {
             let seat_no = seats.iter().find(|seat| seat.name == name)?.no;
+            if let Some(rest) = text.strip_prefix("shows [") {
+                let cards = cards_in_brackets(&format!("[{rest}"));
+                if let Some(pair) = two_cards(&cards) {
+                    shown.push((seat_no, pair));
+                }
+                continue;
+            }
             if let Some(action) = parse_episode_action(text) {
                 actions.push(EpisodeAction { seat_no, ..action });
             }
@@ -604,6 +616,7 @@ pub fn parse_episode(block: &str) -> Option<Episode> {
         actions,
         button,
         summary_board,
+        shown,
     })
 }
 
@@ -1630,6 +1643,14 @@ You finished in 1st place.";
                 (3, EpisodeVerb::Raise, Some(175), Some(215), true),
                 (2, EpisodeVerb::Call, Some(175), None, false),
             ]
+        );
+        assert_eq!(
+            episode.shown,
+            vec![
+                (3, ["4d".to_string(), "Td".to_string()]),
+                (2, ["As".to_string(), "Kh".to_string()]),
+            ],
+            "shows lines are captured by seat number, not folded into actions"
         );
     }
 

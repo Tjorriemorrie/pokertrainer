@@ -1,15 +1,16 @@
 {#
 The tactical-breakdown fragment rendered into the coach-feedback panel beside the
-table: the opponents' live HUD cards first, then a plain-English takeaway
-sentence, the played vs optimal action comparison, and the candidate table sorted
-from cheapest (fold first) to all-in.
+table: the opponents' live HUD cards first, then the coach card (a plain-English
+takeaway sentence, the played vs optimal action comparison, and the candidate
+table sorted from cheapest (fold first) to all-in), then the starting-hand range
+table last.
 
 Intercepted blunders freeze the table: the card is titled accordingly and only
 offers a confirmation that unlocks the transition (the coach's best-EV action).
 
-`opponents` is a nested template struct, already rendered with its own escaping
-applied — `|safe` stops the composed markup being escaped a second time. Never
-put `|safe` on raw data.
+`opponents` and `range_table` are nested template structs, already rendered
+with their own escaping applied — `|safe` stops the composed markup being
+escaped a second time. Never put `|safe` on raw data.
 #}<div id="tactical-overlay" class="pt-tactical">{{ opponents|safe }}<section class="pt-feedback-card"><div class="pt-overlay-card">
 {%- if intercepted -%}
 <h2 class="pt-overlay-title">Hand #{{ hand_no }} — Blunder intercepted</h2>
@@ -22,9 +23,9 @@ put `|safe` on raw data.
 {%- else -%}
 <div class="pt-compare"><div class="pt-optimal">Optimal: <b>{{ optimal_label }}</b> — EV {{ optimal_ev }}</div></div>
 {%- endif -%}
-<table class="pt-ranking"><tr><th>Action</th><th>EV</th><th>σ</th><th>Bust</th><th>Visits</th></tr>
+<table class="pt-ranking"><tr><th>Action</th><th>Score</th><th>EV</th><th>Risk</th><th>Visits</th></tr>
 {%- for row in ranking -%}
-<tr class="{{ row.class }}"><td>{{ row.label }}</td><td>{{ row.ev }}</td><td>{{ row.sigma }}</td><td>{{ row.bust }}%</td><td>{{ row.visits }}</td></tr>
+<tr class="{{ row.class }}"><td>{{ row.label }}</td><td>{{ row.score }}</td><td>{{ row.ev }}</td><td><span class="pt-risk-flag {{ row.risk.class }}" title="{{ row.risk.tooltip }}">{{ row.risk.label }}</span></td><td>{{ row.visits }}</td></tr>
 {%- endfor -%}
 </table><div class="pt-search-meta {{ effort.class }}" title="{{ effort.tooltip }}">
 <span class="pt-search-badge">{{ effort.label }}</span>
@@ -35,4 +36,4 @@ put `|safe` on raw data.
 {%- else -%}
 <button class="action-btn" data-overlay-close>Continue</button>
 {%- endif -%}
-</div></section></div>
+</div></section>{{ range_table|safe }}</div>

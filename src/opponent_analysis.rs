@@ -27,6 +27,7 @@ use crate::error::Result;
 use crate::game::{Action, ActionOutcome, GameState, NUM_PLAYERS, Seat, Street};
 use crate::hh::{Episode, EpisodeVerb};
 use crate::mcts::{self, MctsConfig};
+use crate::range::hands::Hand;
 use crate::rng::seeded_rng;
 use crate::snapshot::StateSnapshot;
 
@@ -61,6 +62,20 @@ pub struct DecisionPoint {
     pub pins: [Option<[Card; 2]>; NUM_PLAYERS],
     pub played: Action,
     pub actor_name: String,
+    /// The actor's real hand class, when it was revealed at showdown (`"...:
+    /// shows [...]"`). Most decisions carry `None` — folds never reveal —
+    /// which is expected and handled downstream by a minimum-sample
+    /// fallback, not treated as an error.
+    pub opponent_hand: Option<Hand>,
+}
+
+/// The hand class an actor showed at showdown, if their cards parse and they
+/// showed at all — most decisions have no such reveal.
+fn shown_hand(episode: &Episode, seat_no: u8) -> Option<Hand> {
+    let (_, codes) = episode.shown.iter().find(|(no, _)| *no == seat_no)?;
+    let a = Card::from_code(&codes[0])?;
+    let b = Card::from_code(&codes[1])?;
+    Some(Hand::from_cards(a, b))
 }
 
 /// The outcome of grading one imported hand.
@@ -284,6 +299,7 @@ pub fn walk_hand(
                     .find(|seat| seat.no == action.seat_no)
                     .map(|seat| seat.name.clone())
                     .unwrap_or_default(),
+                opponent_hand: shown_hand(episode, action.seat_no),
             });
         }
 
@@ -1116,6 +1132,28 @@ Seat 3: 14c11a2a (small blind) showed [Qs Ad] and won (600) with a pair of Queen
         // River raise is captured as an all-in push.
         assert_eq!(points[4].played, Action::AllIn);
         assert_eq!(points[4].state.street(), Street::River);
+    }
+
+    #[test]
+    fn walk_captures_the_opponent_hand_when_shown_at_showdown() {
+        let points = walk(SAMPLE_WIN, 20, 40);
+        let revealed = Hand::from_cards(
+            Card::from_code("4d").unwrap(),
+            Card::from_code("Td").unwrap(),
+        );
+        assert!(
+            points.iter().all(|p| p.opponent_hand == Some(revealed)),
+            "the showdown reveal is known retroactively for every decision point in the hand"
+        );
+    }
+
+    #[test]
+    fn walk_leaves_the_opponent_hand_unknown_without_a_reveal() {
+        let points = walk(SAMPLE_BLUFF_WIN, 10, 20);
+        assert!(
+            points.iter().all(|p| p.opponent_hand.is_none()),
+            "the opponent folded — their cards were never shown"
+        );
     }
 
     #[test]

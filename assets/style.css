@@ -763,8 +763,10 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
 /* The table action dock uses square, uniformly red buttons with the amount
    stacked under the label (GGPoker style). */
 .pt-action-dock .action-btn {
+  min-width: 120px;
+  max-width: 192px;
   border-radius: 8px;
-  padding: 0.65rem 1.2rem;
+  padding: 0.78rem 0.96rem;
   line-height: 1.15;
   font-size: 1.05rem;
   letter-spacing: 0.01em;
@@ -772,7 +774,7 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
 
 .pt-action-dock .action-btn .amt {
   display: block;
-  font-size: 0.78em;
+  font-size: 1em;
   font-weight: 700;
   opacity: 0.92;
   margin-top: 3px;
@@ -890,6 +892,22 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
 .pt-ranking tr.optimal { color: #86efac; }
 .pt-ranking tr.played { color: #fca5a5; }
 
+.pt-risk-flag {
+  display: inline-block;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  border-radius: 4px;
+  padding: 2px 8px;
+  cursor: help;
+}
+
+.pt-risk-none   { color: #86efac; background: rgba(6, 78, 59, 0.5); }
+.pt-risk-low    { color: #d7dde6; background: rgba(61, 74, 92, 0.5); }
+.pt-risk-medium { color: #fcd34d; background: rgba(120, 53, 15, 0.5); }
+.pt-risk-high   { color: #ffb4a2; background: rgba(154, 53, 51, 0.5); }
+.pt-risk-severe { color: #fca5a5; background: rgba(127, 29, 29, 0.6); }
+
 .pt-overlay-card { padding: 1.25rem 1.5rem; }
 .pt-overlay-card .action-btn { width: 100%; }
 
@@ -989,6 +1007,76 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
   border-top: 1px dashed rgba(31, 41, 55, 0.7);
   padding-top: 0.6rem;
 }
+
+/* The historic (last-1000-actions) block sits below the live session-so-far
+   read in the same opponent card, set off with its own small heading. */
+.pt-opp-historic {
+  margin-top: 0.9rem;
+  padding-top: 0.9rem;
+  border-top: 1px solid var(--line);
+}
+
+.pt-opp-historic-title {
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #6b7280;
+  margin: 0 0 0.5rem;
+}
+
+/* The starting-hand table: a flat, row-major list of 169 cells wraps into a
+   13x13 grid. Each graded cell stacks a fold/call/raise bar; ungraded cells
+   (too few historic samples) show only the label. */
+.pt-range-block { padding: 1.25rem 1.5rem; }
+
+.pt-range-grid {
+  display: grid;
+  grid-template-columns: repeat(13, minmax(0, 1.9rem));
+  gap: 2px;
+  margin-top: 0.6rem;
+}
+
+.pt-range-cell {
+  aspect-ratio: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #0a0f16;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  overflow: hidden;
+  position: relative;
+  /* Lets the label size itself off the cell's own rendered width (`cqw`)
+     instead of a fixed rem value, so it always fills the square whatever
+     the grid actually renders it at. */
+  container-type: inline-size;
+}
+
+.pt-range-cell.ungraded { opacity: 0.45; }
+
+.pt-range-label {
+  position: relative;
+  z-index: 1;
+  font-size: 30cqw;
+  font-weight: 800;
+  line-height: 1;
+  color: var(--text);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.85);
+}
+
+.pt-range-bar {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column-reverse;
+  width: 100%;
+  height: 100%;
+}
+
+.pt-range-fold { background: rgba(59, 63, 82, 0.85); }
+.pt-range-call { background: rgba(134, 239, 172, 0.55); }
+.pt-range-raise { background: rgba(252, 165, 165, 0.85); }
 
 /* The search-effort line: a colored grade chip, a plain-language caption,
    and a confidence note. Raw numbers live in the title tooltip. */

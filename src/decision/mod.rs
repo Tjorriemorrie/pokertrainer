@@ -84,6 +84,22 @@ pub struct AnalyzedDecision {
     pub search: SearchReport,
 }
 
+/// Derives the survivability coefficients for the hero's stack, rescaled to
+/// this hand's actual table context (see [`SurvivalConfig::for_hand`]) rather
+/// than the static config alone.
+fn hand_risk(state: &GameState, survival_config: &SurvivalConfig, stack: u32) -> Result<DerivedRisk> {
+    let opponent_stacks: Vec<u32> = state
+        .active_seats()
+        .into_iter()
+        .filter(|&seat| seat != Seat::Hero)
+        .map(|seat| state.stack(seat))
+        .collect();
+    let big_blind = state.blind_level().big_blind;
+    survival_config
+        .for_hand(stack, &opponent_stacks, big_blind)
+        .derive(stack)
+}
+
 /// Validates a player-submitted action against the current state: the hand
 /// must be live, it must be the hero's turn, and the action must be legal.
 pub fn validate_action(state: &GameState, action: Action) -> Result<()> {
@@ -136,7 +152,7 @@ pub fn analyze<R: Rng + ?Sized>(
     }
 
     let stack = state.stack(Seat::Hero);
-    let risk = survival_config.derive(stack)?;
+    let risk = hand_risk(state, survival_config, stack)?;
     let result = mcts::solve_with_candidates(rng, state, ranges, mcts_config, &candidates)?;
 
     let mut analyses: Vec<Analysis> = result
@@ -215,7 +231,7 @@ pub fn analyze_snapshot(
     }
 
     let stack = state.stack(Seat::Hero);
-    let risk = survival_config.derive(stack)?;
+    let risk = hand_risk(state, survival_config, stack)?;
 
     let mut analyses: Vec<Analysis> = snapshot
         .actions

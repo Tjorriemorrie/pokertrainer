@@ -89,11 +89,19 @@ impl fmt::Display for Street {
 /// In 3-max the button is the small blind. Preflop the player left of the big
 /// blind acts first, then the button, then the big blind. Postflop the player
 /// left of the button acts first.
-pub fn action_order(button: Seat, street: Street) -> [Seat; 3] {
-    let big_blind = button.next();
+///
+/// `big_blind` is passed in rather than derived from `button.next()` because
+/// heads-up (one seat eliminated) the physically adjacent seat isn't
+/// necessarily the seat actually posting the big blind — the caller must
+/// resolve that with elimination-aware lookup (`GameState::big_blind_seat`).
+pub fn action_order(button: Seat, big_blind: Seat, street: Street) -> [Seat; 3] {
+    let third = Seat::ALL
+        .into_iter()
+        .find(|&seat| seat != button && seat != big_blind)
+        .unwrap_or(button);
     match street {
-        Street::Preflop => [big_blind.next(), button, big_blind],
-        _ => [big_blind, big_blind.next(), button],
+        Street::Preflop => [third, button, big_blind],
+        _ => [big_blind, third, button],
     }
 }
 
@@ -134,15 +142,15 @@ mod tests {
     #[test]
     fn preflop_order_is_left_of_bb_then_button_then_bb() {
         assert_eq!(
-            action_order(Seat::Hero, Street::Preflop),
+            action_order(Seat::Hero, Seat::Opponent1, Street::Preflop),
             [Seat::Opponent2, Seat::Hero, Seat::Opponent1]
         );
         assert_eq!(
-            action_order(Seat::Opponent1, Street::Preflop),
+            action_order(Seat::Opponent1, Seat::Opponent2, Street::Preflop),
             [Seat::Hero, Seat::Opponent1, Seat::Opponent2]
         );
         assert_eq!(
-            action_order(Seat::Opponent2, Street::Preflop),
+            action_order(Seat::Opponent2, Seat::Hero, Street::Preflop),
             [Seat::Opponent1, Seat::Opponent2, Seat::Hero]
         );
     }
@@ -150,16 +158,34 @@ mod tests {
     #[test]
     fn postflop_order_is_left_of_button_first() {
         assert_eq!(
-            action_order(Seat::Hero, Street::Flop),
+            action_order(Seat::Hero, Seat::Opponent1, Street::Flop),
             [Seat::Opponent1, Seat::Opponent2, Seat::Hero]
         );
         assert_eq!(
-            action_order(Seat::Opponent1, Street::Flop),
+            action_order(Seat::Opponent1, Seat::Opponent2, Street::Flop),
             [Seat::Opponent2, Seat::Hero, Seat::Opponent1]
         );
         assert_eq!(
-            action_order(Seat::Opponent2, Street::Flop),
+            action_order(Seat::Opponent2, Seat::Hero, Street::Flop),
             [Seat::Hero, Seat::Opponent1, Seat::Opponent2]
+        );
+    }
+
+    #[test]
+    fn heads_up_preflop_order_skips_the_eliminated_seat() {
+        // Opponent1 busted; button (Hero, the SB) must act before the real
+        // big blind (Opponent2), not the physically-adjacent eliminated seat.
+        assert_eq!(
+            action_order(Seat::Hero, Seat::Opponent2, Street::Preflop),
+            [Seat::Opponent1, Seat::Hero, Seat::Opponent2]
+        );
+    }
+
+    #[test]
+    fn heads_up_postflop_order_has_big_blind_first() {
+        assert_eq!(
+            action_order(Seat::Hero, Seat::Opponent2, Street::Flop),
+            [Seat::Opponent2, Seat::Opponent1, Seat::Hero]
         );
     }
 

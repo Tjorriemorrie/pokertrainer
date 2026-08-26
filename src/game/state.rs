@@ -832,14 +832,15 @@ impl GameState {
     }
 
     fn first_to_act(&self) -> Seat {
-        action_order(self.button, self.street)
+        let order = action_order(self.button, self.big_blind_seat(), self.street);
+        order
             .into_iter()
             .find(|&seat| {
                 !self.folded[seat.index()]
                     && !self.all_in[seat.index()]
                     && !self.eliminated[seat.index()]
             })
-            .unwrap_or_else(|| action_order(self.button, self.street)[0])
+            .unwrap_or(order[0])
     }
 
     fn active_players(&self) -> Vec<Seat> {
@@ -1656,7 +1657,8 @@ mod tests {
             "eliminated seat is untouched"
         );
         assert_eq!(state.total_pot(), 30);
-        assert_eq!(state.to_act(), Seat::Opponent2);
+        // Heads-up preflop the button (SB) acts first, the big blind closes.
+        assert_eq!(state.to_act(), Seat::Hero);
     }
 
     #[test]

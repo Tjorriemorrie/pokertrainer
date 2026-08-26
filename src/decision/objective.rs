@@ -36,7 +36,46 @@ impl Default for SurvivalConfig {
     }
 }
 
+/// How far `for_hand` will scale `risk_aversion` up (comfortably covering
+/// the table) or down (badly outchipped) from the configured baseline.
+const STACK_SCALE_MIN: f64 = 0.25;
+const STACK_SCALE_MAX: f64 = 2.0;
+
+/// A short stack fighting to survive should keep taking its equity rather
+/// than folding away every marginal edge (it blinds out either way), so a
+/// meaningful survival floor is a handful of big blinds, not a literal chip.
+const FLOOR_BIG_BLINDS: u32 = 2;
+
 impl SurvivalConfig {
+    /// Rescales this config to one hand's actual table context.
+    ///
+    /// `risk_aversion` is multiplied by the hero's stack relative to the
+    /// average of the given (live) opponent stacks, clamped to
+    /// [`STACK_SCALE_MIN`, `STACK_SCALE_MAX`]: comfortably covering the table
+    /// tightens the survival objective toward protecting the lead, while
+    /// being badly outchipped loosens it back toward chip EV — a short stack
+    /// that folds every hand to dodge a hypothetical bust just blinds out
+    /// anyway, so it should keep taking +EV risks with a live hand.
+    ///
+    /// `utility_floor` is replaced by [`FLOOR_BIG_BLINDS`] big blinds: the
+    /// configured value treats "one chip" as the disaster reference point,
+    /// which makes the bust-cost log-ratio (and thus the whole penalty)
+    /// far larger than it should be for a stack that is merely short, not
+    /// actually crippled.
+    pub fn for_hand(&self, hero_stack: u32, opponent_stacks: &[u32], big_blind: u32) -> Self {
+        let scale = if opponent_stacks.is_empty() {
+            1.0
+        } else {
+            let avg = opponent_stacks.iter().copied().map(f64::from).sum::<f64>()
+                / opponent_stacks.len() as f64;
+            (f64::from(hero_stack) / avg.max(1.0)).clamp(STACK_SCALE_MIN, STACK_SCALE_MAX)
+        };
+        Self {
+            risk_aversion: self.risk_aversion * scale,
+            utility_floor: big_blind.saturating_mul(FLOOR_BIG_BLINDS).max(1),
+        }
+    }
+
     pub fn validate(&self) -> Result<()> {
         if !self.risk_aversion.is_finite() || self.risk_aversion <= 0.0 {
             return Err(Error::InvalidConfig(
@@ -231,5 +270,38 @@ mod tests {
         let safe = risk.score(0.0, 100.0, 0.0);
         let busty = risk.score(0.0, 100.0, 0.05);
         assert!(safe > busty);
+    }
+
+    #[test]
+    fn for_hand_loosens_risk_aversion_for_a_short_stack() {
+        let config = SurvivalConfig::default();
+        let scaled = config.for_hand(230, &[640], 10);
+        assert!(scaled.risk_aversion < config.risk_aversion);
+        assert_eq!(scaled.risk_aversion, config.risk_aversion * (230.0 / 640.0));
+    }
+
+    #[test]
+    fn for_hand_tightens_risk_aversion_for_a_covering_stack() {
+        let config = SurvivalConfig::default();
+        let scaled = config.for_hand(900, &[300, 300], 10);
+        assert_eq!(scaled.risk_aversion, config.risk_aversion * STACK_SCALE_MAX);
+    }
+
+    #[test]
+    fn for_hand_clamps_the_scale_and_keeps_a_positive_floor() {
+        let config = SurvivalConfig::default();
+        let crippled = config.for_hand(10, &[2000], 10);
+        assert_eq!(crippled.risk_aversion, config.risk_aversion * STACK_SCALE_MIN);
+        assert_eq!(crippled.utility_floor, 20);
+
+        let no_opponents = config.for_hand(500, &[], 10);
+        assert_eq!(no_opponents.risk_aversion, config.risk_aversion);
+    }
+
+    #[test]
+    fn for_hand_replaces_the_one_chip_floor_with_big_blinds() {
+        let config = SurvivalConfig::default();
+        let scaled = config.for_hand(230, &[640], 25);
+        assert_eq!(scaled.utility_floor, 50);
     }
 }

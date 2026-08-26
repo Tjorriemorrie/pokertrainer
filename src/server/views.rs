@@ -3,7 +3,8 @@ use crate::card::{Card, Suit};
 use crate::decision::{Analysis, AnalyzedDecision, SearchReport};
 use crate::error::Result;
 use crate::game::{Action, GameState, Seat, Street};
-use crate::opponent::OpponentSnapshot;
+use crate::opponent::MergedOpponentSnapshot;
+use crate::opponent_history::{HistoricRead, HistorySummary};
 use crate::range::BetSize;
 use crate::server::session::Sound;
 use crate::snapshot::ActiveSummary;
@@ -903,8 +904,6 @@ impl ActionPanelFragment {
             }
             let default_bucket = if facing_raise && preflop {
                 BetSize::TwoX
-            } else if preflop {
-                BetSize::ThreeBb
             } else {
                 BetSize::Min
             };
@@ -924,7 +923,7 @@ impl ActionPanelFragment {
         Self {
             can_fold: legal.can_fold,
             can_check: legal.can_check,
-            can_check_fold: legal.can_check && state.street() != Street::Preflop,
+            can_check_fold: legal.can_check,
             can_call: legal.can_call,
             call_amount: legal.call_amount,
             bare_all_in: (sizing.is_none() && legal.can_all_in).then(|| state.stack(Seat::Hero)),
@@ -1034,70 +1033,124 @@ fn preflop_bb_label(bucket: BetSize, amount: u32, big_blind: u32) -> String {
 }
 
 /// The tactical-breakdown fragment rendered into the coach-feedback panel
-/// beside the table: the opponents' live HUD cards first, then a plain-English
+/// beside the table: the opponent's HUD card first, then a plain-English
 /// takeaway sentence, the played vs optimal action comparison, and the
 /// candidate table sorted from cheapest (fold first) to all-in. Intercepted
 /// blunders freeze the table: the card is titled accordingly and only offers
 /// a confirmation that unlocks the transition (the coach's best-EV action).
-/// One opponent's HUD card.
+///
+/// Both bot seats are the same modeled opponent, so this is a single card —
+/// not one per seat — combining this session's live read with the historic
+/// read built from the opponent's last-1000-actions window (real imported
+/// hands first, filled out by the trainer's own local play).
 struct OpponentView {
-    name: String,
-    is_button: bool,
-    is_small_blind: bool,
-    is_big_blind: bool,
-    /// Empty `flag_label` means no status flag at all.
-    flag_class: &'static str,
-    flag_label: &'static str,
-    stack: u32,
-    stack_bb: String,
     hands: usize,
     vpip: String,
     pfr: String,
     fold_to_bet: String,
     aggression: String,
     read: String,
+    historic_actions: usize,
+    historic_vpip: String,
+    historic_pfr: String,
+    historic_fold_to_bet: String,
+    historic_aggression: String,
+    historic_read: String,
+}
+
+/// Formats bet/call counts the way the live HUD always has: "—" with no
+/// postflop decisions yet, "∞" for bets that were never called back.
+fn format_aggression_counts(bets: usize, calls: usize) -> String {
+    match (bets, calls) {
+        (0, 0) => "—".to_string(),
+        (_, 0) => "∞".to_string(),
+        (bets, calls) => format!("{:.1}", bets as f64 / calls as f64),
+    }
+}
+
+/// The same aggression formatting, from an already-computed ratio (the
+/// historic read carries `Option<f64>` rather than raw counts).
+fn format_aggression_ratio(aggression: Option<f64>) -> String {
+    match aggression {
+        None => "—".to_string(),
+        Some(af) if af.is_infinite() => "∞".to_string(),
+        Some(af) => format!("{af:.1}"),
+    }
 }
 
 #[derive(Template)]
 #[template(path = "fragments/opponents.html")]
 struct OpponentsFragment {
-    opponents: Vec<OpponentView>,
+    opponent: OpponentView,
 }
 
 impl OpponentsFragment {
-    fn new(opponents: &[OpponentSnapshot], big_blind: u32) -> Self {
+    fn new(live: &MergedOpponentSnapshot, historic: &HistoricRead) -> Self {
         Self {
-            opponents: opponents
+            opponent: OpponentView {
+                hands: live.hands,
+                vpip: format!("{:.0}", live.vpip_pct),
+                pfr: format!("{:.0}", live.pfr_pct),
+                fold_to_bet: format!("{:.0}", live.fold_to_bet_pct),
+                aggression: format_aggression_counts(live.postflop_bets, live.postflop_calls),
+                read: live.read.clone(),
+                historic_actions: historic.actions,
+                historic_vpip: format!("{:.0}", historic.voluntary_preflop_pct),
+                historic_pfr: format!("{:.0}", historic.preflop_raise_pct),
+                historic_fold_to_bet: format!("{:.0}", historic.fold_to_bet_pct),
+                historic_aggression: format_aggression_ratio(historic.aggression),
+                historic_read: historic.read.clone(),
+            },
+        }
+    }
+}
+
+/// One cell of the starting-hand table: the opponent's preflop action mix
+/// with this hand class over the historic window.
+struct HandCellView {
+    label: String,
+    /// `false` when the sample is too thin to grade — the cell shows a
+    /// placeholder instead of a falsely precise percentage.
+    graded: bool,
+    detail: String,
+    fold_pct: String,
+    call_pct: String,
+    raise_pct: String,
+}
+
+#[derive(Template)]
+#[template(path = "fragments/opponent_range_table.html")]
+struct RangeTableFragment {
+    window_actions: usize,
+    cells: Vec<HandCellView>,
+}
+
+impl RangeTableFragment {
+    fn new(summary: &HistorySummary) -> Self {
+        Self {
+            window_actions: summary.window_actions,
+            cells: summary
+                .table
                 .iter()
-                .map(|opponent| {
-                    let (flag_class, flag_label) = if opponent.folded {
-                        ("fold", "Folded")
-                    } else if opponent.all_in {
-                        ("allin", "All-in")
-                    } else if opponent.stack == 0 {
-                        ("bust", "OUT")
+                .map(|row| {
+                    let graded = row.fold_pct.is_some();
+                    let detail = if let (Some(fold), Some(call), Some(raise)) =
+                        (row.fold_pct, row.call_pct, row.raise_pct)
+                    {
+                        format!(
+                            "{:.0}% fold, {:.0}% call, {:.0}% raise ({} hands)",
+                            fold, call, raise, row.samples
+                        )
                     } else {
-                        ("", "")
+                        format!("Too few hands to grade yet ({} seen)", row.samples)
                     };
-                    OpponentView {
-                        name: opponent.seat.to_string(),
-                        is_button: opponent.is_button,
-                        is_small_blind: opponent.is_small_blind,
-                        is_big_blind: opponent.is_big_blind,
-                        flag_class,
-                        flag_label,
-                        stack: opponent.stack,
-                        stack_bb: format!("{:.1}", opponent.stack as f32 / big_blind as f32),
-                        hands: opponent.hands,
-                        vpip: format!("{:.0}", opponent.vpip_pct),
-                        pfr: format!("{:.0}", opponent.pfr_pct),
-                        fold_to_bet: format!("{:.0}", opponent.fold_to_bet_pct),
-                        aggression: match (opponent.postflop_bets, opponent.postflop_calls) {
-                            (0, 0) => "—".to_string(),
-                            (_, 0) => "∞".to_string(),
-                            (bets, calls) => format!("{:.1}", bets as f64 / calls as f64),
-                        },
-                        read: opponent.read.clone(),
+                    HandCellView {
+                        label: row.label.clone(),
+                        graded,
+                        detail,
+                        fold_pct: row.fold_pct.map(|p| format!("{p:.0}")).unwrap_or_default(),
+                        call_pct: row.call_pct.map(|p| format!("{p:.0}")).unwrap_or_default(),
+                        raise_pct: row.raise_pct.map(|p| format!("{p:.0}")).unwrap_or_default(),
                     }
                 })
                 .collect(),
@@ -1117,10 +1170,49 @@ struct RankingRow {
     /// `optimal`, `played`, or empty.
     class: &'static str,
     label: String,
+    /// The survivability score actually used to pick `optimal` — EV after
+    /// the risk penalty below, so a row can out-rank a higher-EV one.
+    score: String,
     ev: String,
-    sigma: String,
-    bust: String,
+    risk: RiskBadge,
     visits: u64,
+}
+
+/// A plain-language stand-in for the raw bust-probability/variance pair:
+/// mirrors [`SearchEffort`]'s badge-plus-tooltip shape so the table reads at
+/// a glance, while the exact numbers stay one hover away for the curious.
+struct RiskBadge {
+    class: &'static str,
+    label: &'static str,
+    tooltip: String,
+}
+
+/// Buckets one candidate's bust probability and payoff variance into a
+/// human-readable risk tier. Bust probability drives the tier (it is what
+/// can actually end the tournament); variance (σ) is folded into the
+/// tooltip rather than the label since it only matters once bust risk is
+/// already on the table.
+fn risk_badge(analysis: &Analysis) -> RiskBadge {
+    let (class, label) = if analysis.bust_prob <= 0.0 {
+        ("pt-risk-none", "No bust risk")
+    } else if analysis.bust_prob < 0.10 {
+        ("pt-risk-low", "Low risk")
+    } else if analysis.bust_prob < 0.25 {
+        ("pt-risk-medium", "Medium risk")
+    } else if analysis.bust_prob < 0.45 {
+        ("pt-risk-high", "High risk")
+    } else {
+        ("pt-risk-severe", "Severe risk")
+    };
+    RiskBadge {
+        class,
+        label,
+        tooltip: format!(
+            "{:.1}% chance this ends your tournament · ±{:.0} chip swing hand to hand",
+            analysis.bust_prob * 100.0,
+            analysis.sigma()
+        ),
+    }
 }
 
 #[derive(Template)]
@@ -1129,6 +1221,7 @@ struct TacticalOverlayFragment {
     hand_no: u64,
     intercepted: bool,
     opponents: OpponentsFragment,
+    range_table: RangeTableFragment,
     sentence: String,
     played: Option<PlayedView>,
     optimal_label: String,
@@ -1137,12 +1230,13 @@ struct TacticalOverlayFragment {
     effort: SearchEffort,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn tactical_overlay_fragment(
     hand_no: u64,
     decision: &AnalyzedDecision,
     intercepted: bool,
-    opponents: &[OpponentSnapshot],
-    big_blind: u32,
+    opponent: &MergedOpponentSnapshot,
+    historic: &HistorySummary,
     call_amount: u32,
     hero_stack: u32,
 ) -> Result<String> {
@@ -1152,7 +1246,8 @@ pub fn tactical_overlay_fragment(
     Ok(TacticalOverlayFragment {
         hand_no,
         intercepted,
-        opponents: OpponentsFragment::new(opponents, big_blind),
+        opponents: OpponentsFragment::new(opponent, &historic.read),
+        range_table: RangeTableFragment::new(historic),
         sentence: ev_diff_sentence(decision),
         played: decision.played.as_ref().map(|played| PlayedView {
             label: action_label(played.analysis.action),
@@ -1176,9 +1271,9 @@ pub fn tactical_overlay_fragment(
                     ""
                 },
                 label: action_label(analysis.action),
+                score: format!("{:.1}", analysis.score),
                 ev: format!("{:.1}", analysis.ev),
-                sigma: format!("{:.0}", analysis.sigma()),
-                bust: format!("{:.1}", analysis.bust_prob * 100.0),
+                risk: risk_badge(analysis),
                 visits: analysis.visits,
             })
             .collect(),
@@ -2137,8 +2232,8 @@ mod tests {
             7,
             &sample_analysis(),
             false,
-            &sample_opponents(),
-            20,
+            &sample_opponent(),
+            &sample_historic(),
             20,
             500,
         )
@@ -2152,8 +2247,9 @@ mod tests {
         assert!(fragment.contains("You played <b>Call</b>"));
         assert!(fragment.contains("Optimal: <b>Fold</b>"));
         assert!(fragment.contains("EV lost: <b>0.90</b> BB"));
-        assert!(fragment.contains(r#"<tr class="optimal"><td>Fold</td>"#));
-        assert!(fragment.contains(r#"<tr class="played"><td>Call</td>"#));
+        assert!(fragment.contains(r#"<tr class="optimal"><td>Fold</td><td>0.0</td>"#));
+        assert!(fragment.contains(r#"<tr class="played"><td>Call</td><td>-25.0</td>"#));
+        assert!(fragment.contains("<th>Score</th>"));
         assert!(fragment.contains("<th>Visits</th>"));
         assert!(fragment.contains(r#"data-overlay-close"#));
         assert!(
@@ -2182,8 +2278,8 @@ mod tests {
             7,
             &sample_analysis(),
             true,
-            &sample_opponents(),
-            20,
+            &sample_opponent(),
+            &sample_historic(),
             20,
             500,
         )
@@ -2205,7 +2301,16 @@ mod tests {
     fn tactical_overlay_handles_a_missing_played_action() {
         let mut decision = sample_analysis();
         decision.played = None;
-        let fragment = tactical_overlay_fragment(7, &decision, false, &[], 20, 20, 500).unwrap();
+        let fragment = tactical_overlay_fragment(
+            7,
+            &decision,
+            false,
+            &MergedOpponentSnapshot::default(),
+            &HistorySummary::default(),
+            20,
+            500,
+        )
+        .unwrap();
         assert!(!fragment.contains("EV lost"));
         assert!(fragment.contains("Optimal: <b>Fold</b>"));
         assert!(
@@ -2253,7 +2358,16 @@ mod tests {
         ];
         decision.optimal = decision.ranking[0];
         decision.played = None;
-        let fragment = tactical_overlay_fragment(7, &decision, false, &[], 20, 20, 500).unwrap();
+        let fragment = tactical_overlay_fragment(
+            7,
+            &decision,
+            false,
+            &MergedOpponentSnapshot::default(),
+            &HistorySummary::default(),
+            20,
+            500,
+        )
+        .unwrap();
         let fold = fragment.find("<td>Fold</td>").unwrap();
         let check = fragment.find("<td>Check</td>").unwrap();
         let call = fragment.find("<td>Call</td>").unwrap();
@@ -2306,77 +2420,111 @@ mod tests {
     }
 
     #[test]
-    fn opponents_block_renders_stats_statuses_and_reads() {
+    fn opponents_block_renders_the_merged_live_and_historic_reads() {
         let fragment = tactical_overlay_fragment(
             7,
             &sample_analysis(),
             false,
-            &sample_opponents(),
-            20,
+            &sample_opponent(),
+            &sample_historic(),
             20,
             500,
         )
         .unwrap();
-        assert!(fragment.contains("Opponent 1"));
-        assert!(fragment.contains(r#"<span class="pt-badge btn">BTN</span>"#));
-        assert!(fragment.contains(r#"class="pt-opp-flag allin">All-in</span>"#));
         assert!(fragment.contains("<span>VPIP</span><b>67%</b>"));
         assert!(fragment.contains("<span>PFR</span><b>33%</b>"));
         assert!(fragment.contains("<span>Folds to bet</span><b>25%</b>"));
         assert!(fragment.contains("<span>Aggression</span><b>1.5</b>"));
         assert!(fragment.contains("Loose aggressive — in lots of pots and swinging."));
-        assert!(fragment.contains("No hands played yet."), "{fragment}");
+        assert!(
+            fragment.contains("Tight aggressive — selective hands, played hard."),
+            "the historic (last-1000-actions) read renders alongside the live one: {fragment}"
+        );
+        assert!(
+            fragment.contains("842"),
+            "the historic action count shows: {fragment}"
+        );
     }
 
     #[test]
     fn opponents_block_marks_endless_aggression_as_infinite() {
-        let mut opponents = sample_opponents();
-        opponents[1] = OpponentSnapshot {
+        let opponent = MergedOpponentSnapshot {
             postflop_bets: 4,
             postflop_calls: 0,
-            ..opponents[1].clone()
+            ..sample_opponent()
         };
-        let fragment =
-            tactical_overlay_fragment(7, &sample_analysis(), false, &opponents, 20, 20, 500)
-                .unwrap();
+        let fragment = tactical_overlay_fragment(
+            7,
+            &sample_analysis(),
+            false,
+            &opponent,
+            &sample_historic(),
+            20,
+            500,
+        )
+        .unwrap();
         assert!(fragment.contains("<span>Aggression</span><b>∞</b>"));
     }
 
-    fn sample_opponents() -> Vec<OpponentSnapshot> {
-        vec![
-            OpponentSnapshot {
-                seat: Seat::Opponent1,
-                hands: 12,
-                vpip_pct: 66.7,
-                pfr_pct: 33.3,
-                fold_to_bet_pct: 25.0,
-                postflop_bets: 6,
-                postflop_calls: 4,
-                read: "Loose aggressive — in lots of pots and swinging.".to_string(),
-                stack: 640,
-                folded: false,
-                all_in: true,
-                is_button: true,
-                is_small_blind: true,
-                is_big_blind: false,
+    #[test]
+    fn range_table_renders_graded_and_ungraded_cells() {
+        let mut historic = sample_historic();
+        let aa = historic
+            .table
+            .iter_mut()
+            .find(|row| row.label == "AA")
+            .expect("AA is always in the 169-hand table");
+        aa.samples = 20;
+        aa.fold_pct = Some(0.0);
+        aa.call_pct = Some(10.0);
+        aa.raise_pct = Some(90.0);
+
+        let fragment = tactical_overlay_fragment(
+            7,
+            &sample_analysis(),
+            false,
+            &sample_opponent(),
+            &historic,
+            20,
+            500,
+        )
+        .unwrap();
+        assert!(fragment.contains("Starting hands — last 842 actions"));
+        assert!(
+            fragment.contains(r#"title="AA: 0% fold, 10% call, 90% raise (20 hands)""#),
+            "{fragment}"
+        );
+        assert!(
+            fragment.contains("ungraded"),
+            "hand classes below the sample floor stay ungraded rather than showing a false percentage: {fragment}"
+        );
+    }
+
+    fn sample_opponent() -> MergedOpponentSnapshot {
+        MergedOpponentSnapshot {
+            hands: 12,
+            vpip_pct: 66.7,
+            pfr_pct: 33.3,
+            fold_to_bet_pct: 25.0,
+            postflop_bets: 6,
+            postflop_calls: 4,
+            read: "Loose aggressive — in lots of pots and swinging.".to_string(),
+        }
+    }
+
+    fn sample_historic() -> HistorySummary {
+        HistorySummary {
+            window_actions: 842,
+            read: HistoricRead {
+                actions: 842,
+                voluntary_preflop_pct: 40.0,
+                preflop_raise_pct: 18.0,
+                fold_to_bet_pct: 55.0,
+                aggression: Some(2.0),
+                read: "Tight aggressive — selective hands, played hard.".to_string(),
             },
-            OpponentSnapshot {
-                seat: Seat::Opponent2,
-                hands: 0,
-                vpip_pct: 0.0,
-                pfr_pct: 0.0,
-                fold_to_bet_pct: 0.0,
-                postflop_bets: 0,
-                postflop_calls: 0,
-                read: "No hands played yet.".to_string(),
-                stack: 0,
-                folded: false,
-                all_in: false,
-                is_button: false,
-                is_small_blind: false,
-                is_big_blind: false,
-            },
-        ]
+            table: crate::opponent_history::build_starting_hand_table(&[]),
+        }
     }
 
     #[test]

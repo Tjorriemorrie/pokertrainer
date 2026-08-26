@@ -1,20 +1,29 @@
 {#
-The opponents' HUD cards: seat name with position badges and live status, the
-stack pill (chips with the `?`/Alt BB reveal), the stat grid, and the
-player-friendly read of each opponent's play.
-#}{% import "partials/table.html" as t -%}
-<section class="pt-feedback-card pt-opp-block"><h2 class="pt-overlay-title">Opponents</h2><div class="pt-opp-grid">
-{%- for opp in opponents -%}
-<article class="pt-opp-card">
-<div class="pt-opp-head"><span class="pt-opp-name">{{ opp.name }}{% if opp.is_button %}<span class="pt-badge btn">BTN</span>{% endif %}{% if opp.is_small_blind %}<span class="pt-badge sb">SB</span>{% endif %}{% if opp.is_big_blind %}<span class="pt-badge bb">BB</span>{% endif %}</span>{% if !opp.flag_label.is_empty() %}<span class="pt-opp-flag {{ opp.flag_class }}">{{ opp.flag_label }}</span>{% endif %}<span class="pt-stack">{{ t::stack_pill(opp.stack, opp.stack_bb) }}</span></div>
+The opponent's HUD card: the live session-so-far stat grid and read, plus
+the historic (last-1000-actions) stat grid and read built from the same
+opponent's window (real imported hands first, filled out by local play).
+
+Both bot seats are the same modeled opponent (the trainer's own framing —
+two seats, one bot), so this renders one card, not two. Per-seat table
+facts (position badges, stack, folded/all-in status) aren't part of this
+card anymore — they're already shown directly on the felt for each seat.
+#}<section class="pt-feedback-card pt-opp-block"><h2 class="pt-overlay-title">Opponent</h2><article class="pt-opp-card">
 <div class="pt-opp-stats">
-<div class="pt-opp-stat"><span>Hands</span><b>{{ opp.hands }}</b></div>
-<div class="pt-opp-stat"><span>VPIP</span><b>{{ opp.vpip }}%</b></div>
-<div class="pt-opp-stat"><span>PFR</span><b>{{ opp.pfr }}%</b></div>
-<div class="pt-opp-stat"><span>Folds to bet</span><b>{{ opp.fold_to_bet }}%</b></div>
-<div class="pt-opp-stat"><span>Aggression</span><b>{{ opp.aggression }}</b></div>
+<div class="pt-opp-stat"><span>Hands</span><b>{{ opponent.hands }}</b></div>
+<div class="pt-opp-stat"><span>VPIP</span><b>{{ opponent.vpip }}%</b></div>
+<div class="pt-opp-stat"><span>PFR</span><b>{{ opponent.pfr }}%</b></div>
+<div class="pt-opp-stat"><span>Folds to bet</span><b>{{ opponent.fold_to_bet }}%</b></div>
+<div class="pt-opp-stat"><span>Aggression</span><b>{{ opponent.aggression }}</b></div>
 </div>
-<p class="pt-opp-read">{{ opp.read }}</p>
+<p class="pt-opp-read">{{ opponent.read }}</p>
+<div class="pt-opp-historic"><h3 class="pt-opp-historic-title">Historic read</h3><div class="pt-opp-stats">
+<div class="pt-opp-stat"><span>Actions</span><b>{{ opponent.historic_actions }}</b></div>
+<div class="pt-opp-stat"><span>VPIP</span><b>{{ opponent.historic_vpip }}%</b></div>
+<div class="pt-opp-stat"><span>PFR</span><b>{{ opponent.historic_pfr }}%</b></div>
+<div class="pt-opp-stat"><span>Folds to bet</span><b>{{ opponent.historic_fold_to_bet }}%</b></div>
+<div class="pt-opp-stat"><span>Aggression</span><b>{{ opponent.historic_aggression }}</b></div>
+</div>
+<p class="pt-opp-read">{{ opponent.historic_read }}</p>
+</div>
 </article>
-{%- endfor -%}
-</div></section>
+</section>

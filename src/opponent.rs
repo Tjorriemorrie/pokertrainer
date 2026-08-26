@@ -1,8 +1,11 @@
 use rand::Rng;
 
-use crate::game::{Action, GameState, Seat, Street};
+use crate::card::Card;
+use crate::game::{Action, GameState, NUM_PLAYERS, Seat, Street};
 use crate::mcts::{self, MctsConfig};
+use crate::opponent_history::OpponentRangeModel;
 use crate::range::BetSize;
+use crate::range::hands::Range;
 
 /// Number of opponent seats (everyone but the hero).
 pub const NUM_OPPONENTS: usize = 2;
@@ -37,20 +40,43 @@ const SKILL_TAU_CHIPS: f64 = 20.0;
 /// shrinks with skill — skill 1 plays the solver-best action, skill 0 is
 /// nearly uniform across the legal candidates. Solve failures fall back to
 /// the plain [`placeholder_action`] heuristic.
+///
+/// The bot's own dealt cards are pinned (via [`GameState::hero_cards`] on
+/// the rotated view, which reads the acting seat's true holding regardless
+/// of hero-visibility — unlike the gated [`GameState::hole_cards`]) so the
+/// solve evaluates the hand it actually holds rather than averaging over a
+/// random one. The other two seats' likely holdings come from
+/// `opponent_ranges`: both are modeled as draws from the same "opponent"
+/// population the bot itself is calibrated against (the user's own framing —
+/// two seats, one modeled opponent), falling back to the solver's uniform
+/// default wherever the historic sample is too thin to trust.
 pub fn template_action<R: Rng + ?Sized>(
     rng: &mut R,
     state: &GameState,
     seat: Seat,
     config: &MctsConfig,
     template: &OpponentTemplate,
+    opponent_ranges: &OpponentRangeModel,
 ) -> Action {
     let rotated = state.rotated(seat);
     let skill = template.skill.clamp(0.0, 1.0);
+
+    let mut pins: [Option<[Card; 2]>; NUM_PLAYERS] = [None; NUM_PLAYERS];
+    pins[Seat::Hero.index()] = Some(rotated.hero_cards());
+
+    let mut ranges: [Option<Range>; NUM_PLAYERS] = [None; NUM_PLAYERS];
+    let node = crate::opponent_history::decision_node(&rotated);
+    let bucket = crate::opponent_history::decision_stack_bucket(&rotated);
+    if let Some(prior) = opponent_ranges.resolve(node, bucket) {
+        ranges[Seat::Opponent1.index()] = Some(prior);
+        ranges[Seat::Opponent2.index()] = Some(prior);
+    }
+
     let solve = mcts::solve_for_seat(
         rng,
         &rotated,
-        &[None; crate::game::NUM_PLAYERS],
-        &[None; crate::game::NUM_PLAYERS],
+        &pins,
+        &ranges,
         config,
         &mcts::candidates(&rotated),
     );
@@ -171,6 +197,19 @@ pub struct OpponentSnapshot {
     pub is_big_blind: bool,
 }
 
+/// Both bot seats' session-so-far stats, merged into a single read since
+/// both are the same modeled opponent — see [`OpponentTracker::merged_snapshot`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MergedOpponentSnapshot {
+    pub hands: usize,
+    pub vpip_pct: f64,
+    pub pfr_pct: f64,
+    pub fold_to_bet_pct: f64,
+    pub postflop_bets: usize,
+    pub postflop_calls: usize,
+    pub read: String,
+}
+
 /// Live per-opponent HUD counters, fed every time an opponent acts.
 ///
 /// VPIP counts an opponent once per hand the first time they voluntarily
@@ -275,6 +314,34 @@ impl OpponentTracker {
         }
     }
 
+    /// Merges both bot seats' counters into one read: both seats are the
+    /// same modeled opponent (two instances of one bot), so the coach panel
+    /// shows a single combined card instead of two. Every per-hand-instance
+    /// counter (VPIP, PFR, fold-to-bet, aggression) simply pools the two
+    /// seats' individual opportunities together; `hands` is the number of
+    /// hands dealt this session (identical for both seats, since
+    /// [`Self::begin_hand`] advances them in lockstep).
+    pub fn merged_snapshot(&self) -> MergedOpponentSnapshot {
+        let hands = self.hands[0];
+        let vpip: usize = self.vpip.iter().sum();
+        let pfr: usize = self.pfr.iter().sum();
+        let faced_bet: usize = self.faced_bet.iter().sum();
+        let folded_to_bet: usize = self.folded_to_bet.iter().sum();
+        let postflop_bets: usize = self.postflop_bets.iter().sum();
+        let postflop_calls: usize = self.postflop_calls.iter().sum();
+        let hand_instances = hands * NUM_OPPONENTS;
+        let vpip_pct = pct(vpip, hand_instances);
+        MergedOpponentSnapshot {
+            hands,
+            vpip_pct,
+            pfr_pct: pct(pfr, hand_instances),
+            fold_to_bet_pct: pct(folded_to_bet, faced_bet),
+            postflop_bets,
+            postflop_calls,
+            read: read(hands, vpip_pct, aggression(postflop_bets, postflop_calls)),
+        }
+    }
+
     /// Snapshots both opponents against the current table state for display.
     pub fn snapshots(&self, state: &GameState) -> Vec<OpponentSnapshot> {
         let small_blind = state.small_blind_seat();
@@ -335,8 +402,10 @@ const PASSIVE_AF: f64 = 1.0;
 const TIGHT_VPIP: f64 = 25.0;
 const LOOSE_VPIP: f64 = 45.0;
 
-/// The one-line player-friendly read of an opponent's play so far.
-fn read(hands: usize, vpip_pct: f64, aggression: Option<f64>) -> String {
+/// The one-line player-friendly read of an opponent's play so far. Also
+/// reused by [`crate::opponent_history`] to phrase the historic (last-1000-
+/// actions) read in the same voice as the live session read.
+pub(crate) fn read(hands: usize, vpip_pct: f64, aggression: Option<f64>) -> String {
     if hands == 0 {
         return "No hands played yet.".to_string();
     }
@@ -501,6 +570,37 @@ mod tests {
         assert!(!snapshots[1].is_big_blind);
         assert_eq!(snapshots[0].stack, 300);
         assert!(!snapshots[0].folded && !snapshots[0].all_in);
+    }
+
+    #[test]
+    fn merged_snapshot_pools_both_seats_hand_instances_into_one_read() {
+        let mut tracker = OpponentTracker::default();
+        tracker.begin_hand();
+        tracker.record(Seat::Opponent1, Action::Call, Street::Preflop, true);
+        tracker.record(Seat::Opponent2, Action::Fold, Street::Preflop, true);
+        tracker.begin_hand();
+        tracker.record(Seat::Opponent1, Action::Fold, Street::Preflop, true);
+        tracker.record(Seat::Opponent2, Action::Call, Street::Preflop, true);
+
+        let merged = tracker.merged_snapshot();
+        assert_eq!(
+            merged.hands, 2,
+            "hands dealt this session, not doubled across the two seats"
+        );
+        // 2 hands x 2 seats = 4 observed instances; 2 were voluntary.
+        assert_eq!(merged.vpip_pct, 50.0);
+    }
+
+    #[test]
+    fn merged_snapshot_matches_the_sum_of_both_seats_counters() {
+        let mut tracker = OpponentTracker::default();
+        tracker.begin_hand();
+        tracker.record(Seat::Opponent1, Action::Bet(40), Street::Flop, false);
+        tracker.record(Seat::Opponent2, Action::Call, Street::Flop, true);
+
+        let merged = tracker.merged_snapshot();
+        assert_eq!(merged.postflop_bets, 1);
+        assert_eq!(merged.postflop_calls, 1);
     }
 
     #[test]
@@ -689,12 +789,13 @@ mod tests {
     fn template_action_is_always_legal_and_skill_graded() {
         let state = dealt_state();
         let config = MctsConfig::test();
+        let ranges = OpponentRangeModel::default();
         for skill in [0.0, 0.3, 0.62, 1.0] {
             let template = OpponentTemplate::new(skill);
             for seed in 0..6u64 {
                 let mut rng = seeded_rng(seed);
                 let seat = state.to_act();
-                let action = template_action(&mut rng, &state, seat, &config, &template);
+                let action = template_action(&mut rng, &state, seat, &config, &template, &ranges);
                 assert!(
                     state.legal_actions().allows(action),
                     "skill {skill} seed {seed} produced illegal {action:?}"
@@ -707,6 +808,7 @@ mod tests {
     fn template_action_is_seed_deterministic() {
         let state = dealt_state();
         let template = OpponentTemplate::new(0.62);
+        let ranges = OpponentRangeModel::default();
         let mut a = seeded_rng(7);
         let mut b = seeded_rng(7);
         assert_eq!(
@@ -715,15 +817,45 @@ mod tests {
                 &state,
                 state.to_act(),
                 &MctsConfig::test(),
-                &template
+                &template,
+                &ranges,
             ),
             template_action(
                 &mut b,
                 &state,
                 state.to_act(),
                 &MctsConfig::test(),
-                &template
+                &template,
+                &ranges,
             )
+        );
+    }
+
+    #[test]
+    fn template_action_pins_the_actors_own_dealt_cards_without_solver_conflicts() {
+        // Before this fix, `template_action` never pinned the acting seat's
+        // own hand at all, so the solve averaged over a random redraw of it
+        // every world instead of evaluating the hand actually dealt. This
+        // pins it the same way `template_action` now does and checks the
+        // pin never collides with a sampled world (the failure mode a wrong
+        // rotation/index would produce).
+        let state = dealt_state();
+        let seat = state.to_act();
+        let rotated = state.rotated(seat);
+        let mut pins: [Option<[Card; 2]>; NUM_PLAYERS] = [None; NUM_PLAYERS];
+        pins[Seat::Hero.index()] = Some(rotated.hero_cards());
+        let mut rng = seeded_rng(11);
+        let result = mcts::solve_for_seat(
+            &mut rng,
+            &rotated,
+            &pins,
+            &[None; NUM_PLAYERS],
+            &MctsConfig::test(),
+            &mcts::candidates(&rotated),
+        );
+        assert!(
+            result.is_ok(),
+            "pinning the acting seat's real cards must not conflict with sampled worlds"
         );
     }
 }

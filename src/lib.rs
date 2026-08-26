@@ -12,6 +12,7 @@ pub mod live;
 pub mod mcts;
 pub mod opponent;
 pub mod opponent_analysis;
+pub mod opponent_history;
 pub mod range;
 pub mod range_cache;
 pub mod rng;

@@ -7,7 +7,10 @@ use crate::game::blinds::BLIND_SCHEDULE;
 use crate::game::{Action, ActionOutcome, GameState, HandEndReason, Seat, Street};
 use crate::mcts::MctsConfig;
 use crate::opponent::{
-    OpponentSnapshot, OpponentTemplate, OpponentTracker, placeholder_action, template_action,
+    MergedOpponentSnapshot, OpponentTemplate, OpponentTracker, placeholder_action, template_action,
+};
+use crate::opponent_history::{
+    ActionCategory, OpponentModel, decision_node, decision_stack_bucket,
 };
 use crate::range::hands::{HAND_COUNT, Range};
 use crate::rng::SeededRng;
@@ -106,6 +109,13 @@ pub struct TableSession {
     /// The field skill template the two bots play with; `None` falls back to
     /// the placeholder heuristic.
     template: Option<OpponentTemplate>,
+    /// The opponent's historic model, loaded once at session start: the
+    /// per-node range priors that let the bots' own MCTS solve reason about
+    /// the opponent's real tendencies instead of assuming a uniform range,
+    /// plus the historic read and starting-hand table rendered in the coach
+    /// panel. Defaults to empty (uniform ranges, no history) when nothing
+    /// has been gathered yet.
+    opponent_model: OpponentModel,
     hand_no: u64,
     action_no: u64,
     log: Vec<String>,
@@ -121,6 +131,10 @@ pub struct TableSession {
     /// an opponent has raised, or expires unused if the street changes first.
     pending_check_fold: Option<Street>,
     records: Vec<PendingDecision>,
+    /// Local bot decisions (with their true dealt cards) queued for
+    /// persistence into `local_opponent_actions` — the fallback/fill source
+    /// for the opponent history window; see [`crate::opponent_history`].
+    local_actions: Vec<crate::db::LocalOpponentAction>,
     /// Per-hand results (winner, hero all-in, hero bust) queued for
     /// persistence; the tournament detail page aggregates them.
     hand_results: Vec<PendingHandResult>,
@@ -139,6 +153,7 @@ impl TableSession {
     /// A fresh session at the first blind level with a shuffled deck and the
     /// given starting stack (the drill's resolved chip count, sampled from
     /// the hero's tournament history).
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         seed: u64,
         mcts: MctsConfig,
@@ -146,6 +161,7 @@ impl TableSession {
         blunder: BlunderConfig,
         template: Option<OpponentTemplate>,
         starting_stack: u32,
+        opponent_model: OpponentModel,
     ) -> Self {
         let mut rng = crate::rng::seeded_rng(seed);
         let deck = Deck::shuffled(&mut rng);
@@ -160,6 +176,7 @@ impl TableSession {
             survival,
             ranges: uniform_ranges(),
             template,
+            opponent_model,
             hand_no: 0,
             action_no: 0,
             log: Vec::new(),
@@ -169,6 +186,7 @@ impl TableSession {
             check_fold_requested: false,
             pending_check_fold: None,
             records: Vec::new(),
+            local_actions: Vec::new(),
             hand_results: Vec::new(),
             hero_all_in_this_hand: false,
             opponents: OpponentTracker::default(),
@@ -196,6 +214,7 @@ impl TableSession {
             survival,
             ranges: uniform_ranges(),
             template,
+            opponent_model: OpponentModel::default(),
             hand_no,
             action_no: 0,
             log: Vec::new(),
@@ -205,6 +224,7 @@ impl TableSession {
             check_fold_requested: false,
             pending_check_fold: None,
             records: Vec::new(),
+            local_actions: Vec::new(),
             hand_results: Vec::new(),
             hero_all_in_this_hand: false,
             opponents: OpponentTracker::default(),
@@ -216,12 +236,14 @@ impl TableSession {
     /// Rebuilds a session from a persisted tournament snapshot: the exact
     /// game state (street, bets, board, stacks), the remaining deck in deal
     /// order, the counters, the action log, and the opponent HUD counters.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_snapshot(
         snapshot: &crate::snapshot::TournamentSnapshot,
         seed: u64,
         mcts: MctsConfig,
         survival: SurvivalConfig,
         blunder: BlunderConfig,
+        opponent_model: OpponentModel,
     ) -> Result<Self> {
         let state = GameState::from_snapshot(&snapshot.state)?;
         let deck_cards = snapshot
@@ -245,6 +267,7 @@ impl TableSession {
             survival,
             ranges: uniform_ranges(),
             template: snapshot.template_skill.map(OpponentTemplate::new),
+            opponent_model,
             hand_no: snapshot.hand_no,
             action_no: snapshot.action_no,
             log,
@@ -254,6 +277,7 @@ impl TableSession {
             check_fold_requested: false,
             pending_check_fold: None,
             records: Vec::new(),
+            local_actions: Vec::new(),
             hand_results: Vec::new(),
             hero_all_in_this_hand: false,
             opponents: OpponentTracker::from_snapshot(&snapshot.opponents),
@@ -334,10 +358,18 @@ impl TableSession {
         std::mem::take(&mut self.pump_actions)
     }
 
-    /// The live HUD snapshots for both opponents, rendered inside the coach
-    /// feedback panel.
-    pub fn opponent_snapshots(&self) -> Vec<OpponentSnapshot> {
-        self.opponents.snapshots(&self.state)
+    /// The two bot seats' session-so-far stats merged into one read — both
+    /// seats are the same modeled opponent, so the coach panel shows a
+    /// single card instead of two.
+    pub fn merged_opponent_snapshot(&self) -> MergedOpponentSnapshot {
+        self.opponents.merged_snapshot()
+    }
+
+    /// The opponent's historic read and starting-hand table, loaded once at
+    /// session start — rendered in the coach panel alongside the live
+    /// session-so-far read.
+    pub fn opponent_history(&self) -> &crate::opponent_history::HistorySummary {
+        &self.opponent_model.historic
     }
 
     /// Queues one evaluated hero decision for persistence; the session
@@ -363,6 +395,12 @@ impl TableSession {
     /// Drains the decisions awaiting a database write.
     pub fn take_records(&mut self) -> Vec<PendingDecision> {
         std::mem::take(&mut self.records)
+    }
+
+    /// Drains the local bot decisions awaiting a database write into
+    /// `local_opponent_actions`.
+    pub fn take_local_actions(&mut self) -> Vec<crate::db::LocalOpponentAction> {
+        std::mem::take(&mut self.local_actions)
     }
 
     /// Drains the per-hand results awaiting a database write.
@@ -493,12 +531,12 @@ impl TableSession {
         let small_blind = self.state.small_blind_seat();
         let big_blind = self.state.big_blind_seat();
         self.log_line(format!(
-            "— Hand #{} — blinds {}/{} — BTN {}",
+            "— Hand #{} — blinds {}/{}",
             self.hand_no,
             self.state.blind_level().small_blind,
             self.state.blind_level().big_blind,
-            actor_name(self.state.button()),
         ));
+        self.log_line(format!("Dealer: {}", actor_name(self.state.button())));
         self.log_line(format!(
             "{} post SB {}",
             actor_name(small_blind),
@@ -567,14 +605,30 @@ impl TableSession {
             let actor = self.state.to_act();
             let legal = self.state.legal_actions();
             let call_amount = legal.call_amount;
+            // Captured before the action settles: the node/bucket/true-cards
+            // describe the decision the actor is currently facing.
+            let node = decision_node(&self.state);
+            let stack_bucket = decision_stack_bucket(&self.state);
+            let hole_cards = self.state.rotated(actor).hero_cards();
             let action = match self.template {
-                Some(template) => {
-                    template_action(&mut self.rng, &self.state, actor, &self.mcts, &template)
-                }
+                Some(template) => template_action(
+                    &mut self.rng,
+                    &self.state,
+                    actor,
+                    &self.mcts,
+                    &template,
+                    &self.opponent_model.ranges,
+                ),
                 None => placeholder_action(&mut self.rng, &self.state),
             };
             self.opponents
                 .record(actor, action, self.state.street(), legal.call_amount > 0);
+            self.local_actions.push(crate::db::LocalOpponentAction {
+                node: node.key().to_string(),
+                stack_bucket: stack_bucket.as_i16(),
+                hole_cards: format!("{} {}", hole_cards[0].to_code(), hole_cards[1].to_code()),
+                action: ActionCategory::of(action).label().to_string(),
+            });
             self.pump_actions.push(action);
             let outcome = self.settle_action(action)?;
             tracing::info!(
@@ -1099,6 +1153,7 @@ mod tests {
             never_intercepts(),
             None,
             STARTING_STACK,
+            OpponentModel::default(),
         );
         session.deal_next_hand().unwrap();
         session.pump().unwrap();
@@ -1118,6 +1173,7 @@ mod tests {
             never_intercepts(),
             None,
             420,
+            OpponentModel::default(),
         );
         assert_eq!(session.state().stacks(), [420, 420, 420]);
     }
@@ -1133,13 +1189,15 @@ mod tests {
             never_intercepts(),
             None,
             STARTING_STACK,
+            OpponentModel::default(),
         );
         session.deal_next_hand().unwrap();
         let log = session.log();
         assert!(
-            log.contains(&"— Hand #1 — blinds 10/20 — BTN You".to_string()),
+            log.contains(&"— Hand #1 — blinds 10/20".to_string()),
             "{log:?}"
         );
+        assert!(log.contains(&"Dealer: You".to_string()), "{log:?}");
         assert!(log.contains(&"You post SB 10".to_string()), "{log:?}");
         assert!(
             log.contains(&"Opponent 1 post BB 20".to_string()),
@@ -1165,7 +1223,11 @@ mod tests {
         assert_eq!(session.hand_no(), 2);
         let log = session.log();
         assert!(
-            log.contains(&"— Hand #2 — blinds 10/20 — BTN Opponent 1".to_string()),
+            log.contains(&"— Hand #2 — blinds 10/20".to_string()),
+            "{log:?}"
+        );
+        assert!(
+            log.contains(&"Dealer: Opponent 1".to_string()),
             "{log:?}"
         );
         assert!(
@@ -1865,6 +1927,7 @@ mod tests {
             never_intercepts(),
             None,
             STARTING_STACK,
+            OpponentModel::default(),
         );
         session.deal_next_hand().unwrap();
         for _ in 0..40 {
@@ -2246,6 +2309,7 @@ mod tests {
             probe_config(),
             survival(),
             never_intercepts(),
+            OpponentModel::default(),
         )
         .unwrap();
 
@@ -2336,6 +2400,7 @@ mod tests {
             probe_config(),
             survival(),
             never_intercepts(),
+            OpponentModel::default(),
         )
         .unwrap();
         assert!(
@@ -2396,7 +2461,8 @@ mod tests {
                 1,
                 probe_config(),
                 survival(),
-                never_intercepts()
+                never_intercepts(),
+                OpponentModel::default()
             ),
             Err(Error::Game(_))
         ));
@@ -2409,7 +2475,8 @@ mod tests {
                 1,
                 probe_config(),
                 survival(),
-                never_intercepts()
+                never_intercepts(),
+                OpponentModel::default()
             ),
             Err(Error::Game(_))
         ));
@@ -2422,7 +2489,8 @@ mod tests {
                 1,
                 probe_config(),
                 survival(),
-                never_intercepts()
+                never_intercepts(),
+                OpponentModel::default()
             ),
             Err(Error::Game(_))
         ));
@@ -2435,7 +2503,8 @@ mod tests {
                 1,
                 probe_config(),
                 survival(),
-                never_intercepts()
+                never_intercepts(),
+                OpponentModel::default()
             ),
             Err(Error::Game(_))
         ));
@@ -2491,7 +2560,10 @@ mod tests {
         );
         assert!(session.state().is_hand_over());
         assert_eq!(
-            events.iter().filter(|e| matches!(e, TableEvent::ChartTick { .. })).count(),
+            events
+                .iter()
+                .filter(|e| matches!(e, TableEvent::ChartTick { .. }))
+                .count(),
             2,
             "the check and the auto-fold are each graded and charted separately: {events:?}"
         );
