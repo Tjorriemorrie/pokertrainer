@@ -2,8 +2,9 @@
 One starting-hand panel: one cell per of the 169 hand classes, laid out as a
 13x13 grid via CSS grid (`.pt-range-grid`) so this flat, row-major cell list
 (`cells`, from `range::hands::all_hands()` order) wraps into the grid without
-any row-break logic here. Each graded cell shows a stacked fold/call/raise
-bar; ungraded cells (too few historic samples) show just the label.
+any row-break logic here. Each graded cell (at least one real sample) shows a
+stacked fold/call/raise bar, faded by `bar_opacity` in proportion to how thin
+that sample is; only a cell with zero samples shows just the label.
 
 Rendered twice per connection — once for the hero, once for the bots — via
 `RangeTableFragment::new`, distinguished only by `panel_id` (a DOM id the
@@ -15,7 +16,7 @@ parsing the grid's row-major layout itself.
 <div class="pt-range-cell{% if !cell.graded %} ungraded{% endif %}" data-hand="{{ cell.label }}" title="{{ cell.label }}: {{ cell.detail }}">
 <span class="pt-range-label">{{ cell.label }}</span>
 {%- if cell.graded -%}
-<span class="pt-range-bar"><span class="pt-range-fold" style="height:{{ cell.fold_pct }}%"></span><span class="pt-range-call" style="height:{{ cell.call_pct }}%"></span><span class="pt-range-raise" style="height:{{ cell.raise_pct }}%"></span></span>
+<span class="pt-range-bar" style="opacity:{{ cell.bar_opacity }}"><span class="pt-range-fold" style="height:{{ cell.fold_pct }}%"></span><span class="pt-range-call" style="height:{{ cell.call_pct }}%"></span><span class="pt-range-raise" style="height:{{ cell.raise_pct }}%"></span></span>
 {%- endif -%}
 </div>
 {%- endfor -%}

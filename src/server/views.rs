@@ -1209,14 +1209,23 @@ impl OpponentsFragment {
 /// with this hand class over the historic window.
 struct HandCellView {
     label: String,
-    /// `false` when the sample is too thin to grade — the cell shows a
-    /// placeholder instead of a falsely precise percentage.
+    /// `false` when there isn't even one sample — the cell shows a bare
+    /// placeholder instead of a bar with nothing behind it.
     graded: bool,
     detail: String,
     fold_pct: String,
     call_pct: String,
     raise_pct: String,
+    /// How solid the bar's color should look, as a CSS opacity — fades in
+    /// with sample count so one lonely fold doesn't look as confident as a
+    /// well-observed cell. See `CONFIDENT_HAND_SAMPLES`.
+    bar_opacity: String,
 }
+
+/// Sample count at which a graded cell's bar reaches full opacity — below
+/// this it's still drawn (any real sample beats showing nothing), just
+/// visibly faded in proportion to how thin the sample is.
+const CONFIDENT_HAND_SAMPLES: f64 = 8.0;
 
 #[derive(Template)]
 #[template(path = "fragments/opponent_range_table.html")]
@@ -1250,6 +1259,12 @@ impl RangeTableFragment {
                     } else {
                         format!("Too few hands to grade yet ({} seen)", row.samples)
                     };
+                    // A floor of 0.35 (not 0) keeps a single-sample cell
+                    // visibly colored rather than nearly invisible — the
+                    // point is to show real data immediately, just less
+                    // boldly than a well-observed one.
+                    let confidence = (row.samples as f64 / CONFIDENT_HAND_SAMPLES).min(1.0);
+                    let bar_opacity = 0.35 + 0.65 * confidence;
                     HandCellView {
                         label: row.label.clone(),
                         graded,
@@ -1257,6 +1272,7 @@ impl RangeTableFragment {
                         fold_pct: row.fold_pct.map(|p| format!("{p:.0}")).unwrap_or_default(),
                         call_pct: row.call_pct.map(|p| format!("{p:.0}")).unwrap_or_default(),
                         raise_pct: row.raise_pct.map(|p| format!("{p:.0}")).unwrap_or_default(),
+                        bar_opacity: format!("{bar_opacity:.2}"),
                     }
                 })
                 .collect(),

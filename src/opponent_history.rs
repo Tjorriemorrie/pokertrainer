@@ -2,11 +2,11 @@
 //! and the real imported field as one modeled "opponent" (the user's own
 //! framing — "it is the same opponent, I'm just playing against two of the
 //! same bot"). This module builds the window of that opponent's most recent
-//! [`WINDOW`] actions — real imported hands (`gg_hands`) first, since those
-//! only reveal hole cards at showdown, padded out with the trainer's own
-//! locally-generated bot decisions (`local_opponent_actions`, where the
-//! engine's true deal is always known) whenever `gg_hands` alone falls
-//! short — and turns that window into two things:
+//! [`HISTORY_WINDOW`] hands — real imported hands (`gg_hands`) first, since
+//! those only reveal hole cards at showdown, combined with every
+//! locally-generated bot decision (`local_opponent_actions`, where the
+//! engine's true deal is always known) — and turns that window into two
+//! things:
 //!
 //! * a per-node [`Range`] prior (`contextual_ranges`), fed into the bots'
 //!   own MCTS solve so they play the opponent's real tendencies instead of
@@ -26,18 +26,29 @@ use crate::range::hands::{HAND_COUNT, Hand, Range, all_hands};
 use crate::range::sequence::{RangeResolver, SequenceNode, StackBucket, UniformPopulation};
 use crate::range_cache::PgRangeStore;
 
-/// How many of the most recent actions feed the window — `gg_hands` first,
-/// padded by `local_opponent_actions`. Matches the sample size already used
-/// for the drill field-skill grading window ([`crate::opponent_analysis::ANALYSIS_WINDOW`]).
-pub const WINDOW: i64 = 1000;
+/// How many of the most recent imported hands feed the window — every
+/// preflop-or-later decision from `gg_hands` combined with every row in
+/// `local_opponent_actions`/`local_hero_actions` (those are already
+/// individual actions, not hands, so this cap only bounds the `gg_hands`
+/// side; local play is never large enough for that to matter in practice).
+/// Large enough that in practice it just means "everything gathered so
+/// far" — the starting-hand grid needs every sample it can get across 169
+/// hand classes, unlike the drill field-skill grading window
+/// ([`crate::opponent_analysis::ANALYSIS_WINDOW`]), which deliberately
+/// stays small to track *recent* skill.
+pub const HISTORY_WINDOW: i64 = 10_000;
 
 /// The name of the single pooled opponent profile both bot seats (and the
 /// imported field) are modeled as — there is only ever one row.
 pub const POOLED_PROFILE_NAME: &str = "field";
 
 /// A cell in the starting-hand table needs at least this many samples before
-/// its action mix is shown as a real percentage rather than "too few hands".
-pub const MIN_HAND_SAMPLES: u32 = 10;
+/// its action mix is shown at all — below this, a real percentage would be
+/// too noisy to mean anything (a single fold reads as "folds 100%"). Once
+/// graded, the cell's color still fades in with sample count rather than
+/// snapping straight to full confidence at the threshold — see
+/// `crate::server::views::RangeTableFragment::new`.
+pub const MIN_HAND_SAMPLES: u32 = 1;
 
 // ------------------------------------------------------------------- node
 
@@ -252,20 +263,16 @@ async fn load_gg_actions(pool: &PgPool, limit: i64) -> Result<Vec<HistoricAction
     Ok(actions)
 }
 
-/// Loads the combined "latest [`WINDOW`] actions" for the opponent: real
-/// imported hands first, padded out with local bot decisions whenever the
-/// real hands alone (hole cards known only when shown) don't reach the
-/// window size.
-pub async fn load_action_window(pool: &PgPool, limit: i64) -> Result<Vec<HistoricAction>> {
-    let mut actions = load_gg_actions(pool, limit).await?;
-    if actions.len() as i64 > limit {
-        actions.truncate(limit as usize);
-    }
-    let shortfall = limit - actions.len() as i64;
-    if shortfall > 0 {
-        let local = db::load_recent_local_opponent_actions(pool, shortfall).await?;
-        actions.extend(local.into_iter().filter_map(HistoricAction::from_local));
-    }
+/// Loads the combined window for the opponent: every decision from the
+/// `hand_limit` most recent imported hands, plus every locally-recorded bot
+/// decision — real imported hands don't reveal an opponent's hole cards
+/// unless the hand went to showdown, so local play (the engine's true deal
+/// is always known there) is never just a fallback-when-thin, it's added in
+/// full every time.
+pub async fn load_action_window(pool: &PgPool, hand_limit: i64) -> Result<Vec<HistoricAction>> {
+    let mut actions = load_gg_actions(pool, hand_limit).await?;
+    let local = db::load_recent_local_opponent_actions(pool, HISTORY_WINDOW).await?;
+    actions.extend(local.into_iter().filter_map(HistoricAction::from_local));
     Ok(actions)
 }
 
@@ -302,19 +309,13 @@ async fn load_hero_gg_actions(pool: &PgPool, limit: i64) -> Result<Vec<HistoricA
     Ok(actions)
 }
 
-/// Loads the combined "latest [`WINDOW`] actions" for the hero: real imported
-/// hands first, padded out with local play whenever the real hands alone
-/// don't reach the window size. Mirrors [`load_action_window`].
-pub async fn load_hero_action_window(pool: &PgPool, limit: i64) -> Result<Vec<HistoricAction>> {
-    let mut actions = load_hero_gg_actions(pool, limit).await?;
-    if actions.len() as i64 > limit {
-        actions.truncate(limit as usize);
-    }
-    let shortfall = limit - actions.len() as i64;
-    if shortfall > 0 {
-        let local = db::load_recent_local_hero_actions(pool, shortfall).await?;
-        actions.extend(local.into_iter().filter_map(HistoricAction::from_local_hero));
-    }
+/// Loads the combined window for the hero: every decision from the
+/// `hand_limit` most recent imported hands, plus every locally-recorded hero
+/// decision. Mirrors [`load_action_window`].
+pub async fn load_hero_action_window(pool: &PgPool, hand_limit: i64) -> Result<Vec<HistoricAction>> {
+    let mut actions = load_hero_gg_actions(pool, hand_limit).await?;
+    let local = db::load_recent_local_hero_actions(pool, HISTORY_WINDOW).await?;
+    actions.extend(local.into_iter().filter_map(HistoricAction::from_local_hero));
     Ok(actions)
 }
 
@@ -592,7 +593,7 @@ pub struct OpponentModel {
 /// after importing new `gg_hands`, and periodically as local play
 /// accumulates.
 pub async fn refresh(pool: &PgPool) -> Result<HistorySummary> {
-    let actions = load_action_window(pool, WINDOW).await?;
+    let actions = load_action_window(pool, HISTORY_WINDOW).await?;
     let profile_id = db::upsert_opponent_profile(pool, POOLED_PROFILE_NAME, "FIELD").await?;
     let model = build_range_model(&actions);
     save_range_model(pool, profile_id, &model).await?;
@@ -607,7 +608,7 @@ pub async fn refresh(pool: &PgPool) -> Result<HistorySummary> {
 /// summary. Mirrors [`refresh`], minus the range-model persistence — the
 /// hero's own historic actions aren't used as anyone's solver prior.
 pub async fn refresh_hero(pool: &PgPool) -> Result<HistorySummary> {
-    let actions = load_hero_action_window(pool, WINDOW).await?;
+    let actions = load_hero_action_window(pool, HISTORY_WINDOW).await?;
     Ok(HistorySummary {
         window_actions: actions.len(),
         read: build_historic_read(&actions),
@@ -940,7 +941,7 @@ Seat 3: 14c11a2a (big blind) folded on the River";
     // ------------------------------------------------------- hand table
 
     #[test]
-    fn starting_hand_table_gates_low_sample_cells() {
+    fn starting_hand_table_grades_a_single_observed_sample_but_not_an_unseen_hand() {
         let aa = hand(Rank::Ace, Rank::Ace, false);
         let seven_two = hand(Rank::Seven, Rank::Two, false);
         let mut actions: Vec<HistoricAction> = (0..12)
@@ -953,7 +954,8 @@ Seat 3: 14c11a2a (big blind) folded on the River";
                 )
             })
             .collect();
-        // Below MIN_HAND_SAMPLES: stays ungraded.
+        // A single sample is thin, but real data with real data beats
+        // showing nothing — MIN_HAND_SAMPLES(1) grades it.
         actions.push(action(
             seven_two,
             Node::PfVsRaise,
@@ -977,8 +979,16 @@ Seat 3: 14c11a2a (big blind) folded on the River";
         let seven_two_row = table.iter().find(|row| row.label == "72o").unwrap();
         assert_eq!(seven_two_row.samples, 1);
         assert_eq!(
-            seven_two_row.fold_pct, None,
-            "below MIN_HAND_SAMPLES, cells stay ungraded rather than showing false precision"
+            seven_two_row.fold_pct,
+            Some(100.0),
+            "one real sample is still graded, not hidden as false precision"
+        );
+
+        let unseen_row = table.iter().find(|row| row.label == "72s").unwrap();
+        assert_eq!(unseen_row.samples, 0);
+        assert_eq!(
+            unseen_row.fold_pct, None,
+            "a hand class with zero samples stays ungraded — there is nothing to show"
         );
     }
 
