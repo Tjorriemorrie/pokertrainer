@@ -253,7 +253,11 @@ impl WorldSearch {
                         self.backprop(&path, payoff);
                         return Ok(());
                     }
-                    let child = self.select_ucb(index);
+                    let child = if index == self.root {
+                        self.select_least_visited(index)
+                    } else {
+                        self.select_ucb(index)
+                    };
                     path.push(child);
                 }
             }
@@ -420,6 +424,21 @@ impl WorldSearch {
             return node.children[position].node;
         }
         node.children[gen_index(rng, node.children.len())].node
+    }
+
+    /// Picks the root's least-visited child. Unlike [`Self::select_ucb`], this
+    /// never lets an action's early sample luck starve it of further visits —
+    /// every root candidate keeps accumulating evidence at roughly the same
+    /// rate, so the EVs reported to the coach converge with comparable
+    /// confidence instead of the bandit fixating on whichever action looked
+    /// best first.
+    fn select_least_visited(&self, index: usize) -> usize {
+        let node = &self.nodes[index];
+        node.children
+            .iter()
+            .min_by_key(|child| self.nodes[child.node].visits)
+            .map(|child| child.node)
+            .unwrap_or(index)
     }
 
     fn select_ucb(&self, index: usize) -> usize {
