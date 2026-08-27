@@ -2781,13 +2781,15 @@ mod tests {
         let page = play_page(Some(0.71), Some(0.62)).unwrap();
         assert!(page.contains("pt-skill-chip"), "{page}");
         assert!(
-            page.contains("You <b>0.71</b> · Bots <b>0.62</b>"),
+            page.contains("<span>You</span><b>0.71</b>")
+                && page.contains("<span>Bots</span><b>0.62</b>"),
             "{page}"
         );
 
         let missing = play_page(None, Some(0.62)).unwrap();
         assert!(
-            missing.contains("You <b>—</b> · Bots <b>0.62</b>"),
+            missing.contains("<span>You</span><b>—</b>")
+                && missing.contains("<span>Bots</span><b>0.62</b>"),
             "{missing}"
         );
 

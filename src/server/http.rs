@@ -1474,7 +1474,7 @@ You finished in 1st place.
         let (status, body) = get_with(state.clone(), "/play").await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("pt-skill-chip"), "{body}");
-        assert!(body.contains("Bots <b>0.62</b>"), "{body}");
+        assert!(body.contains("<span>Bots</span><b>0.62</b>"), "{body}");
 
         let session = analytics::start_session(&pool).await.unwrap();
         analytics::persist_records(
@@ -1494,8 +1494,8 @@ You finished in 1st place.
         let (status, body) = get_with(state.clone(), "/play").await;
         assert_eq!(status, StatusCode::OK);
         assert!(
-            body.contains("You <b>") && body.contains("· Bots <b>0.62</b>"),
-            "the hero's lifetime skill lands next to the field's: {body}"
+            body.contains("<span>You</span><b>") && body.contains("<span>Bots</span><b>0.62</b>"),
+            "the hero's skill lands next to the field's: {body}"
         );
 
         let (status, body) = get_with(state.clone(), "/history").await;
