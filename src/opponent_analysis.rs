@@ -934,17 +934,24 @@ pub async fn clear_template(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
-/// The hero's lifetime average EV loss per decision, in big blinds, from the
-/// stored decision history.
+/// The hero's average EV loss per decision, in big blinds, over the last
+/// [`crate::analytics::CHART_WINDOW`] decisions — the same window backing
+/// the playing table's chart.
 pub async fn hero_avg_ev_loss(pool: &PgPool) -> Result<Option<f64>> {
-    let row: Option<Option<f64>> = sqlx::query_scalar("SELECT AVG(ev_loss) FROM hero_decisions")
-        .fetch_optional(pool)
-        .await?;
+    let row: Option<Option<f64>> = sqlx::query_scalar(
+        "SELECT AVG(ev_loss) FROM (
+             SELECT ev_loss FROM hero_decisions ORDER BY id DESC LIMIT $1
+         ) recent",
+    )
+    .bind(crate::analytics::CHART_WINDOW as i64)
+    .fetch_optional(pool)
+    .await?;
     Ok(row.flatten())
 }
 
-/// The hero's skill on the same scale as the field template: the lifetime
-/// average EV loss mapped through [`skill_from`].
+/// The hero's skill on the same scale as the field template: the recent
+/// average EV loss (over [`crate::analytics::CHART_WINDOW`] decisions) mapped
+/// through [`skill_from`].
 pub async fn hero_skill(pool: &PgPool) -> Result<Option<f64>> {
     let Some(avg) = hero_avg_ev_loss(pool).await? else {
         return Ok(None);
@@ -1596,11 +1603,13 @@ Seat 3: 14c11a2a (small blind) showed [Qs Ad] and won (600) with a pair of Queen
 
         let _guard = crate::analytics::DB_TEST_LOCK.lock().await;
         let pool = test_pool().await;
-        type LossRow = (f64, f64, i64);
+        type LossRow = (f64, i64);
         let before: LossRow = sqlx::query_as(
-            "SELECT COALESCE(AVG(ev_loss), 0), COALESCE(SUM(ev_loss), 0), COUNT(*)
-             FROM hero_decisions",
+            "SELECT COALESCE(SUM(ev_loss), 0), COUNT(*) FROM (
+                 SELECT ev_loss FROM hero_decisions ORDER BY id DESC LIMIT $1
+             ) recent",
         )
+        .bind(crate::analytics::CHART_WINDOW as i64)
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -1631,10 +1640,10 @@ Seat 3: 14c11a2a (small blind) showed [Qs Ad] and won (600) with a pair of Queen
         .unwrap();
 
         let avg = hero_avg_ev_loss(&pool).await.unwrap().unwrap();
-        let expected = (before.1 + 2.5) / (before.2 + 2) as f64;
+        let expected = (before.0 + 2.5) / (before.1 + 2) as f64;
         assert!(
             (avg - expected).abs() < 1e-9,
-            "lifetime average includes the two new losses: {avg} vs {expected}"
+            "windowed average includes the two new losses: {avg} vs {expected}"
         );
         let skill = hero_skill(&pool).await.unwrap().unwrap();
         assert!((skill - (1.0 - avg / SKILL_ZERO_LOSS_BB).clamp(0.0, 1.0)).abs() < 1e-9);
