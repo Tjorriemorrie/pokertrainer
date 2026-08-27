@@ -693,20 +693,17 @@ async fn persist_local_actions(pool: Option<&PgPool>, session: &mut TableSession
     }
 }
 
-/// The decimated chart dataset mapping the last 1,000 stored actions;
-/// an empty dataset means there is no stored history.
+/// The last 1,000 stored actions, one point per action; an empty dataset
+/// means there is no stored history.
 async fn snapshot_frame(pool: Option<&PgPool>) -> Option<String> {
     let pool = pool?;
     match analytics::load_recent(pool, analytics::CHART_WINDOW).await {
-        Ok(points) => {
-            let decimated = analytics::decimate(&points, analytics::DECIMATED_POINTS);
-            Some(
-                match (ServerMessage::ChartSnapshot { points: decimated }).to_json() {
-                    Ok(json) => json,
-                    Err(error) => error_message(&error.to_string()),
-                },
-            )
-        }
+        Ok(points) => Some(
+            match (ServerMessage::ChartSnapshot { points }).to_json() {
+                Ok(json) => json,
+                Err(error) => error_message(&error.to_string()),
+            },
+        ),
         Err(error) => {
             tracing::warn!(%error, "stored chart history unavailable — sending an empty snapshot");
             Some(

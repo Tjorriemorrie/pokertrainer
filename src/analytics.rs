@@ -6,11 +6,11 @@
 //! renderings of the same graph:
 //!
 //! * the playing table's top-bar chart — the last [`CHART_WINDOW`] actions
-//!   across every session (the lifetime curve, snapped on connect), and
-//! * the `/tournaments` page — one decimated chart per finished session.
-//!
-//! Charts are decimated server-side to [`DECIMATED_POINTS`] points so the
-//! client can render them instantly.
+//!   across every session, one point per action (the lifetime curve, snapped
+//!   on connect and appended to live as each action is submitted), and
+//! * the `/tournaments` page — one decimated chart per finished session,
+//!   decimated server-side to [`DECIMATED_POINTS`] points so the client can
+//!   render a finished session instantly without 1,000 points of history.
 
 use sqlx::{PgExecutor, PgPool};
 
