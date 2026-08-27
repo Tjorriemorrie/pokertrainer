@@ -1,6 +1,8 @@
 pub mod actions;
 pub mod config;
 pub mod rollout;
+#[cfg(test)]
+mod tournament_value;
 pub mod tree;
 pub mod world;
 
