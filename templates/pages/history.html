@@ -20,9 +20,10 @@ one row per imported tournament (newest first) linking to its detail page.
   </div>
   <p class="pt-detail-meta">Reads the PokerCraft zip exports in the history/ folder and imports the hands into
   the database. Hands that were already imported are skipped, so re-scanning is always safe.</p>
-  <p class="pt-detail-meta">Analyze imported opponents grades every opponent decision in your last
-  1,000 imported hands against the solver and turns the average big-blind loss into the field skill
-  level both bots play with.</p>
+  <p class="pt-detail-meta">Analyze imported opponents grades every opponent decision — and every one of
+  your own — in your last 1,000 imported hands against the solver. The opponent seats pool into the
+  field skill level both bots play with; your own hand-history play is graded the same way and shown
+  separately below and in the tournament table, apart from your live-drill EV.</p>
   {% if let Some(chip) = chip %}<div class="pt-template-chip"><span>Bots trained on: {{ chip.label }} — skill <b>{{ chip.skill }}</b> ({{ chip.avg_ev_loss_bb }} BB lost/decision over {{ chip.decisions }} decisions)</span>
   <form method="post" action="/history/clear-template">
     <button class="pt-link-btn" type="submit">Clear template</button>
@@ -35,8 +36,8 @@ one row per imported tournament (newest first) linking to its detail page.
 <section class="pt-detail">
   <div class="pt-detail-head"><h2 class="pt-hh-title">Tournaments</h2></div>
   {% if rows.is_empty() %}<div class="pt-empty">No imported hand histories yet — press <b>Scan for new hand histories</b> to read the zips in your history/ folder.</div>{% else %}<table class="pt-hh-table">
-<tr><th>Date</th><th>Tournament</th><th>Result</th><th>Buy-in</th><th>Place</th><th>Prize</th><th>Profit</th><th>Hands</th><th>Won</th><th>Win %</th><th>Net chips</th></tr>
-{% for row in rows %}<tr data-tournament-id="{{ row.id }}"{% if row.is_highlighted %} class="pt-highlight"{% endif %}><td class="pt-hh-date">{{ row.date }}</td><td><a class="pt-link" href="/history/tournaments/{{ row.id }}">{{ row.name }}</a>{% if let Some(game) = row.game_type %}<span class="pt-hh-sub">{{ game }} </span>{% endif %}<span class="pt-hh-sub">{{ row.entrants }}</span></td><td>{% if !row.badge_class.is_empty() %}<span class="pt-result-badge{{ row.badge_class }}">{{ row.badge_label }}</span>{% else %}{{ row.badge_label }}{% endif %}</td><td>{{ row.buy_in }}</td><td>{{ row.place }}</td><td>{{ row.prize }}</td><td class="{{ row.profit_class }}">{{ row.profit }}</td><td>{{ row.hands }}</td><td>{{ row.hands_won }}</td><td>{{ row.win_pct }}%</td><td class="{{ row.net_class }}">{{ row.net_chips }}</td></tr>
+<tr><th>Date</th><th>Tournament</th><th>Result</th><th>Buy-in</th><th>Place</th><th>Prize</th><th>Profit</th><th>Hands</th><th>Won</th><th>Win %</th><th>Net chips</th><th title="Your average BB lost per decision in this tournament, graded against the solver">Your EV</th><th title="The opponent field's average BB lost per decision in this tournament, graded against the solver">Field EV</th></tr>
+{% for row in rows %}<tr data-tournament-id="{{ row.id }}"{% if row.is_highlighted %} class="pt-highlight"{% endif %}><td class="pt-hh-date">{{ row.date }}</td><td><a class="pt-link" href="/history/tournaments/{{ row.id }}">{{ row.name }}</a>{% if let Some(game) = row.game_type %}<span class="pt-hh-sub">{{ game }} </span>{% endif %}<span class="pt-hh-sub">{{ row.entrants }}</span></td><td>{% if !row.badge_class.is_empty() %}<span class="pt-result-badge{{ row.badge_class }}">{{ row.badge_label }}</span>{% else %}{{ row.badge_label }}{% endif %}</td><td>{{ row.buy_in }}</td><td>{{ row.place }}</td><td>{{ row.prize }}</td><td class="{{ row.profit_class }}">{{ row.profit }}</td><td>{{ row.hands }}</td><td>{{ row.hands_won }}</td><td>{{ row.win_pct }}%</td><td class="{{ row.net_class }}">{{ row.net_chips }}</td><td>{{ row.hero_ev }}</td><td>{{ row.opponent_ev }}</td></tr>
 {% endfor %}</table>{% endif %}
 </section>
 {% endblock %}

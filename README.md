@@ -179,17 +179,26 @@ interface and coaches decision-making with a range-based solver.
   come from the tournament-summary files PokerCraft exports next to the
   hands.
 - **Opponent-skill analysis & skill-graded bots:** the hand history page's
-  **Analyze imported opponents** button replays every opponent decision in
-  the last 1,000 imported hands and grades it against a seat-perspective
-  MCTS solve, scoring each played action's big-blind EV loss. The pooled
-  field average becomes one skill level (0..1, anchored at 5 BB lost per
-  decision) with a per-opponent breakdown and a background job with live
-  progress; per-hand results are cached in the database so re-runs are
-  incremental. Saving the **bot template** makes both local bots play via
+  **Analyze imported opponents** button replays every opponent decision *and*
+  every one of your own decisions in the last 1,000 imported hands, grading
+  each against a seat-perspective MCTS solve to score the played action's
+  big-blind EV loss. Both sides are pooled separately over your most recent
+  1,000 graded decisions (a rolling window, not a fixed hand count): the
+  opponent field's average becomes one skill level (0..1, anchored at 5 BB
+  lost per decision) with a per-opponent breakdown, and your own hand-history
+  EV is reported the same way alongside it — a distinct number from the
+  live-drill EV tracked while playing in the trainer, never mixed into the
+  bot template. A background job with live progress does the solving;
+  per-hand results (both sides) are cached in the database so re-runs are
+  incremental. The hand-history table itself gains **Your EV** and **Field
+  EV** columns — each imported tournament's own average BB lost per
+  decision, straight from that cache, with an em dash for tournaments not
+  yet analyzed. Saving the **bot template** makes both local bots play via
   their own MCTS solves with a skill-tempered action spread (skill 1 always
   takes the solver-best action; weaker skills leak big blinds like the
   analyzed field), and the table header chip — **You 0.77 · Bots 0.48** —
-  compares your lifetime skill against the field on the same scale.
+  compares your lifetime *live-drill* skill against the field on the same
+  scale.
 - **GGPoker frontend:** a server-rendered GGPoker table skin with the
   Spin and Gold look — dark-teal oval felt on a wooden rail, three fixed seat
   pods (opponents top-left/top-right, hero bottom-center) that stay in place
@@ -344,22 +353,32 @@ first) with your total profit, win ratios, and per-tournament detail pages.
 ### Analyzing your opponents & training the bots against them
 
 Right next to the scan button sits **Analyze imported opponents**. It replays
-every opponent decision in your last 1,000 imported hands, solves each spot
-from the opponent's perspective with the MCTS solver, and measures how many
-big blinds the played action gave up against the best one. The pooled average
-over both opponent seats becomes a single **field skill** (0 = leaks
-5 BB/decision, 1 = solver-perfect); the analysis page shows the per-opponent
-breakdown, the hands it skipped and why. Because a full pass is solver work,
-the job runs in the background with a live progress counter — already-analyzed
-hands are stored and skipped, so re-running only grades what is new. Press
-**Use field skill … as the bot template** to save it: both local bots now pick
-every decision through an MCTS solve of their own and then choose among the
-candidate EVs with a skill-tempered spread — at skill 1 they always take the
-best-EV action, and lower skills leak big blinds the way the analyzed field
-did. The table header shows both sides on the same scale next to the EV graph:
-**You 0.77 · Bots 0.48** compares your lifetime decision history against the
-stored field template whenever a table is open. Clear the template from the
-hand history page to restore the default placeholder opponents.
+every opponent decision — and every one of your own — in your last 1,000
+imported hands, solves each spot from the acting seat's perspective with the
+MCTS solver, and measures how many big blinds the played action gave up
+against the best one. Both sides are then pooled separately over your most
+recent 1,000 graded decisions (a rolling window that slides forward as you
+import and re-analyze more hands): the opponent seats become a single
+**field skill** (0 = leaks 5 BB/decision, 1 = solver-perfect), and your own
+hand-history play is scored the same way right alongside it — reported as
+its own counter, never combined with the field skill and never mixed into
+the EV you track live while drilling in the trainer. The analysis page shows
+the per-opponent breakdown plus the hands it skipped and why. Because a full
+pass is solver work, the job runs in the background with a live progress
+counter — already-analyzed hands (both sides) are stored and skipped, so
+re-running only grades what is new. Back on the hand-history page, every
+tournament row also shows **Your EV** and **Field EV** — that tournament's
+own average BB lost per decision, straight from the same cache, with an em
+dash until it has been analyzed. Press **Use field skill … as the bot
+template** to save it: both local bots now pick every decision through an
+MCTS solve of their own and then choose among the candidate EVs with a
+skill-tempered spread — at skill 1 they always take the best-EV action, and
+lower skills leak big blinds the way the analyzed field did. The table
+header shows both sides on the same scale next to the EV graph: **You
+0.77 · Bots 0.48** compares your lifetime *live-drill* decision history
+against the stored field template whenever a table is open. Clear the
+template from the hand history page to restore the default placeholder
+opponents.
 
 ### Running the tests
 

@@ -297,8 +297,8 @@ async fn history(
         .map(str::to_string)
         .collect();
     let page = match history_page_data(&pool).await {
-        Ok((stats, tournaments, template)) => {
-            views::history_page(&stats, &tournaments, template.as_ref(), &highlight)
+        Ok((stats, tournaments, template, ev)) => {
+            views::history_page(&stats, &tournaments, template.as_ref(), &highlight, &ev)
         }
         Err(error) => {
             tracing::warn!(%error, "history page failed to render");
@@ -312,19 +312,28 @@ async fn history(
     html(page)
 }
 
-/// Loads the data driving the history page: lifetime stats, the listing, and
-/// the stored bot template.
+/// Loads the data driving the history page: lifetime stats, the listing, the
+/// stored bot template, and the hand-history EV data (rolling counters plus
+/// each tournament's own average).
 async fn history_page_data(
     pool: &PgPool,
 ) -> Result<(
     hh::OverallStats,
     Vec<hh::TournamentListing>,
     Option<opponent_analysis::DrillTemplate>,
+    views::HistoryEv,
 )> {
     let stats = hh::overall_stats(pool).await?;
     let tournaments = hh::list_tournaments(pool).await?;
     let template = opponent_analysis::load_template(pool).await?;
-    Ok((stats, tournaments, template))
+    let (opponent_rolling, hero_rolling) = opponent_analysis::rolling_field_stats(pool).await?;
+    let per_tournament = opponent_analysis::tournament_ev_totals(pool).await?;
+    let ev = views::HistoryEv {
+        opponent_rolling,
+        hero_rolling,
+        per_tournament,
+    };
+    Ok((stats, tournaments, template, ev))
 }
 
 /// Scans the configured history directory, imports the found hands, and
@@ -1396,6 +1405,9 @@ You finished in 1st place.
             decisions: 90,
             avg_ev_loss_bb: 0.35,
             skill: 0.77,
+            hero_decisions: 42,
+            hero_avg_ev_loss_bb: 0.2,
+            hero_skill: 0.88,
             players: Vec::new(),
             problems: Vec::new(),
         };

@@ -31,8 +31,17 @@ use crate::range::hands::Hand;
 use crate::rng::seeded_rng;
 use crate::snapshot::StateSnapshot;
 
-/// How many of the most recent imported hands feed the analysis window.
+/// How many of the most recent imported hands get walked and graded (and
+/// cached) on each analysis run — a computational cap, not the reporting
+/// window (see [`EV_ROLLING_WINDOW`]).
 pub const ANALYSIS_WINDOW: i64 = 1000;
+
+/// How many of the most recent graded *decisions* (not hands) feed the
+/// pooled EV figures reported for the hero and for the opponent field —
+/// walked newest-hand-first and stopped once the threshold is reached, so
+/// the cutoff lands on a hand boundary rather than mid-hand. Kept separate
+/// from [`ANALYSIS_WINDOW`], which bounds how many hands get solved at all.
+pub const EV_ROLLING_WINDOW: i64 = 1000;
 
 /// The average EV loss (in big blinds) that maps to skill zero. Graded from
 /// the opponent's seat with a uniform prior (their exact cards are unknown),
@@ -54,9 +63,20 @@ pub fn skill_from(ev_loss_sum: f64, decisions: u32) -> f64 {
 
 // ---------------------------------------------------------------- walking
 
-/// One frozen opponent decision: the game state exactly as the hand stood
-/// before the played action, re-labeled so the acting opponent occupies the
-/// hero slot, plus the pins the grader knows (the real hero's hole cards).
+/// The two decision streams one hand walk produces: every opponent decision
+/// (graded against a uniform prior, since their cards are usually unknown)
+/// and every decision the real hero made in that same hand (graded with the
+/// hero's true known cards, since PokerCraft always records them).
+#[derive(Default)]
+pub struct WalkedHand {
+    pub opponent: Vec<DecisionPoint>,
+    pub hero: Vec<DecisionPoint>,
+}
+
+/// One frozen decision: the game state exactly as the hand stood before the
+/// played action, re-labeled so the acting seat occupies the hero slot, plus
+/// the pins the grader knows (the real hero's hole cards, when grading an
+/// opponent's decision).
 pub struct DecisionPoint {
     pub state: GameState,
     pub pins: [Option<[Card; 2]>; NUM_PLAYERS],
@@ -97,7 +117,7 @@ pub fn walk_hand(
     sb: i32,
     bb: i32,
     hero_cards: Option<[Card; 2]>,
-) -> std::result::Result<Vec<DecisionPoint>, String> {
+) -> std::result::Result<WalkedHand, String> {
     if sb <= 0 || bb <= 0 {
         return Err(format!("nonsensical blinds {sb}/{bb}"));
     }
@@ -181,7 +201,7 @@ pub fn walk_hand(
         }
     }
     let Some(first_actor) = first_actor else {
-        return Ok(Vec::new());
+        return Ok(WalkedHand::default());
     };
 
     // Real board cards in engine deal order (no burns in the engine).
@@ -241,7 +261,7 @@ pub fn walk_hand(
     let mut state = GameState::from_snapshot(&snapshot)
         .map_err(|error| format!("initial state does not rebuild: {error}"))?;
 
-    let mut decisions = Vec::new();
+    let mut walked = WalkedHand::default();
     for (index, action) in episode.actions.iter().enumerate() {
         if action.verb == EpisodeVerb::Post {
             continue;
@@ -289,7 +309,7 @@ pub fn walk_hand(
                 let hero_rotated = (hero_slot + NUM_PLAYERS - slot) % NUM_PLAYERS;
                 pins[hero_rotated] = Some(cards);
             }
-            decisions.push(DecisionPoint {
+            walked.opponent.push(DecisionPoint {
                 state: state.rotated(Seat::ALL[slot]),
                 pins,
                 played,
@@ -300,6 +320,17 @@ pub fn walk_hand(
                     .map(|seat| seat.name.clone())
                     .unwrap_or_default(),
                 opponent_hand: shown_hand(episode, action.seat_no),
+            });
+        } else {
+            // The hero's own decision: rotating by hero_slot moves their
+            // already-revealed real cards into the seat-0 hero role, so no
+            // pins are needed here — the state itself carries the truth.
+            walked.hero.push(DecisionPoint {
+                state: state.rotated(Seat::ALL[slot]),
+                pins: [None; NUM_PLAYERS],
+                played,
+                actor_name: "Hero".to_string(),
+                opponent_hand: None,
             });
         }
 
@@ -325,7 +356,7 @@ pub fn walk_hand(
             }
         }
     }
-    Ok(decisions)
+    Ok(walked)
 }
 
 /// Converts a parsed action into the engine action space (`raises ... to` is
@@ -538,7 +569,18 @@ pub fn grade_points<R: Rng + ?Sized>(
     score
 }
 
-/// Grades one imported hand's raw text end to end: episode → walk → grade.
+/// Both grading streams for one hand: the pooled opponent decisions (as
+/// before) and the hero's own decisions in that same hand, graded
+/// separately so the hero's number never leaks into the opponent pool that
+/// drives the bot template.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HandGrades {
+    pub opponent: HandScore,
+    pub hero: HandScore,
+}
+
+/// Grades one imported hand's raw text end to end: episode → walk → grade,
+/// for both the opponent decisions and the hero's own decisions.
 pub fn score_hand(
     hand_id: &str,
     raw: &str,
@@ -551,16 +593,16 @@ pub fn score_hand(
     let result = analyze(raw, sb, bb, hero_cards, config, &mut rng);
     HandScoreWithId {
         hand_id: hand_id.to_string(),
-        score: result,
+        grades: result,
     }
 }
 
 /// The identified wrapper returned by [`score_hand`]. The nested
-/// [`HandScore`] only holds "graded" outcomes on success.
+/// [`HandGrades`] only holds "graded" outcomes on success.
 #[derive(Clone, Debug, PartialEq)]
 pub struct HandScoreWithId {
     pub hand_id: String,
-    pub score: HandScore,
+    pub grades: HandGrades,
 }
 
 fn analyze<R: Rng + ?Sized>(
@@ -570,15 +612,21 @@ fn analyze<R: Rng + ?Sized>(
     hero_cards: Option<[Card; 2]>,
     config: &MctsConfig,
     rng: &mut R,
-) -> HandScore {
+) -> HandGrades {
     match walk_and_grade(raw, sb, bb, hero_cards, config, rng) {
-        Ok(score) => score,
-        Err(problem) => HandScore {
-            decisions: 0,
-            ev_loss_bb_sum: 0.0,
-            players: Vec::new(),
-            problems: vec![problem],
-        },
+        Ok(grades) => grades,
+        Err(problem) => {
+            let failed = HandScore {
+                decisions: 0,
+                ev_loss_bb_sum: 0.0,
+                players: Vec::new(),
+                problems: vec![problem],
+            };
+            HandGrades {
+                opponent: failed.clone(),
+                hero: failed,
+            }
+        }
     }
 }
 
@@ -589,11 +637,14 @@ fn walk_and_grade<R: Rng + ?Sized>(
     hero_cards: Option<[Card; 2]>,
     config: &MctsConfig,
     rng: &mut R,
-) -> std::result::Result<HandScore, String> {
+) -> std::result::Result<HandGrades, String> {
     let episode =
         crate::hh::parse_episode(raw).ok_or_else(|| "no episode in the raw hand".to_string())?;
-    let points = walk_hand(&episode, sb, bb, hero_cards)?;
-    Ok(grade_points(rng, &points, config))
+    let walked = walk_hand(&episode, sb, bb, hero_cards)?;
+    Ok(HandGrades {
+        opponent: grade_points(rng, &walked.opponent, config),
+        hero: grade_points(rng, &walked.hero, config),
+    })
 }
 
 // ---------------------------------------------------------------- reports
@@ -606,8 +657,12 @@ pub struct PlayerRow {
     pub avg_ev_loss_bb: f64,
 }
 
-/// The pooled result over the whole analysis window: both opponents' summed
-/// decisions, their average big-blind loss, and the resulting field skill.
+/// The pooled result over the rolling window ([`EV_ROLLING_WINDOW`] most
+/// recent decisions): the opponents' summed decisions, their average
+/// big-blind loss, and the resulting field skill — plus the same three
+/// numbers for the hero's own decisions in the imported hands, kept
+/// deliberately separate from the opponent pool (it never feeds the bot
+/// template) and from the live-drill EV tracked in `hero_decisions`.
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct FieldReport {
     pub hands_total: u32,
@@ -616,6 +671,9 @@ pub struct FieldReport {
     pub decisions: i64,
     pub avg_ev_loss_bb: f64,
     pub skill: f64,
+    pub hero_decisions: i64,
+    pub hero_avg_ev_loss_bb: f64,
+    pub hero_skill: f64,
     pub players: Vec<PlayerRow>,
     pub problems: Vec<String>,
 }
@@ -629,6 +687,9 @@ impl FieldReport {
             decisions: 0,
             avg_ev_loss_bb: 0.0,
             skill: 0.0,
+            hero_decisions: 0,
+            hero_avg_ev_loss_bb: 0.0,
+            hero_skill: 0.0,
             players: Vec::new(),
             problems: Vec::new(),
         }
@@ -669,12 +730,15 @@ pub struct RecentHand {
     pub hero_cards: Option<[Card; 2]>,
 }
 
-/// One stored per-hand analysis row.
+/// One stored per-hand analysis row: opponent decisions in that hand, and
+/// the hero's own decisions in that same hand.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StoredHandScore {
     pub hand_id: String,
     pub decisions: i32,
     pub ev_loss_bb_sum: f64,
+    pub hero_decisions: i32,
+    pub hero_ev_loss_bb_sum: f64,
 }
 
 /// Loads the most recent imported hands (newest first), capped at `limit`.
@@ -719,8 +783,8 @@ pub async fn load_stored_scores(
         return Ok(Vec::new());
     }
     let ids: Vec<&str> = hand_ids.iter().map(String::as_str).collect();
-    let rows: Vec<(String, i32, f64)> = sqlx::query_as(
-        "SELECT hand_id, opponent_decisions, ev_loss_bb_sum
+    let rows: Vec<(String, i32, f64, i32, f64)> = sqlx::query_as(
+        "SELECT hand_id, opponent_decisions, ev_loss_bb_sum, hero_decisions, hero_ev_loss_bb_sum
          FROM gg_hand_analysis
          WHERE hand_id = ANY($1)",
     )
@@ -729,24 +793,33 @@ pub async fn load_stored_scores(
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(hand_id, decisions, ev_loss_bb_sum)| StoredHandScore {
-            hand_id,
-            decisions,
-            ev_loss_bb_sum,
-        })
+        .map(
+            |(hand_id, decisions, ev_loss_bb_sum, hero_decisions, hero_ev_loss_bb_sum)| {
+                StoredHandScore {
+                    hand_id,
+                    decisions,
+                    ev_loss_bb_sum,
+                    hero_decisions,
+                    hero_ev_loss_bb_sum,
+                }
+            },
+        )
         .collect())
 }
 
 /// Stores one hand's analysis result; already-analyzed hands are left alone.
 pub async fn store_hand_score(pool: &PgPool, score: &StoredHandScore) -> Result<()> {
     sqlx::query(
-        "INSERT INTO gg_hand_analysis (hand_id, opponent_decisions, ev_loss_bb_sum)
-         VALUES ($1, $2, $3)
+        "INSERT INTO gg_hand_analysis
+             (hand_id, opponent_decisions, ev_loss_bb_sum, hero_decisions, hero_ev_loss_bb_sum)
+         VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (hand_id) DO NOTHING",
     )
     .bind(&score.hand_id)
     .bind(score.decisions)
     .bind(score.ev_loss_bb_sum)
+    .bind(score.hero_decisions)
+    .bind(score.hero_ev_loss_bb_sum)
     .execute(pool)
     .await?;
     Ok(())
@@ -778,11 +851,6 @@ pub async fn run_job(
     let stored_ids: std::collections::HashSet<&str> =
         stored.iter().map(|row| row.hand_id.as_str()).collect();
 
-    let mut decisions = stored
-        .iter()
-        .map(|row| i64::from(row.decisions))
-        .sum::<i64>();
-    let mut ev_loss_sum = stored.iter().map(|row| row.ev_loss_bb_sum).sum::<f64>();
     let mut hands_failed = 0u32;
     let mut hands_graded = stored.len() as u32;
     let mut problems: Vec<String> = Vec::new();
@@ -809,33 +877,42 @@ pub async fn run_job(
             crate::error::Error::Analytics(format!("scoring task panicked: {error}"))
         })?;
 
-        let score = outcome.score;
-        for (name, player_decisions, avg_loss) in &score.players {
+        let grades = outcome.grades;
+        for (name, player_decisions, avg_loss) in &grades.opponent.players {
             let entry = per_player.entry(name.clone()).or_default();
             entry.0 += *player_decisions;
             entry.1 += avg_loss * f64::from(*player_decisions);
         }
-        for problem in &score.problems {
+        for problem in &grades.opponent.problems {
             if problems.len() < 20 {
                 problems.push(format!("hand {}: {problem}", hand.hand_id));
             }
         }
-        if score.decisions == 0 {
-            if score.problems.is_empty() {
+        if grades.hero.problems != grades.opponent.problems {
+            for problem in &grades.hero.problems {
+                if problems.len() < 20 {
+                    problems.push(format!("hand {}: {problem}", hand.hand_id));
+                }
+            }
+        }
+
+        let has_data = grades.opponent.decisions > 0 || grades.hero.decisions > 0;
+        if !has_data {
+            if grades.opponent.problems.is_empty() && grades.hero.problems.is_empty() {
                 hands_graded += 1;
             } else {
                 hands_failed += 1;
             }
         } else {
             hands_graded += 1;
-            decisions += i64::from(score.decisions);
-            ev_loss_sum += score.ev_loss_bb_sum;
             if let Err(error) = store_hand_score(
                 &pool,
                 &StoredHandScore {
                     hand_id: hand.hand_id.clone(),
-                    decisions: score.decisions as i32,
-                    ev_loss_bb_sum: score.ev_loss_bb_sum,
+                    decisions: grades.opponent.decisions as i32,
+                    ev_loss_bb_sum: grades.opponent.ev_loss_bb_sum,
+                    hero_decisions: grades.hero.decisions as i32,
+                    hero_ev_loss_bb_sum: grades.hero.ev_loss_bb_sum,
                 },
             )
             .await
@@ -864,22 +941,137 @@ pub async fn run_job(
         .collect();
     players.sort_by_key(|player| std::cmp::Reverse(player.decisions));
 
+    let (opponent_rolling, hero_rolling) = rolling_field_stats(&pool).await?;
     let report = FieldReport {
         hands_total: total,
         hands_graded,
         hands_failed,
+        decisions: opponent_rolling.decisions,
+        avg_ev_loss_bb: opponent_rolling.avg_ev_loss_bb,
+        skill: opponent_rolling.skill,
+        hero_decisions: hero_rolling.decisions,
+        hero_avg_ev_loss_bb: hero_rolling.avg_ev_loss_bb,
+        hero_skill: hero_rolling.skill,
+        players,
+        problems,
+    };
+    *job_guard(&state)? = JobState::Done(report.clone());
+    Ok(report)
+}
+
+/// One side's (opponent pool, or hero) rolling stat over the most recent
+/// [`EV_ROLLING_WINDOW`] graded decisions.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RollingStat {
+    pub decisions: i64,
+    pub avg_ev_loss_bb: f64,
+    pub skill: f64,
+}
+
+fn rolling_stat(ev_loss_sum: f64, decisions: i64) -> RollingStat {
+    RollingStat {
         decisions,
         avg_ev_loss_bb: if decisions > 0 {
             ev_loss_sum / decisions as f64
         } else {
             0.0
         },
-        skill: skill_from(ev_loss_sum, decisions.min(u32::MAX as i64) as u32),
-        players,
-        problems,
-    };
-    *job_guard(&state)? = JobState::Done(report.clone());
-    Ok(report)
+        skill: skill_from(ev_loss_sum, decisions.min(i64::from(u32::MAX)) as u32),
+    }
+}
+
+/// Both rolling stats — the pooled opponent field, then the hero — computed
+/// purely from the [`gg_hand_analysis`] cache (no solver work), so this is
+/// cheap enough to call on every hand-history page load rather than only
+/// after a fresh analysis run. Returns `(opponent, hero)`.
+pub async fn rolling_field_stats(pool: &PgPool) -> Result<(RollingStat, RollingStat)> {
+    type Row = (String, i32, f64, i32, f64);
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT h.hand_id,
+                COALESCE(a.opponent_decisions, 0), COALESCE(a.ev_loss_bb_sum, 0),
+                COALESCE(a.hero_decisions, 0), COALESCE(a.hero_ev_loss_bb_sum, 0)
+         FROM gg_hands h
+         LEFT JOIN gg_hand_analysis a ON a.hand_id = h.hand_id
+         ORDER BY h.played_at DESC, h.hand_id DESC
+         LIMIT $1",
+    )
+    .bind(ANALYSIS_WINDOW)
+    .fetch_all(pool)
+    .await?;
+
+    let mut opp_decisions = 0i64;
+    let mut opp_ev_sum = 0.0f64;
+    let mut hero_decisions = 0i64;
+    let mut hero_ev_sum = 0.0f64;
+    for (_, decisions, ev_loss_bb_sum, hero_dec, hero_ev) in &rows {
+        if opp_decisions < EV_ROLLING_WINDOW {
+            opp_decisions += i64::from(*decisions);
+            opp_ev_sum += ev_loss_bb_sum;
+        }
+        if hero_decisions < EV_ROLLING_WINDOW {
+            hero_decisions += i64::from(*hero_dec);
+            hero_ev_sum += hero_ev;
+        }
+        if opp_decisions >= EV_ROLLING_WINDOW && hero_decisions >= EV_ROLLING_WINDOW {
+            break;
+        }
+    }
+    Ok((
+        rolling_stat(opp_ev_sum, opp_decisions),
+        rolling_stat(hero_ev_sum, hero_decisions),
+    ))
+}
+
+/// One tournament's average EV loss per decision — hero and the opponent
+/// field, kept separate — over *every* analyzed hand in that tournament
+/// (unbounded by [`EV_ROLLING_WINDOW`], unlike the pooled counters: a single
+/// tournament is never anywhere near that window size).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TournamentEv {
+    pub hero_decisions: i64,
+    pub hero_avg_ev_loss_bb: f64,
+    pub opponent_decisions: i64,
+    pub opponent_avg_ev_loss_bb: f64,
+}
+
+/// Every tournament's average EV loss per decision, keyed by tournament id.
+/// A tournament with no analyzed hands simply has no entry.
+pub async fn tournament_ev_totals(pool: &PgPool) -> Result<HashMap<String, TournamentEv>> {
+    type Row = (String, i64, f64, i64, f64);
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT h.tournament_id,
+                COALESCE(SUM(a.hero_decisions), 0), COALESCE(SUM(a.hero_ev_loss_bb_sum), 0),
+                COALESCE(SUM(a.opponent_decisions), 0), COALESCE(SUM(a.ev_loss_bb_sum), 0)
+         FROM gg_hands h
+         JOIN gg_hand_analysis a ON a.hand_id = h.hand_id
+         GROUP BY h.tournament_id",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(tournament_id, hero_decisions, hero_ev_sum, opponent_decisions, opponent_ev_sum)| {
+                (
+                    tournament_id,
+                    TournamentEv {
+                        hero_decisions,
+                        hero_avg_ev_loss_bb: if hero_decisions > 0 {
+                            hero_ev_sum / hero_decisions as f64
+                        } else {
+                            0.0
+                        },
+                        opponent_decisions,
+                        opponent_avg_ev_loss_bb: if opponent_decisions > 0 {
+                            opponent_ev_sum / opponent_decisions as f64
+                        } else {
+                            0.0
+                        },
+                    },
+                )
+            },
+        )
+        .collect())
 }
 
 /// The stored drill template (`drill_template` is a single-row table).
@@ -1087,7 +1279,16 @@ Seat 3: 14c11a2a (small blind) showed [Qs Ad] and won (600) with a pair of Queen
 
     fn walk(raw: &str, sb: i32, bb: i32) -> Vec<DecisionPoint> {
         let episode = crate::hh::parse_episode(raw).expect("sample parses");
-        walk_hand(&episode, sb, bb, hero_cards("As Kh")).expect("sample walks")
+        walk_hand(&episode, sb, bb, hero_cards("As Kh"))
+            .expect("sample walks")
+            .opponent
+    }
+
+    fn walk_hero(raw: &str, sb: i32, bb: i32) -> Vec<DecisionPoint> {
+        let episode = crate::hh::parse_episode(raw).expect("sample parses");
+        walk_hand(&episode, sb, bb, hero_cards("As Kh"))
+            .expect("sample walks")
+            .hero
     }
 
     #[test]
@@ -1166,10 +1367,42 @@ Seat 3: 14c11a2a (small blind) showed [Qs Ad] and won (600) with a pair of Queen
     #[test]
     fn walk_handles_a_fold_win_without_a_board() {
         // The hero folds the small blind preflop: no street ever advances and
-        // the hand still replays cleanly (zero opponent decisions).
+        // the hand still replays cleanly (zero opponent decisions, one hero
+        // decision — the fold itself).
         let episode = crate::hh::parse_episode(SAMPLE_FOLD_SB).expect("sample parses");
-        let points = walk_hand(&episode, 15, 30, hero_cards("6h 8d")).expect("walk succeeds");
-        assert!(points.is_empty());
+        let walked = walk_hand(&episode, 15, 30, hero_cards("6h 8d")).expect("walk succeeds");
+        assert!(walked.opponent.is_empty());
+        assert_eq!(walked.hero.len(), 1);
+        assert_eq!(walked.hero[0].played, Action::Fold);
+        assert_eq!(walked.hero[0].actor_name, "Hero");
+    }
+
+    #[test]
+    fn walk_captures_every_hero_decision_alongside_the_opponent_ones() {
+        let hero_points = walk_hero(SAMPLE_WIN, 20, 40);
+        // Hero: the preflop raise, then a bet on every later street, then the
+        // river call of the all-in raise.
+        assert_eq!(
+            hero_points.iter().map(|p| p.played).collect::<Vec<_>>(),
+            vec![
+                // Hero is the big blind facing only the small blind's call
+                // (to_call == 0), so this reads as a bet, not a raise — the
+                // same convention `convert_action` uses everywhere else.
+                Action::Bet(80),
+                Action::Bet(40),
+                Action::Bet(40),
+                Action::Bet(40),
+                Action::Call,
+            ]
+        );
+        assert!(hero_points.iter().all(|p| p.actor_name == "Hero"));
+        assert!(hero_points.iter().all(|p| p.state.to_act() == Seat::Hero));
+        assert!(
+            hero_points
+                .iter()
+                .all(|p| p.state.hero_cards() == hero_cards("As Kh").unwrap()),
+            "the hero's real cards ride along after the rotation"
+        );
     }
 
     #[test]
@@ -1348,8 +1581,10 @@ Seat 3: 14c11a2a (small blind) showed [Qs Ad] and won (600) with a pair of Queen
     #[test]
     fn score_hand_reports_unwalkable_hands_as_problems() {
         let score = score_hand("X", "garbage", 10, 20, None, &MctsConfig::test());
-        assert_eq!(score.score.decisions, 0);
-        assert!(!score.score.problems.is_empty());
+        assert_eq!(score.grades.opponent.decisions, 0);
+        assert_eq!(score.grades.hero.decisions, 0);
+        assert!(!score.grades.opponent.problems.is_empty());
+        assert!(!score.grades.hero.problems.is_empty());
     }
 
     #[test]
@@ -1362,9 +1597,14 @@ Seat 3: 14c11a2a (small blind) showed [Qs Ad] and won (600) with a pair of Queen
         ] {
             let score = score_hand("H", raw, sb, bb, Some(dummy_hero()), &MctsConfig::test());
             assert!(
-                score.score.problems.is_empty(),
+                score.grades.opponent.problems.is_empty(),
                 "no problems for a real hand: {:?}",
-                score.score.problems
+                score.grades.opponent.problems
+            );
+            assert!(
+                score.grades.hero.problems.is_empty(),
+                "no hero problems for a real hand: {:?}",
+                score.grades.hero.problems
             );
         }
     }
@@ -1487,6 +1727,8 @@ Seat 3: 14c11a2a (small blind) showed [Qs Ad] and won (600) with a pair of Queen
                 hand_id: hand_a.clone(),
                 decisions: 5,
                 ev_loss_bb_sum: 1.25,
+                hero_decisions: 4,
+                hero_ev_loss_bb_sum: 0.75,
             },
         )
         .await
@@ -1498,6 +1740,8 @@ Seat 3: 14c11a2a (small blind) showed [Qs Ad] and won (600) with a pair of Queen
                 hand_id: hand_a.clone(),
                 decisions: 99,
                 ev_loss_bb_sum: 99.0,
+                hero_decisions: 99,
+                hero_ev_loss_bb_sum: 99.0,
             },
         )
         .await
@@ -1507,6 +1751,8 @@ Seat 3: 14c11a2a (small blind) showed [Qs Ad] and won (600) with a pair of Queen
         assert_eq!(stored[0].hand_id, hand_a);
         assert_eq!(stored[0].decisions, 5);
         assert_eq!(stored[0].ev_loss_bb_sum, 1.25);
+        assert_eq!(stored[0].hero_decisions, 4);
+        assert_eq!(stored[0].hero_ev_loss_bb_sum, 0.75);
 
         sqlx::query("DELETE FROM gg_tournaments WHERE id = ANY($1)")
             .bind(vec![format!("T_{hand_a}"), format!("T_{hand_b}")])
@@ -1538,11 +1784,19 @@ Seat 3: 14c11a2a (small blind) showed [Qs Ad] and won (600) with a pair of Queen
             "the two walkable hands are cached, the garbage one is not"
         );
         assert!(stored.iter().all(|row| row.decisions > 0), "{stored:?}");
+        assert!(
+            stored.iter().all(|row| row.hero_decisions > 0),
+            "hero's own decisions are graded alongside the opponent's: {stored:?}"
+        );
         let stored_decisions: i64 = stored.iter().map(|row| i64::from(row.decisions)).sum();
         assert!(
             report.decisions >= stored_decisions,
             "the report aggregates the stored window: {} >= {stored_decisions}",
             report.decisions
+        );
+        assert!(
+            report.hero_decisions > 0,
+            "the report's hero figures are populated too"
         );
         assert_eq!(
             job_guard(&state).unwrap().clone(),
@@ -1557,6 +1811,8 @@ Seat 3: 14c11a2a (small blind) showed [Qs Ad] and won (600) with a pair of Queen
             .unwrap();
         assert_eq!(again.decisions, report.decisions);
         assert_eq!(again.avg_ev_loss_bb, report.avg_ev_loss_bb);
+        assert_eq!(again.hero_decisions, report.hero_decisions);
+        assert_eq!(again.hero_avg_ev_loss_bb, report.hero_avg_ev_loss_bb);
 
         sqlx::query("DELETE FROM gg_tournaments WHERE id = ANY($1)")
             .bind(vec![
@@ -1650,6 +1906,66 @@ Seat 3: 14c11a2a (small blind) showed [Qs Ad] and won (600) with a pair of Queen
 
         sqlx::query("DELETE FROM hero_sessions WHERE id = $1")
             .bind(session)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn tournament_ev_totals_aggregates_hero_and_opponent_separately() {
+        let _guard = crate::analytics::DB_TEST_LOCK.lock().await;
+        let pool = test_pool().await;
+        let hand_a = unique("tournament_ev");
+        let hand_b = unique("tournament_ev");
+        insert_hand(&pool, &hand_a, SAMPLE_WIN).await;
+        insert_hand(&pool, &hand_b, SAMPLE_BLUFF_WIN).await;
+        // insert_hand puts every hand in its own tournament ("T_{hand_id}"),
+        // so re-point hand_b at hand_a's tournament to exercise the SUM
+        // across two hands of the same tournament.
+        let tournament_a = format!("T_{hand_a}");
+        sqlx::query("UPDATE gg_hands SET tournament_id = $1 WHERE hand_id = $2")
+            .bind(&tournament_a)
+            .bind(&hand_b)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        store_hand_score(
+            &pool,
+            &StoredHandScore {
+                hand_id: hand_a.clone(),
+                decisions: 5,
+                ev_loss_bb_sum: 1.0,
+                hero_decisions: 4,
+                hero_ev_loss_bb_sum: 0.4,
+            },
+        )
+        .await
+        .unwrap();
+        store_hand_score(
+            &pool,
+            &StoredHandScore {
+                hand_id: hand_b.clone(),
+                decisions: 3,
+                ev_loss_bb_sum: 0.6,
+                hero_decisions: 2,
+                hero_ev_loss_bb_sum: 0.2,
+            },
+        )
+        .await
+        .unwrap();
+
+        let totals = tournament_ev_totals(&pool).await.unwrap();
+        let ev = totals
+            .get(&tournament_a)
+            .expect("the merged tournament has an entry");
+        assert_eq!(ev.opponent_decisions, 8);
+        assert!((ev.opponent_avg_ev_loss_bb - (1.6 / 8.0)).abs() < 1e-9);
+        assert_eq!(ev.hero_decisions, 6);
+        assert!((ev.hero_avg_ev_loss_bb - (0.6 / 6.0)).abs() < 1e-9);
+
+        sqlx::query("DELETE FROM gg_tournaments WHERE id = ANY($1)")
+            .bind(vec![tournament_a, format!("T_{hand_b}")])
             .execute(&pool)
             .await
             .unwrap();

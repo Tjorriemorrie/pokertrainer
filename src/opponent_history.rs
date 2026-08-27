@@ -223,12 +223,12 @@ async fn load_gg_actions(pool: &PgPool, limit: i64) -> Result<Vec<HistoricAction
         let Some(episode) = crate::hh::parse_episode(&hand.raw) else {
             continue;
         };
-        let Ok(points) =
+        let Ok(walked) =
             crate::opponent_analysis::walk_hand(&episode, hand.sb, hand.bb, hand.hero_cards)
         else {
             continue;
         };
-        for point in points {
+        for point in walked.opponent {
             let Some(hand_class) = point.opponent_hand else {
                 continue;
             };
@@ -617,8 +617,9 @@ Seat 3: 14c11a2a (big blind) folded on the River";
 
     fn nodes_for(raw: &str, sb: i32, bb: i32) -> Vec<(Node, ActionCategory)> {
         let episode = crate::hh::parse_episode(raw).expect("sample parses");
-        let points =
-            crate::opponent_analysis::walk_hand(&episode, sb, bb, None).expect("sample walks");
+        let points = crate::opponent_analysis::walk_hand(&episode, sb, bb, None)
+            .expect("sample walks")
+            .opponent;
         points
             .iter()
             .map(|point| {

@@ -298,6 +298,14 @@ struct TournamentRow {
     win_pct: String,
     net_class: &'static str,
     net_chips: String,
+    /// This tournament's average BB lost per decision — hero's own play,
+    /// graded against the solver from the imported hands — or an em dash
+    /// when none of its hands have been analyzed yet. Distinct from the
+    /// live-drill EV shown elsewhere: this only ever reflects imported
+    /// GGPoker hands.
+    hero_ev: String,
+    /// Same, pooled over both opponent seats.
+    opponent_ev: String,
     /// Set for a tournament a scan just imported new hands for, so the row
     /// stands out in the listing the player lands on.
     is_highlighted: bool,
@@ -307,6 +315,7 @@ impl TournamentRow {
     fn new(
         row: &crate::hh::TournamentListing,
         highlight: &std::collections::HashSet<String>,
+        ev: Option<&crate::opponent_analysis::TournamentEv>,
     ) -> Self {
         let tournament = &row.tournament;
         let profit = match (tournament.buy_in_cents, tournament.prize_cents) {
@@ -354,6 +363,14 @@ impl TournamentRow {
                 "pt-pos"
             },
             net_chips: signed(row.net_chips),
+            hero_ev: ev
+                .filter(|ev| ev.hero_decisions > 0)
+                .map(|ev| format!("{:.2}", ev.hero_avg_ev_loss_bb))
+                .unwrap_or_else(|| "—".to_string()),
+            opponent_ev: ev
+                .filter(|ev| ev.opponent_decisions > 0)
+                .map(|ev| format!("{:.2}", ev.opponent_avg_ev_loss_bb))
+                .unwrap_or_else(|| "—".to_string()),
             is_highlighted: highlight.contains(&tournament.id),
         }
     }
@@ -364,6 +381,18 @@ fn cents_or_dash(cents: Option<i32>) -> String {
     cents
         .map(|cents| crate::hh::money(i64::from(cents)))
         .unwrap_or_else(|| "—".to_string())
+}
+
+/// The rolling hand-history EV data the history page shows: the pooled
+/// counters (last [`crate::opponent_analysis::EV_ROLLING_WINDOW`] decisions,
+/// hero and opponent field kept separate) plus each tournament's own
+/// average, read straight from the [`crate::opponent_analysis`] cache — no
+/// solver work at page-render time.
+#[derive(Default)]
+pub struct HistoryEv {
+    pub opponent_rolling: crate::opponent_analysis::RollingStat,
+    pub hero_rolling: crate::opponent_analysis::RollingStat,
+    pub per_tournament: std::collections::HashMap<String, crate::opponent_analysis::TournamentEv>,
 }
 
 /// The GGPoker hand-history page: the scan trigger, the opponent-skill
@@ -383,8 +412,22 @@ pub fn history_page(
     tournaments: &[crate::hh::TournamentListing],
     template: Option<&crate::opponent_analysis::DrillTemplate>,
     highlight: &std::collections::HashSet<String>,
+    ev: &HistoryEv,
 ) -> Result<String> {
     let profit = stats.prize_cents - stats.buy_in_cents;
+    let ev_stat = |label: &'static str, rolling: &crate::opponent_analysis::RollingStat| {
+        Stat::new(
+            label,
+            if rolling.decisions > 0 {
+                format!(
+                    "{:.2} BB/decision ({} decisions)",
+                    rolling.avg_ev_loss_bb, rolling.decisions
+                )
+            } else {
+                "—".to_string()
+            },
+        )
+    };
     Ok(HistoryTemplate {
         cards: vec![
             Stat::new("Tournaments", stats.tournaments),
@@ -411,6 +454,8 @@ pub fn history_page(
             Stat::new("All-ins", stats.all_ins),
             Stat::new("Showdowns", stats.showdowns),
             Stat::new("Net chips", signed(stats.net_chips)),
+            ev_stat("Your EV lost (hand histories)", &ev.hero_rolling),
+            ev_stat("Field EV lost (hand histories)", &ev.opponent_rolling),
         ],
         chip: template.map(|template| TemplateChip {
             label: template.label.clone(),
@@ -420,7 +465,9 @@ pub fn history_page(
         }),
         rows: tournaments
             .iter()
-            .map(|row| TournamentRow::new(row, highlight))
+            .map(|row| {
+                TournamentRow::new(row, highlight, ev.per_tournament.get(&row.tournament.id))
+            })
             .collect(),
     }
     .render()?)
@@ -493,6 +540,15 @@ pub fn analysis_status_html(status: &crate::opponent_analysis::JobState) -> Resu
                     format!("{:.3}", report.avg_ev_loss_bb),
                 ),
                 Stat::new("Field skill", format!("{:.2}", report.skill)),
+                Stat::new("Your decisions (hand histories)", report.hero_decisions),
+                Stat::new(
+                    "Your avg BB lost per decision",
+                    format!("{:.3}", report.hero_avg_ev_loss_bb),
+                ),
+                Stat::new(
+                    "Your skill (hand histories)",
+                    format!("{:.2}", report.hero_skill),
+                ),
             ],
             players: report
                 .players
@@ -1284,7 +1340,12 @@ pub fn tactical_overlay_fragment(
     let optimal = decision.optimal;
     let mut rows: Vec<&Analysis> = decision.ranking.iter().collect();
     rows.sort_by_key(|analysis| chip_cost(analysis.action, call_amount, hero_stack));
-    let visits = comma_count(rows.iter().map(|analysis| analysis.visits).max().unwrap_or(0));
+    let visits = comma_count(
+        rows.iter()
+            .map(|analysis| analysis.visits)
+            .max()
+            .unwrap_or(0),
+    );
     Ok(TacticalOverlayFragment {
         hand_no,
         intercepted,
@@ -1339,7 +1400,8 @@ fn chip_cost(action: Action, call_amount: u32, hero_stack: u32) -> u32 {
 /// played and optimal actions and translates the EV gap into what it means
 /// for a human stack. Bigger leaks get sharper language.
 fn ev_diff_sentence(decision: &AnalyzedDecision, street: Street) -> String {
-    let optimal_label = coach_action_label(decision.optimal.action, decision.optimal.bucket, street);
+    let optimal_label =
+        coach_action_label(decision.optimal.action, decision.optimal.bucket, street);
     match decision.played.as_ref() {
         Some(played) if played.is_optimal => {
             format!("Perfect — {optimal_label} was the highest-value line and you took it.")
@@ -2629,7 +2691,14 @@ mod tests {
 
     #[test]
     fn history_page_renders_the_scan_button_stats_and_listing() {
-        let page = history_page(&hh_stats(), &hh_listing(), None, &Default::default()).unwrap();
+        let page = history_page(
+            &hh_stats(),
+            &hh_listing(),
+            None,
+            &Default::default(),
+            &Default::default(),
+        )
+        .unwrap();
         assert!(page.contains("<title>Poker Trainer — Hand history</title>"));
         assert!(
             page.contains(r#"action="/history/scan""#)
@@ -2651,7 +2720,14 @@ mod tests {
 
     #[test]
     fn history_page_has_an_empty_state_without_tournaments() {
-        let page = history_page(&hh_stats(), &[], None, &Default::default()).unwrap();
+        let page = history_page(
+            &hh_stats(),
+            &[],
+            None,
+            &Default::default(),
+            &Default::default(),
+        )
+        .unwrap();
         assert!(page.contains("No imported hand histories yet"));
         assert!(!page.contains("pt-hh-table"));
     }
@@ -2662,7 +2738,14 @@ mod tests {
         stats.net_chips = -15;
         let mut listing = hh_listing();
         listing[0].tournament.name = r#"<script>"evil"</script>"#.to_string();
-        let page = history_page(&stats, &listing, None, &Default::default()).unwrap();
+        let page = history_page(
+            &stats,
+            &listing,
+            None,
+            &Default::default(),
+            &Default::default(),
+        )
+        .unwrap();
         assert!(!page.contains(r#"<script>"evil""#));
         assert!(page.contains("&#60;script&#62;"));
     }
@@ -2671,7 +2754,14 @@ mod tests {
     fn history_page_highlights_the_scanned_tournaments() {
         let highlight: std::collections::HashSet<String> =
             ["307865587".to_string()].into_iter().collect();
-        let page = history_page(&hh_stats(), &hh_listing(), None, &highlight).unwrap();
+        let page = history_page(
+            &hh_stats(),
+            &hh_listing(),
+            None,
+            &highlight,
+            &Default::default(),
+        )
+        .unwrap();
         assert!(page.contains(r#"data-tournament-id="307865587""#));
         assert!(page.contains("pt-highlight"));
     }
@@ -2799,7 +2889,14 @@ mod tests {
 
     #[test]
     fn history_page_offers_the_analyzer_and_the_current_template() {
-        let page = history_page(&hh_stats(), &hh_listing(), None, &Default::default()).unwrap();
+        let page = history_page(
+            &hh_stats(),
+            &hh_listing(),
+            None,
+            &Default::default(),
+            &Default::default(),
+        )
+        .unwrap();
         assert!(
             page.contains(r#"action="/history/analyze-opponents""#)
                 && page.contains("Analyze imported opponents"),
@@ -2811,7 +2908,14 @@ mod tests {
         );
 
         let template = template_fixture();
-        let page = history_page(&hh_stats(), &[], Some(&template), &Default::default()).unwrap();
+        let page = history_page(
+            &hh_stats(),
+            &[],
+            Some(&template),
+            &Default::default(),
+            &Default::default(),
+        )
+        .unwrap();
         assert!(page.contains("Bots trained on: Imported field (132 decisions)"));
         assert!(page.contains("skill <b>0.62</b>"), "{page}");
         assert!(page.contains(r#"action="/history/clear-template""#));
@@ -2825,6 +2929,9 @@ mod tests {
             decisions: 212,
             avg_ev_loss_bb: 0.4,
             skill: 0.62,
+            hero_decisions: 88,
+            hero_avg_ev_loss_bb: 0.25,
+            hero_skill: 0.95,
             players: vec![crate::opponent_analysis::PlayerRow {
                 name: "14c11a2a".to_string(),
                 decisions: 120,
