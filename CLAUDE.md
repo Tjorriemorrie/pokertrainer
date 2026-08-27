@@ -27,3 +27,19 @@ to test a change, since that would drop the user's live session.
   separate instance on a different port instead of touching the live process.
 - If restarting the server is genuinely required to proceed, stop and ask the
   user first rather than doing it unilaterally.
+
+## Always fix failing tests when encountered
+
+If running the test suite (for any reason — verifying unrelated work, a full
+run, CI) turns up a failing test, investigate and fix it as part of the
+current session rather than just reporting it and moving on, even if it's
+unrelated to the task at hand.
+
+- Fix the root cause in the code under test; only change the test itself if
+  the test's expectation is actually wrong (e.g. stale after a deliberate
+  behavior change).
+- If a failure looks flaky (passes in isolation, fails under parallel
+  execution) or the fix is genuinely ambiguous/risky, say so and ask before
+  proceeding rather than guessing.
+- Still respect "never kill or restart a running server" above — fixing a
+  test never requires touching the live process.
