@@ -4,7 +4,7 @@ use crate::card::{Card, Deck};
 use crate::error::{Error, Result};
 use crate::eval::HandClass;
 use crate::game::{Action, ActionOutcome, GameState, Seat};
-use crate::rng::{gen_index, weighted_index};
+use crate::rng::weighted_index;
 
 use super::actions::candidates;
 use super::tree::Payoff;
@@ -55,11 +55,53 @@ fn price_of(state: &GameState) -> f64 {
 /// the price of calling, calls lighter when the price is low, and bets or
 /// raises more often with stronger holdings.
 pub(crate) fn opponent_probs(state: &GameState) -> Vec<f64> {
+    action_probs(state, strength_tier(state.eval_hand(state.to_act()).class()))
+}
+
+/// How the hero's hand stacks up against the live opponents' actual holdings
+/// in this sampled world: the fraction of live opponents it currently beats
+/// (a tie counts as half), scaled onto the same 0..4 ladder [`strength_tier`]
+/// uses. Unlike an absolute hand-class tier, this is range-aware — a bare top
+/// pair is "the nuts" (tier 4) against a range that never has better, and
+/// "worthless" (tier 0) against a range pinned to sets, because each world
+/// already knows the opponents' real dealt cards.
+fn relative_strength(state: &GameState) -> f64 {
+    let hero_eval = state.eval_hand(Seat::Hero);
+    let live_opponents: Vec<Seat> = [Seat::Opponent1, Seat::Opponent2]
+        .into_iter()
+        .filter(|&seat| !state.folded(seat))
+        .collect();
+    if live_opponents.is_empty() {
+        return 4.0;
+    }
+    let beats: f64 = live_opponents
+        .iter()
+        .map(|&seat| match hero_eval.cmp(&state.eval_hand(seat)) {
+            std::cmp::Ordering::Greater => 1.0,
+            std::cmp::Ordering::Equal => 0.5,
+            std::cmp::Ordering::Less => 0.0,
+        })
+        .sum();
+    4.0 * beats / live_opponents.len() as f64
+}
+
+/// Probability mass the hero's rollout policy assigns to each candidate
+/// action in `state`, using [`relative_strength`] in place of an absolute
+/// hand-class tier so the hero's below-horizon play reacts to the actual
+/// opponents in this world rather than judging its hand in isolation.
+pub(crate) fn hero_probs(state: &GameState) -> Vec<f64> {
+    action_probs(state, relative_strength(state))
+}
+
+/// Shared hand-strength/pot-odds heuristic behind both [`opponent_probs`] and
+/// [`hero_probs`]: folds weak hands in proportion to the price of calling,
+/// calls lighter when the price is low, and bets or raises more often with
+/// stronger holdings, `tier` (0..4) supplying the notion of "strong".
+fn action_probs(state: &GameState, tier: f64) -> Vec<f64> {
     let cands = candidates(state);
     if cands.is_empty() {
         return Vec::new();
     }
-    let tier = strength_tier(state.eval_hand(state.to_act()).class());
     let price = price_of(state);
     let to_call = state.legal_actions().call_amount as f64;
 
@@ -128,8 +170,29 @@ pub(crate) fn opponent_probs(state: &GameState) -> Vec<f64> {
 
 /// Samples one opponent action from the [`opponent_probs`] policy.
 pub(crate) fn opponent_action<R: Rng + ?Sized>(rng: &mut R, state: &GameState) -> Action {
+    sample_action(rng, state, &opponent_probs(state))
+}
+
+/// Picks the hero's rollout action deterministically: the highest-mass
+/// action under [`hero_probs`]. Unlike the opponents' stochastic sampling,
+/// fixing the hero's own choice given the state keeps below-horizon noise
+/// low enough for small search budgets to converge reliably — the
+/// opponents' independent randomness and the tree's own world sampling
+/// already supply plenty of playout diversity.
+fn hero_action(state: &GameState) -> Action {
     let cands = candidates(state);
-    let probs = opponent_probs(state);
+    hero_probs(state)
+        .iter()
+        .zip(cands.iter())
+        .max_by(|(a, _), (b, _)| a.total_cmp(b))
+        .map(|(_, (action, _))| *action)
+        .unwrap_or(Action::Check)
+}
+
+/// Draws one action from `state`'s candidates, weighted by `probs`
+/// (index-aligned with [`candidates`]).
+fn sample_action<R: Rng + ?Sized>(rng: &mut R, state: &GameState, probs: &[f64]) -> Action {
+    let cands = candidates(state);
     let weights: Vec<f32> = probs.iter().map(|&p| p as f32).collect();
     if let Some(index) = weighted_index(rng, &weights)
         && let Some((action, _)) = cands.get(index)
@@ -188,8 +251,9 @@ fn leftover_deck(runout: &[Card], offset: usize) -> Result<Deck> {
 /// (finished the hand with an empty stack) and how many actions the playout
 /// simulated.
 ///
-/// The hero plays a uniform random policy (this is the playout below the tree
-/// horizon); opponents play the heuristic [`opponent_probs`] policy.
+/// The hero plays the range-aware [`hero_probs`] policy (this is the playout
+/// below the tree horizon); opponents play the heuristic [`opponent_probs`]
+/// policy.
 pub(crate) fn rollout<R: Rng + ?Sized>(
     rng: &mut R,
     state: &mut GameState,
@@ -202,11 +266,10 @@ pub(crate) fn rollout<R: Rng + ?Sized>(
     while !state.is_hand_over() {
         let seat = state.to_act();
         let action = if seat == Seat::Hero {
-            let cands = candidates(state);
-            if cands.is_empty() {
-                return Ok((pay_off(state, baseline), 0));
+            if candidates(state).is_empty() {
+                break;
             }
-            cands[gen_index(rng, cands.len())].0
+            hero_action(state)
         } else {
             opponent_action(rng, state)
         };
