@@ -459,9 +459,24 @@ pub async fn load_hero_action_window(
 
 // ----------------------------------------------------------- range model
 
+/// Add-one (Laplace) pseudo-count blended into every hand class before
+/// normalizing a range. [`MIN_SAMPLE_HANDS`] only gates *whether* a node's
+/// range is trusted at all — it doesn't stop a barely-passing sample (e.g.
+/// 30-50 real actions spread across all 169 hand classes) from leaving most
+/// classes at a literal zero count. Solved against a range with hard zeros,
+/// the MCTS treats every unseen class — routinely including premium hands
+/// like AA/KK/AKs that simply haven't come up yet in a small window — as
+/// *impossible* for the opponent to hold, which inflates a bluff/thin-value
+/// raise's apparent fold equity far beyond what the real (unobserved) tail
+/// of the opponent's range would allow. Smoothing keeps every class
+/// reachable, shrinking hard toward uniform while the sample is this small
+/// and easing off as real observations accumulate.
+const RANGE_SMOOTHING: f32 = 1.0;
+
 /// Tallies the window into a per-node, per-stack-bucket 169-hand range: the
-/// share of times each hand class showed up acting at that spot. Nodes with
-/// no samples are simply absent from the map.
+/// share of times each hand class showed up acting at that spot, Laplace-
+/// smoothed (see [`RANGE_SMOOTHING`]) so a thin sample never rules a hand
+/// class out entirely. Nodes with no samples are simply absent from the map.
 pub fn build_range_model(actions: &[HistoricAction]) -> HashMap<(Node, StackBucket), StoredRange> {
     let mut counts: HashMap<(Node, StackBucket), [u32; HAND_COUNT]> = HashMap::new();
     for action in actions {
@@ -474,11 +489,10 @@ pub fn build_range_model(actions: &[HistoricAction]) -> HashMap<(Node, StackBuck
         .into_iter()
         .map(|(key, hand_counts)| {
             let total: u32 = hand_counts.iter().sum();
+            let denom = total as f32 + RANGE_SMOOTHING * HAND_COUNT as f32;
             let mut weights: Range = [0.0f32; HAND_COUNT];
-            if total > 0 {
-                for (weight, count) in weights.iter_mut().zip(hand_counts.iter()) {
-                    *weight = *count as f32 / total as f32;
-                }
+            for (weight, count) in weights.iter_mut().zip(hand_counts.iter()) {
+                *weight = (*count as f32 + RANGE_SMOOTHING) / denom;
             }
             (
                 key,
@@ -1308,18 +1322,70 @@ Seat 3: 14c11a2a (big blind) folded on the River";
         let model = build_range_model(&actions);
         let main = &model[&(Node::PfOpen, StackBucket::Bb25)];
         assert_eq!(main.sample_count, 3);
-        assert!((main.weights[aa.index()] - 2.0 / 3.0).abs() < 1e-6);
-        assert!((main.weights[kk.index()] - 1.0 / 3.0).abs() < 1e-6);
-        assert_eq!(main.weights.iter().sum::<f32>(), 1.0);
+        let main_denom = 3.0 + RANGE_SMOOTHING * HAND_COUNT as f32;
+        assert!((main.weights[aa.index()] - (2.0 + RANGE_SMOOTHING) / main_denom).abs() < 1e-6);
+        assert!((main.weights[kk.index()] - (1.0 + RANGE_SMOOTHING) / main_denom).abs() < 1e-6);
+        // AA still outweighs KK, which still outweighs a hand class that
+        // never showed up in the window — smoothing damps the raw
+        // frequencies toward uniform without erasing the real signal.
+        let queens = hand(Rank::Queen, Rank::Queen, false);
+        assert!(main.weights[aa.index()] > main.weights[kk.index()]);
+        assert!(main.weights[kk.index()] > main.weights[queens.index()]);
+        assert!(
+            (main.weights.iter().sum::<f32>() - 1.0).abs() < 1e-5,
+            "smoothed weights still sum to 1"
+        );
 
         let other_bucket = &model[&(Node::PfOpen, StackBucket::Bb10)];
         assert_eq!(other_bucket.sample_count, 1);
-        assert_eq!(other_bucket.weights[aa.index()], 1.0);
+        let other_denom = 1.0 + RANGE_SMOOTHING * HAND_COUNT as f32;
+        assert!(
+            (other_bucket.weights[aa.index()] - (1.0 + RANGE_SMOOTHING) / other_denom).abs()
+                < 1e-6
+        );
     }
 
     #[test]
     fn build_range_model_is_empty_for_an_empty_window() {
         assert!(build_range_model(&[]).is_empty());
+    }
+
+    /// Regression for the "raise 4-8o into a real raise" coaching complaint:
+    /// a thin-but-trusted window (above [`MIN_SAMPLE_HANDS`], the gate
+    /// `RangeResolver` uses to decide the range is worth using at all) can
+    /// still leave most of the 169 hand classes at a raw zero count simply
+    /// because they haven't come up yet — including the premium hands a real
+    /// opponent's raising range is built from. Without smoothing, the solver
+    /// reads that zero as "impossible", not "unobserved", and hero's re-raise
+    /// looks great purely because the model has ruled out AA/KK/AKo. The
+    /// smoothed range must never rule out a hand class outright.
+    #[test]
+    fn build_range_model_never_zeroes_out_an_unobserved_premium_hand() {
+        let seven_deuce = hand(Rank::Seven, Rank::Two, false);
+        let actions: Vec<HistoricAction> = (0..40)
+            .map(|_| {
+                action(
+                    seven_deuce,
+                    Node::PfVsRaise,
+                    StackBucket::Bb15,
+                    ActionCategory::Fold,
+                )
+            })
+            .collect();
+        let model = build_range_model(&actions);
+        let range = &model[&(Node::PfVsRaise, StackBucket::Bb15)];
+        assert_eq!(range.sample_count, 40);
+
+        let aa = hand(Rank::Ace, Rank::Ace, false);
+        let kk = hand(Rank::King, Rank::King, false);
+        let ako = hand(Rank::Ace, Rank::King, false);
+        for premium in [aa, kk, ako] {
+            assert!(
+                range.weights[premium.index()] > 0.0,
+                "{} must stay reachable even with zero raw observations",
+                premium.label()
+            );
+        }
     }
 
     // ------------------------------------------------------ frequency model
@@ -1715,7 +1781,13 @@ Seat 3: 14c11a2a (big blind) folded on the River";
         let range = resolved
             .resolve(Node::TurnVsBet, StackBucket::Bb15)
             .expect("40 samples clears MIN_SAMPLE_HANDS");
-        assert_eq!(range[aa.index()], 1.0);
+        let expected_aa = (40.0 + RANGE_SMOOTHING) / (40.0 + RANGE_SMOOTHING * HAND_COUNT as f32);
+        assert!((range[aa.index()] - expected_aa).abs() < 1e-6);
+        let kk = crate::range::hands::Hand::new(Rank::King, Rank::King, false);
+        assert!(
+            range[kk.index()] > 0.0,
+            "smoothing keeps every hand class reachable, even at 40/40 observed AA"
+        );
 
         sqlx::query("DELETE FROM contextual_ranges WHERE profile_id = $1")
             .bind(profile_id)
