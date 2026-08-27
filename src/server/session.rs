@@ -2474,7 +2474,8 @@ mod tests {
     }
 
     /// Seed 0: Hero checks the flop first to act, Opponent 1 bets, Opponent 2
-    /// folds, and action returns to Hero facing the bet.
+    /// calls, and action returns to Hero facing the bet — the pre-armed fold
+    /// fires there, and the two opponents play the hand out to showdown.
     #[test]
     fn check_fold_auto_folds_when_an_opponent_raises() {
         let state = hero_checked_to_on_flop(0);
@@ -2499,10 +2500,19 @@ mod tests {
             session.log(),
             [
                 "You check",
-                "Opponent 1 bet 20",
-                "Opponent 2 fold",
+                "Opponent 1 bet 30",
+                "Opponent 2 call 30",
                 "You fold",
-                "Opponent 1 wins 80 — everyone else folded",
+                "Turn 2c",
+                "Opponent 1 check",
+                "River 3c",
+                "Opponent 2 check",
+                "Opponent 1 check",
+                "Opponent 2 check",
+                "Board 8s As Ad 2c 3c",
+                "Opponent 1 shows 8c 3c (Two Pair)",
+                "Opponent 2 shows Jc 4h (Pair)",
+                "Opponent 1 wins 120 with Two Pair",
             ],
             "the pre-armed fold fires the moment action returns to the hero"
         );
@@ -2533,12 +2543,12 @@ mod tests {
     /// instead of silently applying.
     #[test]
     fn check_fold_auto_fold_can_be_intercepted_like_a_live_decision() {
-        let state = hero_checked_to_on_flop(105);
+        let state = hero_checked_to_on_flop(160);
         let mut session = TableSession::resume(
             state,
             Deck::default(),
             1,
-            105,
+            160,
             probe_config(),
             always_intercepts(),
             None,
@@ -2549,7 +2559,7 @@ mod tests {
 
         assert_eq!(
             session.log(),
-            ["You check", "Opponent 1 bet 30", "Opponent 2 call 30"],
+            ["You check", "Opponent 1 bet 30", "Opponent 2 fold"],
             "the auto-fold is held back, not logged, while the review is pending"
         );
         assert!(
