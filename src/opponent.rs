@@ -3,7 +3,7 @@ use rand::Rng;
 use crate::card::Card;
 use crate::game::{Action, GameState, NUM_PLAYERS, Seat, Street};
 use crate::mcts::{self, MctsConfig};
-use crate::opponent_history::OpponentRangeModel;
+use crate::opponent_history::{ActionCategory, ActionFrequencyModel, OpponentRangeModel};
 use crate::range::BetSize;
 use crate::range::hands::Range;
 
@@ -36,10 +36,17 @@ impl OpponentTemplate {
 const SKILL_TAU_CHIPS: f64 = 20.0;
 
 /// Picks the bot's action at skill `template.skill`: one MCTS solve from the
-/// bot's seat, then a softmax over the candidate EVs whose temperature
-/// shrinks with skill — skill 1 plays the solver-best action, skill 0 is
-/// nearly uniform across the legal candidates. Solve failures fall back to
-/// the plain [`placeholder_action`] heuristic.
+/// bot's seat, then picks among the candidate actions. When the pooled field
+/// has a well-sampled action-frequency entry for this exact spot (street x
+/// facing-bet x stack depth x position x c-bet context), the bot first
+/// samples *which category* of action (fold/call/raise/shove) a real
+/// opponent in the user's tracked games takes here, then lets the solve pick
+/// the best concrete play within that category — so the bot plays the
+/// field's real tendencies (e.g. rarely shoving over a raise) instead of
+/// always taking the softmax-selected best-EV action regardless of realism.
+/// Without a well-sampled entry, falls back to the skill-graded softmax over
+/// every candidate exactly as before this feature existed. Solve failures
+/// fall back to the plain [`placeholder_action`] heuristic either way.
 ///
 /// The bot's own dealt cards are pinned (via [`GameState::hero_cards`] on
 /// the rotated view, which reads the acting seat's true holding regardless
@@ -50,6 +57,13 @@ const SKILL_TAU_CHIPS: f64 = 20.0;
 /// population the bot itself is calibrated against (the user's own framing —
 /// two seats, one modeled opponent), falling back to the solver's uniform
 /// default wherever the historic sample is too thin to trust.
+///
+/// `was_preflop_aggressor`/`facing_cbet` describe this hand's c-bet context
+/// for the acting seat so far (see [`crate::opponent_history::HistoricAction`]
+/// for what they mean) — the caller tracks these across the hand's actions,
+/// since a single [`GameState`] doesn't retain who raised preflop once the
+/// action reaches the flop.
+#[allow(clippy::too_many_arguments)]
 pub fn template_action<R: Rng + ?Sized>(
     rng: &mut R,
     state: &GameState,
@@ -57,6 +71,9 @@ pub fn template_action<R: Rng + ?Sized>(
     config: &MctsConfig,
     template: &OpponentTemplate,
     opponent_ranges: &OpponentRangeModel,
+    opponent_frequencies: &ActionFrequencyModel,
+    was_preflop_aggressor: bool,
+    facing_cbet: bool,
 ) -> Action {
     let rotated = state.rotated(seat);
     let skill = template.skill.clamp(0.0, 1.0);
@@ -83,8 +100,53 @@ pub fn template_action<R: Rng + ?Sized>(
     let Ok(result) = solve else {
         return placeholder_action(rng, state);
     };
-    let selected = skill_selection(rng, &result.actions, skill);
+
+    let position = crate::opponent_history::decision_position(&rotated);
+    let ctx = crate::opponent_history::aggressor_context(node, was_preflop_aggressor, facing_cbet);
+    let selected = match opponent_frequencies.resolve(node, bucket, position, ctx) {
+        Some(frequency) => frequency_selection(rng, &result.actions, frequency, skill),
+        None => skill_selection(rng, &result.actions, skill),
+    };
     selected.unwrap_or_else(|| placeholder_action(rng, state))
+}
+
+/// Samples which category of action (fold/call-check/raise/shove) the field
+/// takes in this spot, then defers to [`skill_selection`] restricted to just
+/// the candidates in that category — so the concrete play (sizing, or the
+/// call/fold choice) is still whatever the solve says is best, but only
+/// among actions realistic for the spot. Falls back to [`skill_selection`]
+/// over every candidate when the sampled category has no matching legal
+/// candidate (or the frequency weights are degenerate).
+fn frequency_selection<R: Rng + ?Sized>(
+    rng: &mut R,
+    values: &[crate::mcts::ActionValue],
+    frequency: crate::opponent_history::CategoryFrequency,
+    skill: f64,
+) -> Option<Action> {
+    let weights = [
+        frequency.fold,
+        frequency.call_check,
+        frequency.raise,
+        frequency.shove,
+    ];
+    let Some(index) = crate::rng::weighted_index(rng, &weights) else {
+        return skill_selection(rng, values, skill);
+    };
+    let sampled = match index {
+        0 => ActionCategory::Fold,
+        1 => ActionCategory::CallCheck,
+        2 => ActionCategory::BetRaise,
+        _ => ActionCategory::Shove,
+    };
+    let filtered: Vec<crate::mcts::ActionValue> = values
+        .iter()
+        .copied()
+        .filter(|value| ActionCategory::of(value.action) == sampled)
+        .collect();
+    if filtered.is_empty() {
+        return skill_selection(rng, values, skill);
+    }
+    skill_selection(rng, &filtered, skill)
 }
 
 /// Weighted choice among the solver's candidate actions: EV-scaled softmax
@@ -786,16 +848,118 @@ mod tests {
     }
 
     #[test]
+    fn frequency_selection_never_picks_a_category_with_zero_weight() {
+        // Shoving is the best-EV candidate, but the field's real tendency in
+        // this spot never shoves — this is exactly the "always reraises
+        // all-in" bug the frequency model exists to fix.
+        let values = vec![
+            value(Action::Call, 10.0),
+            value(Action::Raise(80), 40.0),
+            value(Action::AllIn, 90.0),
+        ];
+        let frequency = crate::opponent_history::CategoryFrequency {
+            fold: 0.0,
+            call_check: 0.5,
+            raise: 0.5,
+            shove: 0.0,
+            sample_count: 40,
+        };
+        for seed in 0..64u64 {
+            let mut rng = seeded_rng(seed);
+            let action = frequency_selection(&mut rng, &values, frequency, 1.0).unwrap();
+            assert_ne!(
+                action,
+                Action::AllIn,
+                "shove has zero sampled weight even though it's the best EV"
+            );
+        }
+    }
+
+    #[test]
+    fn frequency_selection_falls_back_to_full_candidates_when_the_sampled_category_is_absent() {
+        let values = vec![value(Action::Fold, 0.0), value(Action::Call, 20.0)];
+        // The field shoves 100% of the time in this (contrived) spot, but no
+        // shove candidate exists among the solver's legal actions here.
+        let frequency = crate::opponent_history::CategoryFrequency {
+            fold: 0.0,
+            call_check: 0.0,
+            raise: 0.0,
+            shove: 1.0,
+            sample_count: 40,
+        };
+        let mut rng = seeded_rng(5);
+        let action = frequency_selection(&mut rng, &values, frequency, 1.0).unwrap();
+        assert_eq!(
+            action,
+            Action::Call,
+            "falls back to skill_selection over the full candidate set"
+        );
+    }
+
+    #[test]
+    fn template_action_never_shoves_when_the_field_frequency_says_never() {
+        // End-to-end version of `frequency_selection_never_picks_a_category_
+        // with_zero_weight`: wires a real solve through `template_action` at
+        // skill 1.0 (which, before this feature, always took the solver's
+        // best-EV action) with a frequency model saying the field never
+        // shoves in this exact spot.
+        let state = dealt_state();
+        let seat = state.to_act();
+        let rotated = state.rotated(seat);
+        let node = crate::opponent_history::decision_node(&rotated);
+        let bucket = crate::opponent_history::decision_stack_bucket(&rotated);
+        let position = crate::opponent_history::decision_position(&rotated);
+        let ctx = crate::opponent_history::aggressor_context(node, false, false);
+        let mut entries = std::collections::HashMap::new();
+        entries.insert(
+            (node, bucket, position, ctx),
+            crate::opponent_history::CategoryFrequency {
+                fold: 0.5,
+                call_check: 0.5,
+                raise: 0.0,
+                shove: 0.0,
+                sample_count: 40,
+            },
+        );
+        let frequencies = ActionFrequencyModel::from_entries(entries);
+        let ranges = OpponentRangeModel::default();
+        let template = OpponentTemplate::new(1.0);
+        for seed in 0..64u64 {
+            let mut rng = seeded_rng(seed);
+            let action = template_action(
+                &mut rng,
+                &state,
+                seat,
+                &MctsConfig::test(),
+                &template,
+                &ranges,
+                &frequencies,
+                false,
+                false,
+            );
+            assert_ne!(
+                action,
+                Action::AllIn,
+                "seed {seed}: the field never shoves in this spot"
+            );
+        }
+    }
+
+    #[test]
     fn template_action_is_always_legal_and_skill_graded() {
         let state = dealt_state();
         let config = MctsConfig::test();
         let ranges = OpponentRangeModel::default();
+        let frequencies = ActionFrequencyModel::default();
         for skill in [0.0, 0.3, 0.62, 1.0] {
             let template = OpponentTemplate::new(skill);
             for seed in 0..6u64 {
                 let mut rng = seeded_rng(seed);
                 let seat = state.to_act();
-                let action = template_action(&mut rng, &state, seat, &config, &template, &ranges);
+                let action = template_action(
+                    &mut rng, &state, seat, &config, &template, &ranges, &frequencies, false,
+                    false,
+                );
                 assert!(
                     state.legal_actions().allows(action),
                     "skill {skill} seed {seed} produced illegal {action:?}"
@@ -809,6 +973,7 @@ mod tests {
         let state = dealt_state();
         let template = OpponentTemplate::new(0.62);
         let ranges = OpponentRangeModel::default();
+        let frequencies = ActionFrequencyModel::default();
         let mut a = seeded_rng(7);
         let mut b = seeded_rng(7);
         assert_eq!(
@@ -819,6 +984,9 @@ mod tests {
                 &MctsConfig::test(),
                 &template,
                 &ranges,
+                &frequencies,
+                false,
+                false,
             ),
             template_action(
                 &mut b,
@@ -827,6 +995,9 @@ mod tests {
                 &MctsConfig::test(),
                 &template,
                 &ranges,
+                &frequencies,
+                false,
+                false,
             )
         );
     }

@@ -152,15 +152,63 @@ pub fn decision_stack_bucket(state: &GameState) -> StackBucket {
     StackBucket::from_stack(state.stack(state.to_act()), state.blind_level().big_blind)
 }
 
+// --------------------------------------------------------------- position
+
+/// A seat's position in this 3-max format: in Spin & Gold the button posts
+/// the small blind, so there are only three roles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Position {
+    Button,
+    BigBlind,
+    /// Neither the button/small-blind nor the big blind — the third seat,
+    /// first to act preflop. Never produced heads-up (that seat is
+    /// eliminated and never on the clock).
+    Third,
+}
+
+impl Position {
+    pub const ALL: [Position; 3] = [Position::Button, Position::BigBlind, Position::Third];
+
+    /// The stable string key stored alongside `node`/`stack_bucket`.
+    pub fn key(self) -> &'static str {
+        match self {
+            Position::Button => "BUTTON",
+            Position::BigBlind => "BIG_BLIND",
+            Position::Third => "THIRD",
+        }
+    }
+
+    pub fn parse(key: &str) -> Option<Position> {
+        Position::ALL.into_iter().find(|pos| pos.key() == key)
+    }
+}
+
+/// The position of whoever is currently on the clock, derived the same way
+/// [`decision_node`]/[`decision_stack_bucket`] are — works on either an
+/// unrotated live state or a walked/rotated historic state.
+pub fn decision_position(state: &GameState) -> Position {
+    let actor = state.to_act();
+    if actor == state.button() {
+        Position::Button
+    } else if actor == state.big_blind_seat() {
+        Position::BigBlind
+    } else {
+        Position::Third
+    }
+}
+
 // --------------------------------------------------------------- category
 
 /// A coarse action category: keeps the range/table aggregation simple
-/// without needing exact bet sizing.
+/// without needing exact bet sizing. `Shove` is split out from `BetRaise` so
+/// the action-frequency model can tell a real all-in tendency apart from an
+/// ordinary raise — the two read very differently to a real opponent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActionCategory {
     Fold,
     CallCheck,
     BetRaise,
+    Shove,
 }
 
 impl ActionCategory {
@@ -168,7 +216,8 @@ impl ActionCategory {
         match action {
             Action::Fold => ActionCategory::Fold,
             Action::Check | Action::Call => ActionCategory::CallCheck,
-            Action::Bet(_) | Action::Raise(_) | Action::AllIn => ActionCategory::BetRaise,
+            Action::Bet(_) | Action::Raise(_) => ActionCategory::BetRaise,
+            Action::AllIn => ActionCategory::Shove,
         }
     }
 
@@ -177,6 +226,7 @@ impl ActionCategory {
             ActionCategory::Fold => "Fold",
             ActionCategory::CallCheck => "CallCheck",
             ActionCategory::BetRaise => "BetRaise",
+            ActionCategory::Shove => "Shove",
         }
     }
 
@@ -185,22 +235,84 @@ impl ActionCategory {
             "Fold" => Some(ActionCategory::Fold),
             "CallCheck" => Some(ActionCategory::CallCheck),
             "BetRaise" => Some(ActionCategory::BetRaise),
+            "Shove" => Some(ActionCategory::Shove),
             _ => None,
         }
+    }
+}
+
+// ------------------------------------------------------------- aggressor
+
+/// Whether a flop decision is a c-bet opportunity (leading with no bet
+/// faced, as the hand's preflop aggressor) or a fold-to-c-bet opportunity
+/// (facing a bet from that same aggressor) — `NotApplicable` everywhere
+/// else, including flop decisions that don't meet either condition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AggressorContext {
+    NotApplicable,
+    Aggressor,
+    NotAggressor,
+}
+
+impl AggressorContext {
+    pub const ALL: [AggressorContext; 3] = [
+        AggressorContext::NotApplicable,
+        AggressorContext::Aggressor,
+        AggressorContext::NotAggressor,
+    ];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            AggressorContext::NotApplicable => "NOT_APPLICABLE",
+            AggressorContext::Aggressor => "AGGRESSOR",
+            AggressorContext::NotAggressor => "NOT_AGGRESSOR",
+        }
+    }
+
+    pub fn parse(key: &str) -> Option<AggressorContext> {
+        AggressorContext::ALL.into_iter().find(|ctx| ctx.key() == key)
+    }
+}
+
+/// Derives the aggressor context for one decision: only `FlopLead` (a c-bet
+/// opportunity, gated on `was_preflop_aggressor`) and `FlopVsBet` (a
+/// fold-to-c-bet opportunity, gated on `facing_cbet`) ever produce anything
+/// other than `NotApplicable`.
+pub fn aggressor_context(node: Node, was_preflop_aggressor: bool, facing_cbet: bool) -> AggressorContext {
+    match node {
+        Node::FlopLead => {
+            if was_preflop_aggressor {
+                AggressorContext::Aggressor
+            } else {
+                AggressorContext::NotAggressor
+            }
+        }
+        Node::FlopVsBet => {
+            if facing_cbet {
+                AggressorContext::Aggressor
+            } else {
+                AggressorContext::NotAggressor
+            }
+        }
+        _ => AggressorContext::NotApplicable,
     }
 }
 
 // -------------------------------------------------------------- the window
 
 /// One opponent decision in the combined window: which hand class it was,
-/// the node it occurred at, the actor's stack bucket, and the coarse action
-/// taken.
+/// the node it occurred at, the actor's stack bucket and position, the
+/// coarse action taken, and the two booleans that let a flop decision be
+/// read as a c-bet or fold-to-c-bet opportunity.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HistoricAction {
     pub hand: Hand,
     pub node: Node,
     pub stack_bucket: StackBucket,
+    pub position: Position,
     pub category: ActionCategory,
+    pub was_preflop_aggressor: bool,
+    pub facing_cbet: bool,
 }
 
 /// Splits `"As Kh"` into a classified [`Hand`], when both codes parse.
@@ -217,7 +329,10 @@ impl HistoricAction {
             hand: parse_hole_cards(&row.hole_cards)?,
             node: Node::parse(&row.node)?,
             stack_bucket: StackBucket::from_bb(row.stack_bucket as u32),
+            position: Position::parse(&row.position)?,
             category: ActionCategory::parse(&row.action)?,
+            was_preflop_aggressor: row.was_preflop_aggressor,
+            facing_cbet: row.facing_cbet,
         })
     }
 
@@ -226,7 +341,10 @@ impl HistoricAction {
             hand: parse_hole_cards(&row.hole_cards)?,
             node: Node::parse(&row.node)?,
             stack_bucket: StackBucket::from_bb(row.stack_bucket as u32),
+            position: Position::parse(&row.position)?,
             category: ActionCategory::parse(&row.action)?,
+            was_preflop_aggressor: row.was_preflop_aggressor,
+            facing_cbet: row.facing_cbet,
         })
     }
 }
@@ -257,7 +375,10 @@ async fn load_gg_actions(pool: &PgPool, limit: i64) -> Result<(Vec<HistoricActio
                 hand: hand_class,
                 node: decision_node(&point.state),
                 stack_bucket: decision_stack_bucket(&point.state),
+                position: decision_position(&point.state),
                 category: ActionCategory::of(point.played),
+                was_preflop_aggressor: point.was_preflop_aggressor,
+                facing_cbet: point.facing_cbet,
             });
         }
     }
@@ -310,7 +431,10 @@ async fn load_hero_gg_actions(pool: &PgPool, limit: i64) -> Result<(Vec<Historic
                 hand: hand_class,
                 node: decision_node(&point.state),
                 stack_bucket: decision_stack_bucket(&point.state),
+                position: decision_position(&point.state),
                 category: ActionCategory::of(point.played),
+                was_preflop_aggressor: point.was_preflop_aggressor,
+                facing_cbet: point.facing_cbet,
             });
         }
     }
@@ -420,6 +544,177 @@ pub async fn load_range_model(pool: &PgPool, profile_id: i32) -> Result<Opponent
     Ok(OpponentRangeModel { ranges })
 }
 
+// ------------------------------------------------------- frequency model
+
+/// The same minimum-sample threshold [`RangeResolver`] uses for ranges,
+/// reused here so an under-sampled action-frequency entry is treated with
+/// the same skepticism.
+pub const MIN_SAMPLE_ACTIONS: u32 = crate::range::sequence::MIN_SAMPLE_HANDS;
+
+/// One resolved action-category mix (fold/call-check/raise/shove, summing
+/// to 1) for a `(Node, StackBucket, Position, AggressorContext)` spot, plus
+/// the sample size backing it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CategoryFrequency {
+    pub fold: f32,
+    pub call_check: f32,
+    pub raise: f32,
+    pub shove: f32,
+    pub sample_count: u32,
+}
+
+/// Tallies the window into a per-node/stack-bucket/position/aggressor-context
+/// action-category mix: the share of times the opponent took each category
+/// of action at that spot. Spots with no samples are simply absent from the
+/// map, mirroring [`build_range_model`].
+pub fn build_action_frequency_model(
+    actions: &[HistoricAction],
+) -> HashMap<(Node, StackBucket, Position, AggressorContext), CategoryFrequency> {
+    let mut counts: HashMap<(Node, StackBucket, Position, AggressorContext), [u32; 4]> =
+        HashMap::new();
+    for action in actions {
+        let ctx = aggressor_context(action.node, action.was_preflop_aggressor, action.facing_cbet);
+        let entry = counts
+            .entry((action.node, action.stack_bucket, action.position, ctx))
+            .or_insert([0u32; 4]);
+        let slot = match action.category {
+            ActionCategory::Fold => 0,
+            ActionCategory::CallCheck => 1,
+            ActionCategory::BetRaise => 2,
+            ActionCategory::Shove => 3,
+        };
+        entry[slot] += 1;
+    }
+    counts
+        .into_iter()
+        .map(|(key, [fold, call_check, raise, shove])| {
+            let total = fold + call_check + raise + shove;
+            let freq = |count: u32| {
+                if total > 0 {
+                    count as f32 / total as f32
+                } else {
+                    0.0
+                }
+            };
+            (
+                key,
+                CategoryFrequency {
+                    fold: freq(fold),
+                    call_check: freq(call_check),
+                    raise: freq(raise),
+                    shove: freq(shove),
+                    sample_count: total,
+                },
+            )
+        })
+        .collect()
+}
+
+/// Persists the action-frequency model under the single pooled opponent
+/// profile.
+pub async fn save_action_frequency_model(
+    pool: &PgPool,
+    profile_id: i32,
+    model: &HashMap<(Node, StackBucket, Position, AggressorContext), CategoryFrequency>,
+) -> Result<()> {
+    for ((node, bucket, position, ctx), frequency) in model {
+        db::upsert_contextual_action_frequency(
+            pool,
+            profile_id,
+            node.key(),
+            bucket.as_i16(),
+            position.key(),
+            ctx.key(),
+            &db::StoredCategoryFrequency {
+                fold_pct: frequency.fold,
+                call_check_pct: frequency.call_check,
+                raise_pct: frequency.raise,
+                shove_pct: frequency.shove,
+                sample_count: frequency.sample_count,
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// The resolved action-frequency entries a session loads once at start, used
+/// to sample which category of action a bot takes in a given spot before
+/// the MCTS solve picks the best concrete play within that category. Spots
+/// below [`MIN_SAMPLE_ACTIONS`] are simply absent — [`Self::resolve`]
+/// returns `None` for those, and callers fall back to the existing
+/// skill-softmax behavior over the full candidate set.
+#[derive(Clone, Debug, Default)]
+pub struct ActionFrequencyModel {
+    frequencies: HashMap<(Node, StackBucket, Position, AggressorContext), CategoryFrequency>,
+}
+
+impl ActionFrequencyModel {
+    pub fn resolve(
+        &self,
+        node: Node,
+        bucket: StackBucket,
+        position: Position,
+        ctx: AggressorContext,
+    ) -> Option<CategoryFrequency> {
+        self.frequencies.get(&(node, bucket, position, ctx)).copied()
+    }
+
+    /// Builds a model directly from resolved entries, bypassing the DB —
+    /// for tests that need `resolve` to return a specific frequency.
+    #[cfg(test)]
+    pub(crate) fn from_entries(
+        entries: HashMap<(Node, StackBucket, Position, AggressorContext), CategoryFrequency>,
+    ) -> Self {
+        Self {
+            frequencies: entries,
+        }
+    }
+}
+
+/// Loads the resolved action-frequency model for the pooled opponent
+/// profile, applying the [`MIN_SAMPLE_ACTIONS`] gate entry by entry.
+pub async fn load_action_frequency_model(
+    pool: &PgPool,
+    profile_id: i32,
+) -> Result<ActionFrequencyModel> {
+    let mut frequencies = HashMap::new();
+    for node in Node::ALL {
+        for bucket in StackBucket::ALL {
+            for position in Position::ALL {
+                for ctx in AggressorContext::ALL {
+                    let Some(stored) = db::load_contextual_action_frequency(
+                        pool,
+                        profile_id,
+                        node.key(),
+                        bucket.as_i16(),
+                        position.key(),
+                        ctx.key(),
+                    )
+                    .await?
+                    else {
+                        continue;
+                    };
+                    if stored.sample_count < MIN_SAMPLE_ACTIONS {
+                        continue;
+                    }
+                    frequencies.insert(
+                        (node, bucket, position, ctx),
+                        CategoryFrequency {
+                            fold: stored.fold_pct,
+                            call_check: stored.call_check_pct,
+                            raise: stored.raise_pct,
+                            shove: stored.shove_pct,
+                            sample_count: stored.sample_count,
+                        },
+                    );
+                }
+            }
+        }
+    }
+    Ok(ActionFrequencyModel { frequencies })
+}
+
 // ----------------------------------------------------- starting-hand table
 
 /// One row of the starting-hand table: the opponent's preflop action mix
@@ -447,7 +742,7 @@ pub fn build_starting_hand_table(actions: &[HistoricAction]) -> Vec<HandRow> {
         let slot = match action.category {
             ActionCategory::Fold => 0,
             ActionCategory::CallCheck => 1,
-            ActionCategory::BetRaise => 2,
+            ActionCategory::BetRaise | ActionCategory::Shove => 2,
         };
         counts[action.hand.index()][slot] += 1;
     }
@@ -506,12 +801,12 @@ pub fn build_historic_read(actions: &[HistoricAction]) -> HistoricRead {
             if action.category != ActionCategory::Fold {
                 preflop_voluntary += 1;
             }
-            if action.category == ActionCategory::BetRaise {
+            if matches!(action.category, ActionCategory::BetRaise | ActionCategory::Shove) {
                 preflop_raise += 1;
             }
         } else {
             match action.category {
-                ActionCategory::BetRaise => postflop_bets += 1,
+                ActionCategory::BetRaise | ActionCategory::Shove => postflop_bets += 1,
                 ActionCategory::CallCheck
                     if matches!(
                         action.node,
@@ -598,6 +893,7 @@ impl Default for HistorySummary {
 #[derive(Clone, Debug, Default)]
 pub struct OpponentModel {
     pub ranges: OpponentRangeModel,
+    pub frequencies: ActionFrequencyModel,
     pub historic: HistorySummary,
     pub hero_historic: HistorySummary,
 }
@@ -611,6 +907,8 @@ pub async fn refresh(pool: &PgPool) -> Result<HistorySummary> {
     let profile_id = db::upsert_opponent_profile(pool, POOLED_PROFILE_NAME, "FIELD").await?;
     let model = build_range_model(&actions);
     save_range_model(pool, profile_id, &model).await?;
+    let frequency_model = build_action_frequency_model(&actions);
+    save_action_frequency_model(pool, profile_id, &frequency_model).await?;
     Ok(HistorySummary {
         window_hands,
         read: build_historic_read(&actions),
@@ -641,6 +939,7 @@ pub async fn pooled_profile_id(pool: &PgPool) -> Result<i32> {
 mod tests {
     use super::*;
     use crate::card::Rank;
+    use crate::game::Seat;
     use crate::range::hands::Hand as RangeHand;
 
     // ------------------------------------------------------------ samples
@@ -736,11 +1035,12 @@ Seat 3: 14c11a2a (big blind) folded on the River";
                 (Node::PfVsRaise, ActionCategory::CallCheck),
                 (Node::FlopVsBet, ActionCategory::CallCheck),
                 (Node::TurnVsBet, ActionCategory::CallCheck),
-                (Node::RiverVsBet, ActionCategory::BetRaise),
+                (Node::RiverVsBet, ActionCategory::Shove),
             ],
             "SB calling the open BB is PF_OPEN (no raise yet); calling the \
              raise, and every later street facing a bet, all classify as \
-             the *_VS_* node"
+             the *_VS_* node; the river raise is an all-in push, so it's a \
+             Shove rather than a plain BetRaise"
         );
     }
 
@@ -789,6 +1089,37 @@ Seat 3: 14c11a2a (big blind) folded on the River";
         }
     }
 
+    // ------------------------------------------------------------ position
+
+    #[test]
+    fn position_key_round_trips_for_every_variant() {
+        for position in Position::ALL {
+            assert_eq!(Position::parse(position.key()), Some(position));
+        }
+        assert_eq!(Position::parse("NOT_A_POSITION"), None);
+    }
+
+    #[test]
+    fn decision_position_classifies_button_big_blind_and_third_seat() {
+        let level = crate::game::blinds::BlindLevel::new(10, 20);
+        let mut deck = crate::card::Deck::shuffled(&mut crate::rng::seeded_rng(1));
+        let mut state = GameState::new(Seat::Hero, level);
+        state.start_hand(&mut deck).unwrap();
+        // Hero is the button (small blind); Opponent1 is the big blind
+        // (next active seat after the button); Opponent2 is the third seat,
+        // first to act preflop.
+        assert_eq!(state.to_act(), Seat::Opponent2);
+        assert_eq!(decision_position(&state), Position::Third);
+
+        state.apply_action(Action::Call).unwrap();
+        assert_eq!(state.to_act(), Seat::Hero);
+        assert_eq!(decision_position(&state), Position::Button);
+
+        state.apply_action(Action::Call).unwrap();
+        assert_eq!(state.to_act(), Seat::Opponent1);
+        assert_eq!(decision_position(&state), Position::BigBlind);
+    }
+
     // ------------------------------------------------------------ category
 
     #[test]
@@ -804,7 +1135,7 @@ Seat 3: 14c11a2a (big blind) folded on the River";
             ActionCategory::of(Action::Raise(80)),
             ActionCategory::BetRaise
         );
-        assert_eq!(ActionCategory::of(Action::AllIn), ActionCategory::BetRaise);
+        assert_eq!(ActionCategory::of(Action::AllIn), ActionCategory::Shove);
     }
 
     #[test]
@@ -813,6 +1144,7 @@ Seat 3: 14c11a2a (big blind) folded on the River";
             ActionCategory::Fold,
             ActionCategory::CallCheck,
             ActionCategory::BetRaise,
+            ActionCategory::Shove,
         ] {
             assert_eq!(ActionCategory::parse(category.label()), Some(category));
         }
@@ -831,11 +1163,27 @@ Seat 3: 14c11a2a (big blind) folded on the River";
         bucket: StackBucket,
         category: ActionCategory,
     ) -> HistoricAction {
+        action_with_context(hand, node, bucket, Position::Third, category, false, false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn action_with_context(
+        hand: RangeHand,
+        node: Node,
+        bucket: StackBucket,
+        position: Position,
+        category: ActionCategory,
+        was_preflop_aggressor: bool,
+        facing_cbet: bool,
+    ) -> HistoricAction {
         HistoricAction {
             hand,
             node,
             stack_bucket: bucket,
+            position,
             category,
+            was_preflop_aggressor,
+            facing_cbet,
         }
     }
 
@@ -861,12 +1209,18 @@ Seat 3: 14c11a2a (big blind) folded on the River";
             hole_cards: "Qc Qd".to_string(),
             action: ActionCategory::BetRaise.label().to_string(),
             hand_no: 1,
+            position: Position::Button.key().to_string(),
+            was_preflop_aggressor: false,
+            facing_cbet: true,
         };
         let historic = HistoricAction::from_local(row).expect("well-formed row parses");
         assert_eq!(historic.hand, hand(Rank::Queen, Rank::Queen, false));
         assert_eq!(historic.node, Node::FlopVsBet);
         assert_eq!(historic.stack_bucket, StackBucket::Bb15);
+        assert_eq!(historic.position, Position::Button);
         assert_eq!(historic.category, ActionCategory::BetRaise);
+        assert!(!historic.was_preflop_aggressor);
+        assert!(historic.facing_cbet);
     }
 
     #[test]
@@ -877,12 +1231,18 @@ Seat 3: 14c11a2a (big blind) folded on the River";
             hole_cards: "Qc Qd".to_string(),
             action: ActionCategory::BetRaise.label().to_string(),
             hand_no: 1,
+            position: Position::Button.key().to_string(),
+            was_preflop_aggressor: false,
+            facing_cbet: true,
         };
         let historic = HistoricAction::from_local_hero(row).expect("well-formed row parses");
         assert_eq!(historic.hand, hand(Rank::Queen, Rank::Queen, false));
         assert_eq!(historic.node, Node::FlopVsBet);
         assert_eq!(historic.stack_bucket, StackBucket::Bb15);
+        assert_eq!(historic.position, Position::Button);
         assert_eq!(historic.category, ActionCategory::BetRaise);
+        assert!(!historic.was_preflop_aggressor);
+        assert!(historic.facing_cbet);
     }
 
     #[test]
@@ -893,6 +1253,9 @@ Seat 3: 14c11a2a (big blind) folded on the River";
             hole_cards: "Qc Qd".to_string(),
             action: "BetRaise".to_string(),
             hand_no: 1,
+            position: Position::Third.key().to_string(),
+            was_preflop_aggressor: false,
+            facing_cbet: false,
         };
         assert_eq!(HistoricAction::from_local(bad_node), None);
 
@@ -902,6 +1265,9 @@ Seat 3: 14c11a2a (big blind) folded on the River";
             hole_cards: "garbage".to_string(),
             action: "Fold".to_string(),
             hand_no: 1,
+            position: Position::Third.key().to_string(),
+            was_preflop_aggressor: false,
+            facing_cbet: false,
         };
         assert_eq!(HistoricAction::from_local(bad_cards), None);
     }
@@ -954,6 +1320,118 @@ Seat 3: 14c11a2a (big blind) folded on the River";
     #[test]
     fn build_range_model_is_empty_for_an_empty_window() {
         assert!(build_range_model(&[]).is_empty());
+    }
+
+    // ------------------------------------------------------ frequency model
+
+    #[test]
+    fn build_action_frequency_model_conditions_on_position_and_aggressor_context() {
+        let aa = hand(Rank::Ace, Rank::Ace, false);
+        let actions = vec![
+            // Button, PfVsRaise: 2 raises (one a shove), 1 fold — 3-bet% is
+            // queryable here as raise+shove rate.
+            action_with_context(
+                aa,
+                Node::PfVsRaise,
+                StackBucket::Bb25,
+                Position::Button,
+                ActionCategory::BetRaise,
+                false,
+                false,
+            ),
+            action_with_context(
+                aa,
+                Node::PfVsRaise,
+                StackBucket::Bb25,
+                Position::Button,
+                ActionCategory::Shove,
+                false,
+                false,
+            ),
+            action_with_context(
+                aa,
+                Node::PfVsRaise,
+                StackBucket::Bb25,
+                Position::Button,
+                ActionCategory::Fold,
+                false,
+                false,
+            ),
+            // Same node/bucket but a different position must not mix in.
+            action_with_context(
+                aa,
+                Node::PfVsRaise,
+                StackBucket::Bb25,
+                Position::BigBlind,
+                ActionCategory::Fold,
+                false,
+                false,
+            ),
+            // FlopLead as the preflop aggressor (a c-bet) vs. not (must not
+            // mix into the same bucket).
+            action_with_context(
+                aa,
+                Node::FlopLead,
+                StackBucket::Bb25,
+                Position::Button,
+                ActionCategory::BetRaise,
+                true,
+                false,
+            ),
+            action_with_context(
+                aa,
+                Node::FlopLead,
+                StackBucket::Bb25,
+                Position::Button,
+                ActionCategory::CallCheck,
+                false,
+                false,
+            ),
+        ];
+        let model = build_action_frequency_model(&actions);
+
+        let three_bet_spot = &model[&(
+            Node::PfVsRaise,
+            StackBucket::Bb25,
+            Position::Button,
+            AggressorContext::NotApplicable,
+        )];
+        assert_eq!(three_bet_spot.sample_count, 3);
+        assert!((three_bet_spot.raise - 1.0 / 3.0).abs() < 1e-6);
+        assert!((three_bet_spot.shove - 1.0 / 3.0).abs() < 1e-6);
+        assert!((three_bet_spot.fold - 1.0 / 3.0).abs() < 1e-6);
+
+        let other_position = &model[&(
+            Node::PfVsRaise,
+            StackBucket::Bb25,
+            Position::BigBlind,
+            AggressorContext::NotApplicable,
+        )];
+        assert_eq!(other_position.sample_count, 1);
+        assert_eq!(other_position.fold, 1.0);
+
+        let cbet_spot = &model[&(
+            Node::FlopLead,
+            StackBucket::Bb25,
+            Position::Button,
+            AggressorContext::Aggressor,
+        )];
+        assert_eq!(cbet_spot.sample_count, 1);
+        assert_eq!(cbet_spot.raise, 1.0, "c-bet% is the raise rate when leading as the aggressor");
+
+        let non_cbet_spot = &model[&(
+            Node::FlopLead,
+            StackBucket::Bb25,
+            Position::Button,
+            AggressorContext::NotAggressor,
+        )];
+        assert_eq!(non_cbet_spot.sample_count, 1);
+        assert_eq!(non_cbet_spot.call_check, 1.0);
+    }
+
+    #[test]
+    fn build_action_frequency_model_is_empty_for_an_empty_window() {
+        assert!(build_action_frequency_model(&[]).is_empty());
     }
 
     // ------------------------------------------------------- hand table
@@ -1115,6 +1593,9 @@ Seat 3: 14c11a2a (big blind) folded on the River";
                 hole_cards: "As Ks".to_string(),
                 action: ActionCategory::BetRaise.label().to_string(),
                 hand_no: 42,
+                position: Position::Button.key().to_string(),
+                was_preflop_aggressor: false,
+                facing_cbet: false,
             },
             LocalOpponentAction {
                 node: Node::FlopVsBet.key().to_string(),
@@ -1122,6 +1603,9 @@ Seat 3: 14c11a2a (big blind) folded on the River";
                 hole_cards: "7c 2d".to_string(),
                 action: ActionCategory::Fold.label().to_string(),
                 hand_no: 43,
+                position: Position::BigBlind.key().to_string(),
+                was_preflop_aggressor: false,
+                facing_cbet: true,
             },
         ];
         db::insert_local_opponent_actions(&pool, &rows)
@@ -1157,6 +1641,9 @@ Seat 3: 14c11a2a (big blind) folded on the River";
                 hole_cards: "As Ks".to_string(),
                 action: ActionCategory::BetRaise.label().to_string(),
                 hand_no: 42,
+                position: Position::Button.key().to_string(),
+                was_preflop_aggressor: false,
+                facing_cbet: false,
             },
             crate::db::LocalHeroAction {
                 node: Node::FlopVsBet.key().to_string(),
@@ -1164,6 +1651,9 @@ Seat 3: 14c11a2a (big blind) folded on the River";
                 hole_cards: "7c 2d".to_string(),
                 action: ActionCategory::Fold.label().to_string(),
                 hand_no: 43,
+                position: Position::BigBlind.key().to_string(),
+                was_preflop_aggressor: false,
+                facing_cbet: true,
             },
         ];
         db::insert_local_hero_actions(&pool, &rows).await.unwrap();
@@ -1228,6 +1718,77 @@ Seat 3: 14c11a2a (big blind) folded on the River";
         assert_eq!(range[aa.index()], 1.0);
 
         sqlx::query("DELETE FROM contextual_ranges WHERE profile_id = $1")
+            .bind(profile_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM opponent_profiles WHERE id = $1")
+            .bind(profile_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn action_frequency_model_saves_and_loads_through_the_pooled_profile() {
+        let _guard = crate::analytics::DB_TEST_LOCK.lock().await;
+        let pool = test_pool().await;
+        let name = format!(
+            "test_field_freq_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let profile_id = db::upsert_opponent_profile(&pool, &name, "FIELD")
+            .await
+            .unwrap();
+        let aa = crate::range::hands::Hand::new(Rank::Ace, Rank::Ace, false);
+
+        // Below MIN_SAMPLE_ACTIONS: the entry is dropped on load.
+        let sparse = vec![action(
+            aa,
+            Node::RiverLead,
+            StackBucket::Bb25,
+            ActionCategory::BetRaise,
+        )];
+        let model = build_action_frequency_model(&sparse);
+        save_action_frequency_model(&pool, profile_id, &model)
+            .await
+            .unwrap();
+        let resolved = load_action_frequency_model(&pool, profile_id).await.unwrap();
+        assert_eq!(
+            resolved.resolve(
+                Node::RiverLead,
+                StackBucket::Bb25,
+                Position::Third,
+                AggressorContext::NotApplicable
+            ),
+            None,
+            "a single sample stays below MIN_SAMPLE_ACTIONS and is dropped"
+        );
+
+        // At/above MIN_SAMPLE_ACTIONS: the resolved frequency is the trained one.
+        let dense: Vec<HistoricAction> = (0..40)
+            .map(|_| action(aa, Node::TurnVsBet, StackBucket::Bb15, ActionCategory::Shove))
+            .collect();
+        let model = build_action_frequency_model(&dense);
+        save_action_frequency_model(&pool, profile_id, &model)
+            .await
+            .unwrap();
+        let resolved = load_action_frequency_model(&pool, profile_id).await.unwrap();
+        let frequency = resolved
+            .resolve(
+                Node::TurnVsBet,
+                StackBucket::Bb15,
+                Position::Third,
+                AggressorContext::NotApplicable,
+            )
+            .expect("40 samples clears MIN_SAMPLE_ACTIONS");
+        assert_eq!(frequency.shove, 1.0);
+        assert_eq!(frequency.sample_count, 40);
+
+        sqlx::query("DELETE FROM contextual_action_frequencies WHERE profile_id = $1")
             .bind(profile_id)
             .execute(&pool)
             .await

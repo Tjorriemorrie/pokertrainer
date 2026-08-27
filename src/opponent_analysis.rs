@@ -87,6 +87,15 @@ pub struct DecisionPoint {
     /// which is expected and handled downstream by a minimum-sample
     /// fallback, not treated as an error.
     pub opponent_hand: Option<Hand>,
+    /// Whether this actor was the last seat to bet/raise/all-in preflop this
+    /// hand — meaningful when this decision is a flop lead (no bet yet
+    /// faced): that's exactly a continuation-bet opportunity.
+    pub was_preflop_aggressor: bool,
+    /// Whether the flop bet this actor is currently facing was made by the
+    /// preflop aggressor — meaningful when this decision faces a flop bet:
+    /// that's exactly a fold-to-continuation-bet opportunity. `false` on any
+    /// other street or when no one raised preflop.
+    pub facing_cbet: bool,
 }
 
 /// The hand class an actor showed at showdown, if their cards parse and they
@@ -262,6 +271,13 @@ pub fn walk_hand(
         .map_err(|error| format!("initial state does not rebuild: {error}"))?;
 
     let mut walked = WalkedHand::default();
+    // Tracks the last seat to bet/raise/all-in preflop (the hand's preflop
+    // aggressor, for c-bet purposes) and, while on the flop, the last seat to
+    // bet/raise/all-in there (who a later flop actor is "facing"). Both are
+    // snapshotted for each decision *before* the current action updates
+    // them, so they describe what the actor already knew when deciding.
+    let mut preflop_aggressor_slot: Option<usize> = None;
+    let mut flop_bettor_slot: Option<usize> = None;
     for (index, action) in episode.actions.iter().enumerate() {
         if action.verb == EpisodeVerb::Post {
             continue;
@@ -301,6 +317,17 @@ pub fn walk_hand(
             }
         }
 
+        let was_preflop_aggressor = preflop_aggressor_slot == Some(slot);
+        let facing_cbet = state.street() == Street::Flop
+            && flop_bettor_slot.is_some()
+            && flop_bettor_slot == preflop_aggressor_slot;
+        let is_aggressive = matches!(played, Action::Bet(_) | Action::Raise(_) | Action::AllIn);
+        match state.street() {
+            Street::Preflop if is_aggressive => preflop_aggressor_slot = Some(slot),
+            Street::Flop if is_aggressive => flop_bettor_slot = Some(slot),
+            _ => {}
+        }
+
         if slot != hero_slot {
             // The hero's cards are known: pin them into the decision point,
             // following the rotation the same way `GameState::rotated` does.
@@ -320,6 +347,8 @@ pub fn walk_hand(
                     .map(|seat| seat.name.clone())
                     .unwrap_or_default(),
                 opponent_hand: shown_hand(episode, action.seat_no),
+                was_preflop_aggressor,
+                facing_cbet,
             });
         } else {
             // The hero's own decision: rotating by hero_slot moves their
@@ -331,6 +360,8 @@ pub fn walk_hand(
                 played,
                 actor_name: "Hero".to_string(),
                 opponent_hand: None,
+                was_preflop_aggressor,
+                facing_cbet,
             });
         }
 
@@ -1289,6 +1320,34 @@ Seat 3: 14c11a2a (small blind) showed [Qs Ad] and won (600) with a pair of Queen
         walk_hand(&episode, sb, bb, hero_cards("As Kh"))
             .expect("sample walks")
             .hero
+    }
+
+    #[test]
+    fn walk_hand_tags_cbet_and_facing_cbet_context() {
+        let episode = crate::hh::parse_episode(SAMPLE_WIN).expect("sample parses");
+        let walked = walk_hand(&episode, 20, 40, hero_cards("As Kh")).expect("sample walks");
+
+        // Hero's preflop action (the BB's option, raised to 80) happens
+        // before anyone is yet the preflop aggressor.
+        assert!(!walked.hero[0].was_preflop_aggressor);
+        // Hero's flop lead bet, having just raised preflop, is a c-bet.
+        assert!(
+            walked.hero[1].was_preflop_aggressor,
+            "leading the flop after raising preflop is a c-bet opportunity"
+        );
+
+        // The opponent's preflop calls don't face a flop c-bet (wrong
+        // street); their flop call does, since Hero (the bettor) is the
+        // preflop aggressor.
+        assert!(!walked.opponent[0].facing_cbet);
+        assert!(!walked.opponent[1].facing_cbet);
+        assert!(
+            walked.opponent[2].facing_cbet,
+            "calling the flop bet from the preflop aggressor is facing a c-bet"
+        );
+        // Later streets don't carry c-bet context (it's flop-only).
+        assert!(!walked.opponent[3].facing_cbet);
+        assert!(!walked.opponent[4].facing_cbet);
     }
 
     #[test]

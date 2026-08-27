@@ -110,6 +110,7 @@ async fn load_opponent_model(pool: Option<&PgPool>) -> crate::opponent_history::
             tracing::warn!(%error, "opponent profile unavailable — bots play with a uniform prior");
             return crate::opponent_history::OpponentModel {
                 ranges: Default::default(),
+                frequencies: Default::default(),
                 historic,
                 hero_historic,
             };
@@ -122,8 +123,17 @@ async fn load_opponent_model(pool: Option<&PgPool>) -> crate::opponent_history::
             Default::default()
         }
     };
+    let frequencies =
+        match crate::opponent_history::load_action_frequency_model(pool, profile_id).await {
+            Ok(model) => model,
+            Err(error) => {
+                tracing::warn!(%error, "opponent action-frequency model unavailable — bots fall back to skill-based selection");
+                Default::default()
+            }
+        };
     crate::opponent_history::OpponentModel {
         ranges,
+        frequencies,
         historic,
         hero_historic,
     }

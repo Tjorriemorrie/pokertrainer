@@ -10,7 +10,7 @@ use crate::opponent::{
     MergedOpponentSnapshot, OpponentTemplate, OpponentTracker, placeholder_action, template_action,
 };
 use crate::opponent_history::{
-    ActionCategory, OpponentModel, decision_node, decision_stack_bucket,
+    ActionCategory, OpponentModel, decision_node, decision_position, decision_stack_bucket,
 };
 use crate::range::hands::{HAND_COUNT, Range};
 use crate::rng::SeededRng;
@@ -143,6 +143,16 @@ pub struct TableSession {
     /// Whether the hero selected the all-in action at any point this hand.
     hero_all_in_this_hand: bool,
     opponents: OpponentTracker,
+    /// The last seat to bet/raise/all-in preflop this hand (across every
+    /// seat, hero included) — the hand's c-bet context. `None` once a new
+    /// hand starts, until someone raises. See [`Self::settle_action`], the
+    /// single choke point every seat's action passes through, for where
+    /// this is maintained.
+    preflop_aggressor: Option<Seat>,
+    /// The last seat to bet/raise/all-in on the flop this hand — lets a
+    /// later flop actor be told whether the bet they're facing came from
+    /// the preflop aggressor (a c-bet) or someone else.
+    flop_bettor: Option<Seat>,
     /// Sound cues accumulated since the last rendered state update.
     sounds: Vec<Sound>,
     /// Opponent actions applied by [`Self::pump`] since the last drain; the
@@ -190,6 +200,8 @@ impl TableSession {
             hand_results: Vec::new(),
             hero_all_in_this_hand: false,
             opponents: OpponentTracker::default(),
+            preflop_aggressor: None,
+            flop_bettor: None,
             sounds: Vec::new(),
             pump_actions: Vec::new(),
         }
@@ -226,6 +238,8 @@ impl TableSession {
             hand_results: Vec::new(),
             hero_all_in_this_hand: false,
             opponents: OpponentTracker::default(),
+            preflop_aggressor: None,
+            flop_bettor: None,
             sounds: Vec::new(),
             pump_actions: Vec::new(),
         }
@@ -277,6 +291,12 @@ impl TableSession {
             hand_results: Vec::new(),
             hero_all_in_this_hand: false,
             opponents: OpponentTracker::from_snapshot(&snapshot.opponents),
+            // Not persisted: a resumed mid-hand table starts with no known
+            // c-bet context for the remainder of that one hand, the same
+            // kind of one-time approximation `TournamentSnapshot` already
+            // accepts elsewhere (see e.g. `local_action_hand_no`'s history).
+            preflop_aggressor: None,
+            flop_bettor: None,
             sounds: Vec::new(),
             pump_actions: Vec::new(),
         })
@@ -408,6 +428,7 @@ impl TableSession {
         });
         let node = decision_node(&self.state);
         let stack_bucket = decision_stack_bucket(&self.state);
+        let position = decision_position(&self.state);
         let hole_cards = self.state.hero_cards();
         self.local_hero_actions.push(crate::db::LocalHeroAction {
             node: node.key().to_string(),
@@ -415,6 +436,9 @@ impl TableSession {
             hole_cards: format!("{} {}", hole_cards[0].to_code(), hole_cards[1].to_code()),
             action: ActionCategory::of(played).label().to_string(),
             hand_no: self.hand_no as i64,
+            position: position.key().to_string(),
+            was_preflop_aggressor: self.was_preflop_aggressor(Seat::Hero),
+            facing_cbet: self.facing_cbet(),
         });
     }
 
@@ -558,6 +582,8 @@ impl TableSession {
         }
         self.hand_no += 1;
         self.opponents.begin_hand();
+        self.preflop_aggressor = None;
+        self.flop_bettor = None;
         self.hero_all_in_this_hand = false;
         self.push_sound(Sound::Deal);
         let small_blind = self.state.small_blind_seat();
@@ -641,11 +667,15 @@ impl TableSession {
             let actor = self.state.to_act();
             let legal = self.state.legal_actions();
             let call_amount = legal.call_amount;
-            // Captured before the action settles: the node/bucket/true-cards
-            // describe the decision the actor is currently facing.
+            // Captured before the action settles: the node/bucket/position/
+            // true-cards/c-bet-context describe the decision the actor is
+            // currently facing.
             let node = decision_node(&self.state);
             let stack_bucket = decision_stack_bucket(&self.state);
+            let position = decision_position(&self.state);
             let hole_cards = self.state.rotated(actor).hero_cards();
+            let was_preflop_aggressor = self.was_preflop_aggressor(actor);
+            let facing_cbet = self.facing_cbet();
             let action = match self.template {
                 Some(template) => template_action(
                     &mut self.rng,
@@ -654,6 +684,9 @@ impl TableSession {
                     &self.mcts,
                     &template,
                     &self.opponent_model.ranges,
+                    &self.opponent_model.frequencies,
+                    was_preflop_aggressor,
+                    facing_cbet,
                 ),
                 None => placeholder_action(&mut self.rng, &self.state),
             };
@@ -665,6 +698,9 @@ impl TableSession {
                 hole_cards: format!("{} {}", hole_cards[0].to_code(), hole_cards[1].to_code()),
                 action: ActionCategory::of(action).label().to_string(),
                 hand_no: self.hand_no as i64,
+                position: position.key().to_string(),
+                was_preflop_aggressor,
+                facing_cbet,
             });
             self.pump_actions.push(action);
             let outcome = self.settle_action(action)?;
@@ -903,8 +939,12 @@ impl TableSession {
 
     /// Applies one action and settles the street/hand boundaries it creates,
     /// appending action-log lines for any board cards that were dealt as a
-    /// result (flop/turn/river — showdown run-outs narrate all three).
+    /// result (flop/turn/river — showdown run-outs narrate all three). Every
+    /// seat's action (hero included) passes through here, making it the one
+    /// place that can maintain `preflop_aggressor`/`flop_bettor` for the
+    /// whole hand regardless of who acts.
     fn settle_action(&mut self, action: Action) -> Result<ActionOutcome> {
+        self.note_aggressor(self.state.to_act(), self.state.street(), action);
         let board_before = self.state.board().len();
         let outcome = apply_settled(&mut self.state, &mut self.deck, action)?;
         let board = self.state.board().to_vec();
@@ -921,6 +961,33 @@ impl TableSession {
             self.push_sound(Sound::Deal);
         }
         Ok(outcome)
+    }
+
+    /// Updates the hand's c-bet context after seeing `actor` take `action`
+    /// on `street` — called from [`Self::settle_action`] with the state as
+    /// it stood *before* the action, so it records who becomes the new
+    /// aggressor rather than double-counting the action just taken.
+    fn note_aggressor(&mut self, actor: Seat, street: Street, action: Action) {
+        let is_aggressive = matches!(action, Action::Bet(_) | Action::Raise(_) | Action::AllIn);
+        match street {
+            Street::Preflop if is_aggressive => self.preflop_aggressor = Some(actor),
+            Street::Flop if is_aggressive => self.flop_bettor = Some(actor),
+            _ => {}
+        }
+    }
+
+    /// Whether `seat` was the last seat to bet/raise/all-in preflop this
+    /// hand — a c-bet opportunity when `seat` then leads the flop.
+    fn was_preflop_aggressor(&self, seat: Seat) -> bool {
+        self.preflop_aggressor == Some(seat)
+    }
+
+    /// Whether the flop bet currently being faced came from the preflop
+    /// aggressor — a fold-to-c-bet opportunity for whoever is on the clock.
+    fn facing_cbet(&self) -> bool {
+        self.state.street() == Street::Flop
+            && self.flop_bettor.is_some()
+            && self.flop_bettor == self.preflop_aggressor
     }
 
     fn log_line(&mut self, line: String) {
@@ -1234,6 +1301,7 @@ mod tests {
         entries.insert((node, bucket), tight);
         let model = OpponentModel {
             ranges: crate::opponent_history::OpponentRangeModel::from_entries(entries),
+            frequencies: Default::default(),
             historic: Default::default(),
             hero_historic: Default::default(),
         };
