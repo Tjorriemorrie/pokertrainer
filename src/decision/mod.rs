@@ -720,4 +720,65 @@ mod tests {
             "the preflop street budget was applied"
         );
     }
+
+    /// Regression for the "raise 9-3o into a reraise" coaching complaint: the
+    /// SB faces a UTG open to 60 (15bb effective, blinds 10/20) holding
+    /// 9-3o, with both opponents' hands pinned to hands they'd actually
+    /// open/continue with (AKo and QQ). Scored against a flat "any two
+    /// cards" prior — what the live coach fed the solver before it was
+    /// wired to the resolved opponent-range model — a reraise or shove can
+    /// look better than folding purely on inflated fold equity; scored
+    /// against real hands, fold must beat every raise size and the shove.
+    #[test]
+    fn junk_hand_facing_a_raise_never_recommends_reraising_into_real_hands() {
+        let mut deck = Deck::shuffled(&mut seeded_rng(7));
+        let mut state = GameState::new(Seat::Hero, level());
+        state.start_hand(&mut deck).unwrap();
+        state.set_hole_cards(
+            Seat::Hero,
+            [
+                card(Rank::Nine, Suit::Clubs),
+                card(Rank::Three, Suit::Diamonds),
+            ],
+        );
+        assert_eq!(state.to_act(), Seat::Opponent2, "Opponent2 is UTG here");
+        state.apply_action(Action::Raise(60)).unwrap();
+        assert_eq!(state.to_act(), Seat::Hero, "hero (SB/button) faces the open");
+
+        let config = MctsConfig {
+            worlds: 64,
+            iterations: 256,
+            ..MctsConfig::test()
+        };
+        let mut rng = seeded_rng(9);
+        let result = analyze(
+            &mut rng,
+            &state,
+            &[
+                pinned(Hand::new(Rank::Ace, Rank::King, false)),
+                pinned(Hand::new(Rank::Queen, Rank::Queen, false)),
+            ],
+            &config,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            result.optimal.action,
+            Action::Fold,
+            "93o cannot reraise AKo/QQ profitably: {:#?}",
+            result.ranking
+        );
+        for candidate in &result.ranking {
+            if matches!(
+                candidate.action,
+                Action::Bet(_) | Action::Raise(_) | Action::AllIn
+            ) {
+                assert!(
+                    candidate.ev <= result.optimal.ev,
+                    "a raise scored above fold for 93o facing an open: {candidate:?}"
+                );
+            }
+        }
+    }
 }

@@ -320,6 +320,13 @@ impl OpponentRangeModel {
     pub fn resolve(&self, node: Node, bucket: StackBucket) -> Option<Range> {
         self.ranges.get(&(node, bucket)).copied()
     }
+
+    /// Builds a model directly from resolved entries, bypassing the DB —
+    /// for tests that need `resolve` to return a specific range.
+    #[cfg(test)]
+    pub(crate) fn from_entries(entries: HashMap<(Node, StackBucket), Range>) -> Self {
+        Self { ranges: entries }
+    }
 }
 
 /// Loads the resolved range model for the pooled opponent profile, applying

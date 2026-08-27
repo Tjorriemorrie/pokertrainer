@@ -104,7 +104,6 @@ pub struct TableSession {
     state: GameState,
     deck: Deck,
     mcts: MctsConfig,
-    ranges: [Range; 2],
     /// The field skill template the two bots play with; `None` falls back to
     /// the placeholder heuristic.
     template: Option<OpponentTemplate>,
@@ -171,7 +170,6 @@ impl TableSession {
             state,
             deck,
             mcts,
-            ranges: uniform_ranges(),
             template,
             opponent_model,
             hand_no: 0,
@@ -207,7 +205,6 @@ impl TableSession {
             state,
             deck,
             mcts,
-            ranges: uniform_ranges(),
             template,
             opponent_model: OpponentModel::default(),
             hand_no,
@@ -258,7 +255,6 @@ impl TableSession {
             state,
             deck,
             mcts,
-            ranges: uniform_ranges(),
             template: snapshot.template_skill.map(OpponentTemplate::new),
             opponent_model,
             hand_no: snapshot.hand_no,
@@ -340,9 +336,20 @@ impl TableSession {
         &self.log
     }
 
-    /// The opponent range models fed to the solver.
+    /// The opponent range prior fed to the solver for the decision the hero
+    /// currently faces: the learned per-node/stack-bucket range (the same
+    /// model the bots' own play already draws from) when the sample is
+    /// trusted, falling back to a uniform "any two cards" prior otherwise.
+    /// Both opponent seats share it — they're modeled as one population.
     pub fn ranges(&self) -> [Range; 2] {
-        self.ranges
+        let node = decision_node(&self.state);
+        let bucket = decision_stack_bucket(&self.state);
+        let prior = self
+            .opponent_model
+            .ranges
+            .resolve(node, bucket)
+            .unwrap_or_else(|| uniform_ranges()[0]);
+        [prior, prior]
     }
 
     /// Drains the opponent actions the last [`Self::pump`] applied, in play
@@ -540,6 +547,10 @@ impl TableSession {
             actor_name(big_blind),
             self.state.street_contribution(big_blind)
         ));
+        self.log_line(format!(
+            "You are dealt {}",
+            hole_cards_text(self.state.hole_cards(Seat::Hero))
+        ));
         tracing::info!(
             hand_no = self.hand_no,
             button = %self.state.button(),
@@ -661,10 +672,11 @@ impl TableSession {
             ));
         }
 
+        let ranges = self.ranges();
         let analyzed = decision::analyze(
             &mut self.rng,
             &self.state,
-            &self.ranges,
+            &ranges,
             &self.mcts,
             Some(action),
         )?;
@@ -689,13 +701,10 @@ impl TableSession {
 
         let analyzed = match decision::analyze_snapshot(&self.state, snapshot, Some(action)) {
             Ok(analyzed) => analyzed,
-            Err(_) => decision::analyze(
-                &mut self.rng,
-                &self.state,
-                &self.ranges,
-                &self.mcts,
-                Some(action),
-            )?,
+            Err(_) => {
+                let ranges = self.ranges();
+                decision::analyze(&mut self.rng, &self.state, &ranges, &self.mcts, Some(action))?
+            }
         };
         self.finish_submission(action, analyzed)
     }
@@ -1161,8 +1170,58 @@ mod tests {
         assert_eq!(session.state().stacks(), [420, 420, 420]);
     }
 
-    /// Each deal names the button and logs both blind posts, so the action
-    /// log shows exactly what every seat committed before any action.
+    /// The solver prior the coach uses for the hero's decision comes from
+    /// the learned opponent-range model, resolved for the exact node/stack
+    /// bucket the hero is facing — not a hardcoded uniform "any two cards"
+    /// prior. A session with no history (or no sample yet for this node)
+    /// still falls back to uniform.
+    #[test]
+    fn ranges_resolve_from_the_opponent_model_and_fall_back_to_uniform() {
+        let mut session = TableSession::new(
+            41,
+            probe_config(),
+            never_intercepts(),
+            None,
+            STARTING_STACK,
+            OpponentModel::default(),
+        );
+        session.deal_next_hand().unwrap();
+        let uniform = [1.0f32 / HAND_COUNT as f32; HAND_COUNT];
+        assert_eq!(
+            session.ranges(),
+            [uniform, uniform],
+            "no history yet — falls back to uniform"
+        );
+
+        let node = crate::opponent_history::decision_node(session.state());
+        let bucket = crate::opponent_history::decision_stack_bucket(session.state());
+        let mut tight = [0.0f32; HAND_COUNT];
+        tight[0] = 1.0; // AA
+        let mut entries = std::collections::HashMap::new();
+        entries.insert((node, bucket), tight);
+        let model = OpponentModel {
+            ranges: crate::opponent_history::OpponentRangeModel::from_entries(entries),
+            historic: Default::default(),
+        };
+        let mut session = TableSession::new(
+            41,
+            probe_config(),
+            never_intercepts(),
+            None,
+            STARTING_STACK,
+            model,
+        );
+        session.deal_next_hand().unwrap();
+        assert_eq!(
+            session.ranges(),
+            [tight, tight],
+            "a resolved node/bucket range feeds both opponent seats"
+        );
+    }
+
+    /// Each deal names the button, logs both blind posts, and logs the
+    /// hero's dealt hand, so the action log shows exactly what every seat
+    /// committed and what the hero was dealt before any action.
     #[test]
     fn deals_log_the_button_and_the_blind_posts() {
         let mut session = TableSession::new(
@@ -1183,6 +1242,11 @@ mod tests {
         assert!(log.contains(&"You post SB 10".to_string()), "{log:?}");
         assert!(
             log.contains(&"Opponent 1 post BB 20".to_string()),
+            "{log:?}"
+        );
+        let hero_cards = session.state().hole_cards(Seat::Hero).unwrap();
+        assert!(
+            log.contains(&format!("You are dealt {} {}", hero_cards[0], hero_cards[1])),
             "{log:?}"
         );
     }
