@@ -1,5 +1,19 @@
-use crate::game::{Action, GameState, Street};
+use crate::game::{Action, GameState, Seat, Street};
 use crate::range::BetSize;
+
+/// Whether any seat other than the current actor could still respond to a
+/// raise (i.e. is still in the hand and has chips behind). When facing a bet
+/// with nobody left able to call or fold — every other seat already folded,
+/// busted, or is itself all-in — shoving more than the call amount is dead
+/// action: the excess can't be matched, so it comes right back as an
+/// uncalled bet. That makes every raise/all-in size equity-identical to a
+/// plain call, so they're excluded rather than offered as distinct (but
+/// functionally tied) options.
+fn opponents_can_still_respond(state: &GameState, acting: Seat) -> bool {
+    Seat::ALL.into_iter().any(|seat| {
+        seat != acting && !state.folded(seat) && !state.eliminated(seat) && !state.all_in(seat)
+    })
+}
 
 /// The size buckets offered as raises/bets on each street. Postflop keeps
 /// only 1/2-pot and pot (plus min and overbet) — 1/3-pot and 3/4-pot are
@@ -52,7 +66,18 @@ pub fn candidates(state: &GameState) -> Vec<(Action, Option<BetSize>)> {
     let pot = state.total_pot();
     let to_call = legal.call_amount;
     let big_blind = state.blind_level().big_blind;
-    let stack = state.stack(state.to_act());
+    let acting = state.to_act();
+    let stack = state.stack(acting);
+
+    // Facing a bet/shove with nobody left who could still call or fold, a
+    // raise beyond the call amount is dead action (see
+    // `opponents_can_still_respond`): skip straight to Fold/Call and don't
+    // offer a same-equity all-in as a separate choice. Gated on `can_call`
+    // too — when the call itself already exhausts the stack, `Call` isn't a
+    // legal action at all and `AllIn` is the only way to stay in the hand,
+    // not a redundant extra to prune.
+    let facing_dead_raise =
+        to_call > 0 && legal.can_call && !opponents_can_still_respond(state, acting);
 
     if legal.can_bet && stack > 0 {
         for &bucket in size_buckets(street) {
@@ -76,7 +101,7 @@ pub fn candidates(state: &GameState) -> Vec<(Action, Option<BetSize>)> {
         }
     }
 
-    if legal.can_raise && legal.min_raise_to <= legal.max_raise_to {
+    if legal.can_raise && legal.min_raise_to <= legal.max_raise_to && !facing_dead_raise {
         let facing_raise_preflop =
             street == Street::Preflop && to_call > 0 && state.current_bet() > big_blind;
         let preflop_open = street == Street::Preflop && !facing_raise_preflop;
@@ -125,7 +150,9 @@ pub fn candidates(state: &GameState) -> Vec<(Action, Option<BetSize>)> {
         }
     }
 
-    push(&mut out, &legal, Action::AllIn, Some(BetSize::AllIn));
+    if !facing_dead_raise {
+        push(&mut out, &legal, Action::AllIn, Some(BetSize::AllIn));
+    }
     out
 }
 
@@ -310,6 +337,34 @@ mod tests {
                 seen.push(action);
             }
         }
+    }
+
+    #[test]
+    fn facing_a_short_all_in_with_nobody_left_to_respond_offers_only_fold_and_call() {
+        // Button on Opponent 2 puts big-blind on Hero, so preflop order is
+        // Opponent 1, Opponent 2, Hero — Hero acts last. Opponent 1 is short
+        // and shoves; Opponent 2 folds; Hero (deep-stacked) now faces the
+        // all-in with nobody left who could ever call a bigger raise, so
+        // raising past a call is dead action and should not be offered.
+        let mut state = GameState::new(Seat::Opponent2, level());
+        state.set_stack(Seat::Opponent1, 100);
+        state
+            .start_hand(&mut Deck::shuffled(&mut seeded_rng(4)))
+            .unwrap();
+        assert_eq!(state.to_act(), Seat::Opponent1);
+        state.apply_action(Action::AllIn).unwrap();
+        assert_eq!(state.to_act(), Seat::Opponent2);
+        state.apply_action(Action::Fold).unwrap();
+        assert_eq!(state.to_act(), Seat::Hero);
+        assert!(state.legal_actions().call_amount > 0);
+
+        let actions = actions_of(&state);
+        assert_eq!(
+            actions,
+            vec![Action::Fold, Action::Call],
+            "raising/all-in beyond the call is equity-identical to calling \
+             here since nobody can respond to it: {actions:?}"
+        );
     }
 
     #[test]
