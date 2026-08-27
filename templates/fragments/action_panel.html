@@ -6,7 +6,13 @@ wheel control, and the Fold / Check-Call / Bet-Raise buttons below.
 Single-line authoring where the fragment it replaced concatenated with no
 separator. Which chips survive, and the slider bounds, are decided in Rust
 (SizingView) — clamping and dedup are real logic, not presentation.
-#}<div id="action-panel" class="pt-action-dock"><div class="pt-dock-wait">Simulating — actions unlock when the depth badge turns green.</div>
+
+Renders `locked` by default: app.js only ever locks the dock after the fact
+(on TABLE_STATE_UPDATE, before a matching SEARCH_STATUS reports READY), so
+the very first paint of a page load — before the WebSocket has connected —
+would otherwise show live, clickable buttons while the depth badge is still
+red. JS unlocks it once the solver for this decision reports READY.
+#}<div id="action-panel" class="pt-action-dock locked"><div class="pt-dock-wait">Simulating — actions unlock when the depth badge turns green.</div>
 {%- if let Some(sizing) = sizing -%}
 <div class="pt-sizing-row"><div class="pt-bet-row">
 {%- for chip in sizing.chips -%}
