@@ -117,6 +117,12 @@ pub struct LocalOpponentAction {
     pub hole_cards: String,
     /// `"Fold"` / `"CallCheck"` / `"BetRaise"`.
     pub action: String,
+    /// The session-local hand number this decision belongs to — lets the
+    /// window report how many distinct *hands* it covers, not just how many
+    /// decisions. Not globally unique across sessions (rows carry no session
+    /// id), so this undercounts hands when two sessions' numbers collide;
+    /// acceptable for a coarse "how much history is this built from" count.
+    pub hand_no: i64,
 }
 
 /// Persists a batch of local opponent decisions atomically.
@@ -130,13 +136,14 @@ pub async fn insert_local_opponent_actions(
     let mut transaction = pool.begin().await?;
     for action in actions {
         sqlx::query(
-            "INSERT INTO local_opponent_actions (node, stack_bucket, hole_cards, action)
-             VALUES ($1, $2, $3, $4)",
+            "INSERT INTO local_opponent_actions (node, stack_bucket, hole_cards, action, hand_no)
+             VALUES ($1, $2, $3, $4, $5)",
         )
         .bind(&action.node)
         .bind(action.stack_bucket)
         .bind(&action.hole_cards)
         .bind(&action.action)
+        .bind(action.hand_no)
         .execute(&mut *transaction)
         .await?;
     }
@@ -153,8 +160,8 @@ pub async fn load_recent_local_opponent_actions(
     if limit <= 0 {
         return Ok(Vec::new());
     }
-    let rows: Vec<(String, i16, String, String)> = sqlx::query_as(
-        "SELECT node, stack_bucket, hole_cards, action
+    let rows: Vec<(String, i16, String, String, i64)> = sqlx::query_as(
+        "SELECT node, stack_bucket, hole_cards, action, hand_no
          FROM local_opponent_actions
          ORDER BY created_at DESC, id DESC
          LIMIT $1",
@@ -165,11 +172,12 @@ pub async fn load_recent_local_opponent_actions(
     Ok(rows
         .into_iter()
         .map(
-            |(node, stack_bucket, hole_cards, action)| LocalOpponentAction {
+            |(node, stack_bucket, hole_cards, action, hand_no)| LocalOpponentAction {
                 node,
                 stack_bucket,
                 hole_cards,
                 action,
+                hand_no,
             },
         )
         .collect())
@@ -187,6 +195,8 @@ pub struct LocalHeroAction {
     pub hole_cards: String,
     /// `"Fold"` / `"CallCheck"` / `"BetRaise"`.
     pub action: String,
+    /// See [`LocalOpponentAction::hand_no`].
+    pub hand_no: i64,
 }
 
 /// Persists a batch of local hero decisions atomically.
@@ -197,13 +207,14 @@ pub async fn insert_local_hero_actions(pool: &PgPool, actions: &[LocalHeroAction
     let mut transaction = pool.begin().await?;
     for action in actions {
         sqlx::query(
-            "INSERT INTO local_hero_actions (node, stack_bucket, hole_cards, action)
-             VALUES ($1, $2, $3, $4)",
+            "INSERT INTO local_hero_actions (node, stack_bucket, hole_cards, action, hand_no)
+             VALUES ($1, $2, $3, $4, $5)",
         )
         .bind(&action.node)
         .bind(action.stack_bucket)
         .bind(&action.hole_cards)
         .bind(&action.action)
+        .bind(action.hand_no)
         .execute(&mut *transaction)
         .await?;
     }
@@ -220,8 +231,8 @@ pub async fn load_recent_local_hero_actions(
     if limit <= 0 {
         return Ok(Vec::new());
     }
-    let rows: Vec<(String, i16, String, String)> = sqlx::query_as(
-        "SELECT node, stack_bucket, hole_cards, action
+    let rows: Vec<(String, i16, String, String, i64)> = sqlx::query_as(
+        "SELECT node, stack_bucket, hole_cards, action, hand_no
          FROM local_hero_actions
          ORDER BY created_at DESC, id DESC
          LIMIT $1",
@@ -231,12 +242,15 @@ pub async fn load_recent_local_hero_actions(
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(node, stack_bucket, hole_cards, action)| LocalHeroAction {
-            node,
-            stack_bucket,
-            hole_cards,
-            action,
-        })
+        .map(
+            |(node, stack_bucket, hole_cards, action, hand_no)| LocalHeroAction {
+                node,
+                stack_bucket,
+                hole_cards,
+                action,
+                hand_no,
+            },
+        )
         .collect())
 }
 

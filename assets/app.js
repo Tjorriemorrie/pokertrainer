@@ -484,9 +484,15 @@ function setStatus(text, cls) {
         if (logLines) logLines.scrollTop = logLines.scrollHeight;
         break;
       }
-      case "RANGE_TABLES_UPDATE":
+      case "RANGE_TABLES_UPDATE": {
         if (startingHands) swap(startingHands, msg.fragment);
+        // TABLE_STATE_UPDATE (which carries data-hero-hand) can arrive
+        // before this grid exists yet, so highlightHeroHand() there is a
+        // no-op on first connect — re-apply it now that the grid is here.
+        const shell = document.getElementById("table-state");
+        if (shell) highlightHeroHand(shell.dataset.heroHand);
         break;
+      }
       case "TRIGGER_TACTICAL_OVERLAY":
         swap(feedback, msg.fragment);
         bindFeedback();

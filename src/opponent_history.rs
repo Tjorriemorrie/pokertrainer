@@ -234,9 +234,10 @@ impl HistoricAction {
 /// Walks the most recent imported hands into [`HistoricAction`]s, keeping
 /// only decisions where the opponent's cards were revealed at showdown —
 /// most decisions have no reveal (folds never show) and are skipped here,
-/// which is expected: [`load_action_window`] pads the shortfall from local
-/// play, which always has ground-truth cards.
-async fn load_gg_actions(pool: &PgPool, limit: i64) -> Result<Vec<HistoricAction>> {
+/// which is expected: [`load_action_window`] always adds local play (which
+/// has ground-truth cards) on top. Also returns how many hands were looked
+/// at, for the window's "how many hands is this built from" count.
+async fn load_gg_actions(pool: &PgPool, limit: i64) -> Result<(Vec<HistoricAction>, usize)> {
     let hands = crate::opponent_analysis::load_recent_hands(pool, limit).await?;
     let mut actions = Vec::new();
     for hand in &hands {
@@ -260,7 +261,7 @@ async fn load_gg_actions(pool: &PgPool, limit: i64) -> Result<Vec<HistoricAction
             });
         }
     }
-    Ok(actions)
+    Ok((actions, hands.len()))
 }
 
 /// Loads the combined window for the opponent: every decision from the
@@ -268,12 +269,19 @@ async fn load_gg_actions(pool: &PgPool, limit: i64) -> Result<Vec<HistoricAction
 /// decision — real imported hands don't reveal an opponent's hole cards
 /// unless the hand went to showdown, so local play (the engine's true deal
 /// is always known there) is never just a fallback-when-thin, it's added in
-/// full every time.
-pub async fn load_action_window(pool: &PgPool, hand_limit: i64) -> Result<Vec<HistoricAction>> {
-    let mut actions = load_gg_actions(pool, hand_limit).await?;
+/// full every time. The second element is how many distinct hands (imported
+/// plus local) the window actually covers.
+pub async fn load_action_window(
+    pool: &PgPool,
+    hand_limit: i64,
+) -> Result<(Vec<HistoricAction>, usize)> {
+    let (mut actions, gg_hands) = load_gg_actions(pool, hand_limit).await?;
     let local = db::load_recent_local_opponent_actions(pool, HISTORY_WINDOW).await?;
+    let local_hands: std::collections::HashSet<i64> =
+        local.iter().map(|row| row.hand_no).collect();
+    let window_hands = gg_hands + local_hands.len();
     actions.extend(local.into_iter().filter_map(HistoricAction::from_local));
-    Ok(actions)
+    Ok((actions, window_hands))
 }
 
 /// Walks the most recent imported hands into the *hero's own* [`HistoricAction`]s.
@@ -281,7 +289,7 @@ pub async fn load_action_window(pool: &PgPool, hand_limit: i64) -> Result<Vec<Hi
 /// showdown reveal) — hands with no recorded `hero_cards` are skipped
 /// entirely, since [`crate::opponent_analysis::walk_hand`] falls back to a
 /// placeholder deal when it has no real hero cards to seed the walk with.
-async fn load_hero_gg_actions(pool: &PgPool, limit: i64) -> Result<Vec<HistoricAction>> {
+async fn load_hero_gg_actions(pool: &PgPool, limit: i64) -> Result<(Vec<HistoricAction>, usize)> {
     let hands = crate::opponent_analysis::load_recent_hands(pool, limit).await?;
     let mut actions = Vec::new();
     for hand in &hands {
@@ -306,17 +314,23 @@ async fn load_hero_gg_actions(pool: &PgPool, limit: i64) -> Result<Vec<HistoricA
             });
         }
     }
-    Ok(actions)
+    Ok((actions, hands.len()))
 }
 
 /// Loads the combined window for the hero: every decision from the
 /// `hand_limit` most recent imported hands, plus every locally-recorded hero
 /// decision. Mirrors [`load_action_window`].
-pub async fn load_hero_action_window(pool: &PgPool, hand_limit: i64) -> Result<Vec<HistoricAction>> {
-    let mut actions = load_hero_gg_actions(pool, hand_limit).await?;
+pub async fn load_hero_action_window(
+    pool: &PgPool,
+    hand_limit: i64,
+) -> Result<(Vec<HistoricAction>, usize)> {
+    let (mut actions, gg_hands) = load_hero_gg_actions(pool, hand_limit).await?;
     let local = db::load_recent_local_hero_actions(pool, HISTORY_WINDOW).await?;
+    let local_hands: std::collections::HashSet<i64> =
+        local.iter().map(|row| row.hand_no).collect();
+    let window_hands = gg_hands + local_hands.len();
     actions.extend(local.into_iter().filter_map(HistoricAction::from_local_hero));
-    Ok(actions)
+    Ok((actions, window_hands))
 }
 
 // ----------------------------------------------------------- range model
@@ -550,12 +564,12 @@ pub fn build_historic_read(actions: &[HistoricAction]) -> HistoricRead {
 // ---------------------------------------------------------------- the job
 
 /// Everything the coach panel and the live solver need from one refresh:
-/// the window size actually gathered, the historic read, and the
-/// starting-hand table. The range model itself is saved to the database and
-/// loaded separately per session ([`load_range_model`]).
+/// the number of distinct hands the window covers, the historic read, and
+/// the starting-hand table. The range model itself is saved to the database
+/// and loaded separately per session ([`load_range_model`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct HistorySummary {
-    pub window_actions: usize,
+    pub window_hands: usize,
     pub read: HistoricRead,
     pub table: Vec<HandRow>,
 }
@@ -566,7 +580,7 @@ impl Default for HistorySummary {
     /// false zero.
     fn default() -> Self {
         HistorySummary {
-            window_actions: 0,
+            window_hands: 0,
             read: build_historic_read(&[]),
             table: build_starting_hand_table(&[]),
         }
@@ -593,12 +607,12 @@ pub struct OpponentModel {
 /// after importing new `gg_hands`, and periodically as local play
 /// accumulates.
 pub async fn refresh(pool: &PgPool) -> Result<HistorySummary> {
-    let actions = load_action_window(pool, HISTORY_WINDOW).await?;
+    let (actions, window_hands) = load_action_window(pool, HISTORY_WINDOW).await?;
     let profile_id = db::upsert_opponent_profile(pool, POOLED_PROFILE_NAME, "FIELD").await?;
     let model = build_range_model(&actions);
     save_range_model(pool, profile_id, &model).await?;
     Ok(HistorySummary {
-        window_actions: actions.len(),
+        window_hands,
         read: build_historic_read(&actions),
         table: build_starting_hand_table(&actions),
     })
@@ -608,9 +622,9 @@ pub async fn refresh(pool: &PgPool) -> Result<HistorySummary> {
 /// summary. Mirrors [`refresh`], minus the range-model persistence — the
 /// hero's own historic actions aren't used as anyone's solver prior.
 pub async fn refresh_hero(pool: &PgPool) -> Result<HistorySummary> {
-    let actions = load_hero_action_window(pool, HISTORY_WINDOW).await?;
+    let (actions, window_hands) = load_hero_action_window(pool, HISTORY_WINDOW).await?;
     Ok(HistorySummary {
-        window_actions: actions.len(),
+        window_hands,
         read: build_historic_read(&actions),
         table: build_starting_hand_table(&actions),
     })
@@ -846,6 +860,7 @@ Seat 3: 14c11a2a (big blind) folded on the River";
             stack_bucket: StackBucket::Bb15.as_i16(),
             hole_cards: "Qc Qd".to_string(),
             action: ActionCategory::BetRaise.label().to_string(),
+            hand_no: 1,
         };
         let historic = HistoricAction::from_local(row).expect("well-formed row parses");
         assert_eq!(historic.hand, hand(Rank::Queen, Rank::Queen, false));
@@ -861,6 +876,7 @@ Seat 3: 14c11a2a (big blind) folded on the River";
             stack_bucket: StackBucket::Bb15.as_i16(),
             hole_cards: "Qc Qd".to_string(),
             action: ActionCategory::BetRaise.label().to_string(),
+            hand_no: 1,
         };
         let historic = HistoricAction::from_local_hero(row).expect("well-formed row parses");
         assert_eq!(historic.hand, hand(Rank::Queen, Rank::Queen, false));
@@ -876,6 +892,7 @@ Seat 3: 14c11a2a (big blind) folded on the River";
             stack_bucket: 15,
             hole_cards: "Qc Qd".to_string(),
             action: "BetRaise".to_string(),
+            hand_no: 1,
         };
         assert_eq!(HistoricAction::from_local(bad_node), None);
 
@@ -884,6 +901,7 @@ Seat 3: 14c11a2a (big blind) folded on the River";
             stack_bucket: 15,
             hole_cards: "garbage".to_string(),
             action: "Fold".to_string(),
+            hand_no: 1,
         };
         assert_eq!(HistoricAction::from_local(bad_cards), None);
     }
@@ -1096,12 +1114,14 @@ Seat 3: 14c11a2a (big blind) folded on the River";
                 stack_bucket: StackBucket::Bb25.as_i16(),
                 hole_cards: "As Ks".to_string(),
                 action: ActionCategory::BetRaise.label().to_string(),
+                hand_no: 42,
             },
             LocalOpponentAction {
                 node: Node::FlopVsBet.key().to_string(),
                 stack_bucket: StackBucket::Bb10.as_i16(),
                 hole_cards: "7c 2d".to_string(),
                 action: ActionCategory::Fold.label().to_string(),
+                hand_no: 43,
             },
         ];
         db::insert_local_opponent_actions(&pool, &rows)
@@ -1114,7 +1134,9 @@ Seat 3: 14c11a2a (big blind) folded on the River";
         assert_eq!(after.len(), before.len() + 2);
         // Newest first: the two just-inserted rows lead, most-recent last-in first-out.
         assert_eq!(after[0].hole_cards, "7c 2d");
+        assert_eq!(after[0].hand_no, 43);
         assert_eq!(after[1].hole_cards, "As Ks");
+        assert_eq!(after[1].hand_no, 42);
 
         let limited = db::load_recent_local_opponent_actions(&pool, 0)
             .await
@@ -1134,12 +1156,14 @@ Seat 3: 14c11a2a (big blind) folded on the River";
                 stack_bucket: StackBucket::Bb25.as_i16(),
                 hole_cards: "As Ks".to_string(),
                 action: ActionCategory::BetRaise.label().to_string(),
+                hand_no: 42,
             },
             crate::db::LocalHeroAction {
                 node: Node::FlopVsBet.key().to_string(),
                 stack_bucket: StackBucket::Bb10.as_i16(),
                 hole_cards: "7c 2d".to_string(),
                 action: ActionCategory::Fold.label().to_string(),
+                hand_no: 43,
             },
         ];
         db::insert_local_hero_actions(&pool, &rows).await.unwrap();
@@ -1150,7 +1174,9 @@ Seat 3: 14c11a2a (big blind) folded on the River";
         assert_eq!(after.len(), before.len() + 2);
         // Newest first: the two just-inserted rows lead, most-recent last-in first-out.
         assert_eq!(after[0].hole_cards, "7c 2d");
+        assert_eq!(after[0].hand_no, 43);
         assert_eq!(after[1].hole_cards, "As Ks");
+        assert_eq!(after[1].hand_no, 42);
 
         let limited = db::load_recent_local_hero_actions(&pool, 0).await.unwrap();
         assert!(limited.is_empty());
@@ -1221,7 +1247,10 @@ Seat 3: 14c11a2a (big blind) folded on the River";
         // starting state — the job must not error, just report nothing.
         let summary = refresh(&pool).await.unwrap();
         assert_eq!(summary.table.len(), HAND_COUNT);
-        assert!(summary.read.actions <= summary.window_actions);
+        assert!(
+            summary.read.actions == 0 || summary.window_hands > 0,
+            "any recorded decision must have come from at least one hand"
+        );
     }
 
     #[tokio::test]
@@ -1230,6 +1259,9 @@ Seat 3: 14c11a2a (big blind) folded on the River";
         let pool = test_pool().await;
         let summary = refresh_hero(&pool).await.unwrap();
         assert_eq!(summary.table.len(), HAND_COUNT);
-        assert!(summary.read.actions <= summary.window_actions);
+        assert!(
+            summary.read.actions == 0 || summary.window_hands > 0,
+            "any recorded decision must have come from at least one hand"
+        );
     }
 }

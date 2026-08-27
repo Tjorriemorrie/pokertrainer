@@ -414,6 +414,7 @@ impl TableSession {
             stack_bucket: stack_bucket.as_i16(),
             hole_cards: format!("{} {}", hole_cards[0].to_code(), hole_cards[1].to_code()),
             action: ActionCategory::of(played).label().to_string(),
+            hand_no: self.hand_no as i64,
         });
     }
 
@@ -663,6 +664,7 @@ impl TableSession {
                 stack_bucket: stack_bucket.as_i16(),
                 hole_cards: format!("{} {}", hole_cards[0].to_code(), hole_cards[1].to_code()),
                 action: ActionCategory::of(action).label().to_string(),
+                hand_no: self.hand_no as i64,
             });
             self.pump_actions.push(action);
             let outcome = self.settle_action(action)?;

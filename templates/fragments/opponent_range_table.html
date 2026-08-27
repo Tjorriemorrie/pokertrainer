@@ -11,7 +11,7 @@ Rendered twice per connection — once for the hero, once for the bots — via
 client uses to scope the hero-hand highlight) and `heading`. Every cell
 carries `data-hand` so the client can look one up by hand-class label without
 parsing the grid's row-major layout itself.
-#}<section id="{{ panel_id }}" class="pt-feedback-card pt-range-block"><h2 class="pt-overlay-title">{{ heading }} — last {{ window_actions }} actions</h2><div class="pt-range-grid">
+#}<section id="{{ panel_id }}" class="pt-feedback-card pt-range-block"><h2 class="pt-overlay-title">{{ heading }} — last {{ window_hands }} hands</h2><div class="pt-range-grid">
 {%- for cell in cells -%}
 <div class="pt-range-cell{% if !cell.graded %} ungraded{% endif %}" data-hand="{{ cell.label }}" title="{{ cell.label }}: {{ cell.detail }}">
 <span class="pt-range-label">{{ cell.label }}</span>

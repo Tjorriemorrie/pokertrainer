@@ -1234,7 +1234,7 @@ struct RangeTableFragment {
     /// highlight to the hero's own grid without touching the bot's.
     panel_id: &'static str,
     heading: String,
-    window_actions: usize,
+    window_hands: usize,
     cells: Vec<HandCellView>,
 }
 
@@ -1243,7 +1243,7 @@ impl RangeTableFragment {
         Self {
             panel_id,
             heading: heading.to_string(),
-            window_actions: summary.window_actions,
+            window_hands: summary.window_hands,
             cells: summary
                 .table
                 .iter()
@@ -1253,7 +1253,7 @@ impl RangeTableFragment {
                         (row.fold_pct, row.call_pct, row.raise_pct)
                     {
                         format!(
-                            "{:.0}% fold, {:.0}% call, {:.0}% raise ({} hands)",
+                            "{:.0}% fold, {:.0}% call/check, {:.0}% raise ({} hands)",
                             fold, call, raise, row.samples
                         )
                     } else {
@@ -2552,12 +2552,12 @@ mod tests {
         aa.raise_pct = Some(90.0);
 
         let fragment = starting_hands_fragment(&bot_historic, &HistorySummary::default()).unwrap();
-        assert!(fragment.contains("You — starting hands — last 0 actions"));
-        assert!(fragment.contains("Bots — starting hands — last 842 actions"));
+        assert!(fragment.contains("You — starting hands — last 0 hands"));
+        assert!(fragment.contains("Bots — starting hands — last 842 hands"));
         assert!(fragment.contains(r#"id="hero-range-table""#));
         assert!(fragment.contains(r#"id="bot-range-table""#));
         assert!(
-            fragment.contains(r#"title="AA: 0% fold, 10% call, 90% raise (20 hands)""#),
+            fragment.contains(r#"title="AA: 0% fold, 10% call/check, 90% raise (20 hands)""#),
             "{fragment}"
         );
         assert!(
@@ -2580,7 +2580,7 @@ mod tests {
 
     fn sample_historic() -> HistorySummary {
         HistorySummary {
-            window_actions: 842,
+            window_hands: 842,
             read: HistoricRead {
                 actions: 842,
                 voluntary_preflop_pct: 40.0,
