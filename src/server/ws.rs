@@ -323,6 +323,7 @@ async fn play_socket(
         return ConnectionEnd::Disconnected;
     }
     if tournament_over {
+        let _ = sender.close().await;
         return ConnectionEnd::Released;
     }
     session.take_pump_actions();
@@ -382,6 +383,7 @@ async fn play_socket(
                     if sender.send(Message::Text(frame.into())).await.is_err() {
                         break ConnectionEnd::Disconnected;
                     }
+                    let _ = sender.close().await;
                     break ConnectionEnd::Released;
                 }
 
@@ -393,6 +395,7 @@ async fn play_socket(
                     {
                         break ConnectionEnd::Disconnected;
                     }
+                    let _ = sender.close().await;
                     break ConnectionEnd::Released;
                 }
 
@@ -444,6 +447,7 @@ async fn play_socket(
                         if sender.send(Message::Text(frame.into())).await.is_err() {
                             break ConnectionEnd::Disconnected;
                         }
+                        let _ = sender.close().await;
                         break ConnectionEnd::Released;
                     }
                 }
