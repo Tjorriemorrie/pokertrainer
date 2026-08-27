@@ -1,13 +1,18 @@
 {#
-The opponent's preflop starting-hand table: one cell per of the 169 hand
-classes, laid out as a 13x13 grid via CSS grid (`.pt-range-grid`) so this flat,
-row-major cell list (`cells`, from `range::hands::all_hands()` order) wraps
-into the grid without any row-break logic here. Each graded cell shows a
-stacked fold/call/raise bar; ungraded cells (too few historic samples) show
-just the label.
-#}<section class="pt-feedback-card pt-range-block"><h2 class="pt-overlay-title">Starting hands — last {{ window_actions }} actions</h2><div class="pt-range-grid">
+One starting-hand panel: one cell per of the 169 hand classes, laid out as a
+13x13 grid via CSS grid (`.pt-range-grid`) so this flat, row-major cell list
+(`cells`, from `range::hands::all_hands()` order) wraps into the grid without
+any row-break logic here. Each graded cell shows a stacked fold/call/raise
+bar; ungraded cells (too few historic samples) show just the label.
+
+Rendered twice per connection — once for the hero, once for the bots — via
+`RangeTableFragment::new`, distinguished only by `panel_id` (a DOM id the
+client uses to scope the hero-hand highlight) and `heading`. Every cell
+carries `data-hand` so the client can look one up by hand-class label without
+parsing the grid's row-major layout itself.
+#}<section id="{{ panel_id }}" class="pt-feedback-card pt-range-block"><h2 class="pt-overlay-title">{{ heading }} — last {{ window_actions }} actions</h2><div class="pt-range-grid">
 {%- for cell in cells -%}
-<div class="pt-range-cell{% if !cell.graded %} ungraded{% endif %}" title="{{ cell.label }}: {{ cell.detail }}">
+<div class="pt-range-cell{% if !cell.graded %} ungraded{% endif %}" data-hand="{{ cell.label }}" title="{{ cell.label }}: {{ cell.detail }}">
 <span class="pt-range-label">{{ cell.label }}</span>
 {%- if cell.graded -%}
 <span class="pt-range-bar"><span class="pt-range-fold" style="height:{{ cell.fold_pct }}%"></span><span class="pt-range-call" style="height:{{ cell.call_pct }}%"></span><span class="pt-range-raise" style="height:{{ cell.raise_pct }}%"></span></span>

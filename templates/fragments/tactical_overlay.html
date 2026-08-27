@@ -2,15 +2,16 @@
 The tactical-breakdown fragment rendered into the coach-feedback panel beside the
 table: the opponents' live HUD cards first, then the coach card (a plain-English
 takeaway sentence, the played vs optimal action comparison, and the candidate
-table sorted from cheapest (fold first) to all-in), then the starting-hand range
-table last.
+table sorted from cheapest (fold first) to all-in). The starting-hand range
+grids live outside this fragment now — see `starting_hands_panel.html`,
+always visible below the table rather than tied to this overlay's lifecycle.
 
 Intercepted blunders freeze the table: the card is titled accordingly and only
 offers a confirmation that unlocks the transition (the coach's best-EV action).
 
-`opponents` and `range_table` are nested template structs, already rendered
-with their own escaping applied — `|safe` stops the composed markup being
-escaped a second time. Never put `|safe` on raw data.
+`opponents` is a nested template struct, already rendered with its own
+escaping applied — `|safe` stops the composed markup being escaped a second
+time. Never put `|safe` on raw data.
 #}<div id="tactical-overlay" class="pt-tactical">{{ opponents|safe }}<section class="pt-feedback-card"><div class="pt-overlay-card">
 {%- if intercepted -%}
 <h2 class="pt-overlay-title">Hand #{{ hand_no }} — Blunder intercepted</h2>
@@ -33,4 +34,4 @@ escaped a second time. Never put `|safe` on raw data.
 {%- else -%}
 <button class="action-btn" data-overlay-close>Continue</button>
 {%- endif -%}
-</div></section>{{ range_table|safe }}</div>
+</div></section></div>

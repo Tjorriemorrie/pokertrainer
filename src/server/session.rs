@@ -133,6 +133,10 @@ pub struct TableSession {
     /// persistence into `local_opponent_actions` — the fallback/fill source
     /// for the opponent history window; see [`crate::opponent_history`].
     local_actions: Vec<crate::db::LocalOpponentAction>,
+    /// The hero's own local decisions (with their true dealt cards) queued
+    /// for persistence into `local_hero_actions` — mirrors `local_actions`,
+    /// but fills out the hero's own starting-hand window.
+    local_hero_actions: Vec<crate::db::LocalHeroAction>,
     /// Per-hand results (winner, hero all-in, hero bust) queued for
     /// persistence; the tournament detail page aggregates them.
     hand_results: Vec<PendingHandResult>,
@@ -182,6 +186,7 @@ impl TableSession {
             pending_check_fold: None,
             records: Vec::new(),
             local_actions: Vec::new(),
+            local_hero_actions: Vec::new(),
             hand_results: Vec::new(),
             hero_all_in_this_hand: false,
             opponents: OpponentTracker::default(),
@@ -217,6 +222,7 @@ impl TableSession {
             pending_check_fold: None,
             records: Vec::new(),
             local_actions: Vec::new(),
+            local_hero_actions: Vec::new(),
             hand_results: Vec::new(),
             hero_all_in_this_hand: false,
             opponents: OpponentTracker::default(),
@@ -267,6 +273,7 @@ impl TableSession {
             pending_check_fold: None,
             records: Vec::new(),
             local_actions: Vec::new(),
+            local_hero_actions: Vec::new(),
             hand_results: Vec::new(),
             hero_all_in_this_hand: false,
             opponents: OpponentTracker::from_snapshot(&snapshot.opponents),
@@ -372,9 +379,18 @@ impl TableSession {
         &self.opponent_model.historic
     }
 
+    /// The hero's own historic read and starting-hand table, loaded once at
+    /// session start — mirrors [`Self::opponent_history`].
+    pub fn hero_history(&self) -> &crate::opponent_history::HistorySummary {
+        &self.opponent_model.hero_historic
+    }
+
     /// Queues one evaluated hero decision for persistence; the session
     /// stays database-free and the ownership of the write is the WebSocket
-    /// layer's.
+    /// layer's. Also queues the same decision into `local_hero_actions`
+    /// (node/bucket/true dealt cards, coarse action) — the fallback/fill
+    /// source for the hero's own starting-hand window, mirroring the bot
+    /// recording in [`Self::pump`].
     fn record_decision(
         &mut self,
         analyzed: &AnalyzedDecision,
@@ -390,6 +406,15 @@ impl TableSession {
             ev_loss,
             ev_loss_pot,
         });
+        let node = decision_node(&self.state);
+        let stack_bucket = decision_stack_bucket(&self.state);
+        let hole_cards = self.state.hero_cards();
+        self.local_hero_actions.push(crate::db::LocalHeroAction {
+            node: node.key().to_string(),
+            stack_bucket: stack_bucket.as_i16(),
+            hole_cards: format!("{} {}", hole_cards[0].to_code(), hole_cards[1].to_code()),
+            action: ActionCategory::of(played).label().to_string(),
+        });
     }
 
     /// Drains the decisions awaiting a database write.
@@ -401,6 +426,12 @@ impl TableSession {
     /// `local_opponent_actions`.
     pub fn take_local_actions(&mut self) -> Vec<crate::db::LocalOpponentAction> {
         std::mem::take(&mut self.local_actions)
+    }
+
+    /// Drains the local hero decisions awaiting a database write into
+    /// `local_hero_actions`.
+    pub fn take_local_hero_actions(&mut self) -> Vec<crate::db::LocalHeroAction> {
+        std::mem::take(&mut self.local_hero_actions)
     }
 
     /// Drains the per-hand results awaiting a database write.
@@ -1202,6 +1233,7 @@ mod tests {
         let model = OpponentModel {
             ranges: crate::opponent_history::OpponentRangeModel::from_entries(entries),
             historic: Default::default(),
+            hero_historic: Default::default(),
         };
         let mut session = TableSession::new(
             41,
@@ -1861,6 +1893,47 @@ mod tests {
         let records = session.take_records();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].played, "Fold");
+    }
+
+    /// Every actually-applied hero decision queues into `local_hero_actions`
+    /// (true dealt cards, coarse action) — the fallback/fill source for the
+    /// hero's own starting-hand window, mirroring the bot recording exercised
+    /// by [`pump`](TableSession::pump).
+    #[test]
+    fn hero_decisions_queue_local_hero_actions_for_persistence() {
+        let state = river_facing_bet();
+        let hero_cards = state.hero_cards();
+        let snapshot = mcts::solve(
+            &mut seeded_rng(50),
+            &state,
+            &[uniform(), uniform()],
+            &probe_config(),
+        )
+        .unwrap();
+        let mut session = TableSession::resume(
+            state,
+            Deck::default(),
+            1,
+            51,
+            probe_config(),
+            never_intercepts(),
+            None,
+        );
+        assert!(session.take_local_hero_actions().is_empty());
+        session
+            .submit_with_snapshot(Action::Fold, &snapshot)
+            .unwrap();
+        let actions = session.take_local_hero_actions();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].action, "Fold");
+        assert_eq!(
+            actions[0].hole_cards,
+            format!("{} {}", hero_cards[0].to_code(), hero_cards[1].to_code())
+        );
+        assert!(
+            session.take_local_hero_actions().is_empty(),
+            "draining empties the buffer"
+        );
     }
 
     /// An off-bucket slider amount is not in the snapshot: the submission

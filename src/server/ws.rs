@@ -97,6 +97,13 @@ async fn load_opponent_model(pool: Option<&PgPool>) -> crate::opponent_history::
             return crate::opponent_history::OpponentModel::default();
         }
     };
+    let hero_historic = match crate::opponent_history::refresh_hero(pool).await {
+        Ok(summary) => summary,
+        Err(error) => {
+            tracing::warn!(%error, "hero history refresh failed — the hero starting-hand grid stays empty");
+            crate::opponent_history::HistorySummary::default()
+        }
+    };
     let profile_id = match crate::opponent_history::pooled_profile_id(pool).await {
         Ok(id) => id,
         Err(error) => {
@@ -104,6 +111,7 @@ async fn load_opponent_model(pool: Option<&PgPool>) -> crate::opponent_history::
             return crate::opponent_history::OpponentModel {
                 ranges: Default::default(),
                 historic,
+                hero_historic,
             };
         }
     };
@@ -114,7 +122,11 @@ async fn load_opponent_model(pool: Option<&PgPool>) -> crate::opponent_history::
             Default::default()
         }
     };
-    crate::opponent_history::OpponentModel { ranges, historic }
+    crate::opponent_history::OpponentModel {
+        ranges,
+        historic,
+        hero_historic,
+    }
 }
 
 async fn handle_socket(socket: WebSocket, app: Arc<AppState>) {
@@ -303,7 +315,9 @@ async fn play_socket(
     // has left for the client.
     let state_frame =
         state_message(session).unwrap_or_else(|error| error_message(&error.to_string()));
-    let mut initial = vec![state_frame];
+    let range_tables_frame =
+        range_tables_message(session).unwrap_or_else(|error| error_message(&error.to_string()));
+    let mut initial = vec![state_frame, range_tables_frame];
     if let Some(snapshot) = snapshot_frame(app.pool.as_ref()).await {
         initial.push(snapshot);
     }
@@ -362,6 +376,7 @@ async fn play_socket(
                 ticks_since_snapshot += outcome.chart_ticks;
                 persist_records(app.pool.as_ref(), session_id, session).await;
                 persist_local_actions(app.pool.as_ref(), session).await;
+                persist_local_hero_actions(app.pool.as_ref(), session).await;
                 // Save before the frames leave, so a disconnect triggered by
                 // the rendered state resumes exactly that state.
                 save_table(app.pool.as_ref(), session_id, session).await;
@@ -702,6 +717,25 @@ async fn persist_local_actions(pool: Option<&PgPool>, session: &mut TableSession
     }
 }
 
+/// Persists every local hero decision queued by the table since the last
+/// frame, into `local_hero_actions`. Mirrors [`persist_local_actions`].
+async fn persist_local_hero_actions(pool: Option<&PgPool>, session: &mut TableSession) {
+    let actions = session.take_local_hero_actions();
+    if actions.is_empty() {
+        return;
+    }
+    let Some(pool) = pool else {
+        return;
+    };
+    if let Err(error) = crate::db::insert_local_hero_actions(pool, &actions).await {
+        tracing::warn!(
+            %error,
+            dropped = actions.len(),
+            "local hero actions could not be persisted — the table keeps playing"
+        );
+    }
+}
+
 /// The last 1,000 stored actions, one point per action; an empty dataset
 /// means there is no stored history.
 async fn snapshot_frame(pool: Option<&PgPool>) -> Option<String> {
@@ -830,6 +864,16 @@ fn state_message(session: &mut TableSession) -> Result<String> {
             session.log(),
             &sounds,
         )?,
+    }
+    .to_json()
+}
+
+/// The always-visible starting-hands panel (hero + bot grids), built once
+/// from the session's history loaded at connect — see
+/// [`load_opponent_model`]. Sent once, right after the initial table state.
+fn range_tables_message(session: &TableSession) -> Result<String> {
+    ServerMessage::RangeTablesUpdate {
+        fragment: views::starting_hands_fragment(session.opponent_history(), session.hero_history())?,
     }
     .to_json()
 }
@@ -2071,7 +2115,7 @@ mod tests {
                         .unwrap();
                 }
                 "TABLE_STATE_UPDATE" => break,
-                "SEARCH_STATUS" => {}
+                "SEARCH_STATUS" | "RANGE_TABLES_UPDATE" => {}
                 other => panic!("unexpected frame type {other}"),
             }
         }
@@ -2095,7 +2139,7 @@ mod tests {
                     "ERROR" => break frame,
                     // A hand that ended earlier may still ship its delayed
                     // next-deal state before the error frame arrives.
-                    "TABLE_STATE_UPDATE" | "SEARCH_STATUS" => continue,
+                    "TABLE_STATE_UPDATE" | "SEARCH_STATUS" | "RANGE_TABLES_UPDATE" => continue,
                     other => panic!("unexpected frame type {other} for payload {payload}"),
                 }
             };
@@ -2119,7 +2163,7 @@ mod tests {
             let frame = parse(&next_text(&mut stream).await);
             match frame["type"].as_str().unwrap() {
                 "ERROR" => break frame,
-                "TABLE_STATE_UPDATE" | "SEARCH_STATUS" => continue,
+                "TABLE_STATE_UPDATE" | "SEARCH_STATUS" | "RANGE_TABLES_UPDATE" => continue,
                 other => panic!("unexpected frame type {other}"),
             }
         };
@@ -2143,7 +2187,7 @@ mod tests {
             let frame = parse(&next_text(&mut stream).await);
             match frame["type"].as_str().unwrap() {
                 "SESSION_FINISHED" => break frame,
-                "SEARCH_STATUS" => continue,
+                "SEARCH_STATUS" | "RANGE_TABLES_UPDATE" => continue,
                 other => panic!("unexpected frame type {other} while finishing"),
             }
         };
@@ -2198,7 +2242,7 @@ mod tests {
                         break;
                     }
                 }
-                "SEARCH_STATUS" => {}
+                "SEARCH_STATUS" | "RANGE_TABLES_UPDATE" => {}
                 other => panic!("unexpected frame type {other}"),
             }
         }
@@ -2250,6 +2294,8 @@ mod tests {
 
             let initial = parse(&next_text(&mut stream).await);
             assert_eq!(initial["type"], "TABLE_STATE_UPDATE");
+            let ranges = parse(&next_text(&mut stream).await);
+            assert_eq!(ranges["type"], "RANGE_TABLES_UPDATE");
             let snapshot = parse(&next_text(&mut stream).await);
             assert_eq!(
                 snapshot["type"], "CHART_SNAPSHOT",
@@ -2322,7 +2368,9 @@ mod tests {
                 "SESSION_FINISHED" => break frame,
                 // Delayed post-result deals or snapshot refreshes may arrive
                 // before the navigation frame.
-                "TABLE_STATE_UPDATE" | "CHART_SNAPSHOT" | "SEARCH_STATUS" => continue,
+                "TABLE_STATE_UPDATE" | "CHART_SNAPSHOT" | "SEARCH_STATUS" | "RANGE_TABLES_UPDATE" => {
+                    continue;
+                }
                 other => panic!("unexpected frame type {other} while finishing"),
             }
         };
@@ -2440,7 +2488,7 @@ mod tests {
                         break Some(datadecision.to_string());
                     }
                     "TOURNAMENT_FINISHED" => break None,
-                    "CHART_TICK" | "SEARCH_STATUS" | "CHART_SNAPSHOT" => {}
+                    "CHART_TICK" | "SEARCH_STATUS" | "CHART_SNAPSHOT" | "RANGE_TABLES_UPDATE" => {}
                     other => panic!("unexpected frame type {other}"),
                 }
             };
@@ -2510,7 +2558,9 @@ mod tests {
             let frame = parse(&next_text(&mut stream).await);
             match frame["type"].as_str().unwrap() {
                 "SESSION_FINISHED" => break frame,
-                "TABLE_STATE_UPDATE" | "SEARCH_STATUS" | "CHART_SNAPSHOT" => continue,
+                "TABLE_STATE_UPDATE" | "SEARCH_STATUS" | "CHART_SNAPSHOT" | "RANGE_TABLES_UPDATE" => {
+                    continue;
+                }
                 other => panic!("unexpected frame type {other} while finishing"),
             }
         };
@@ -2575,7 +2625,9 @@ mod tests {
             let frame = parse(&next_text(&mut first).await);
             match frame["type"].as_str().unwrap() {
                 "SESSION_FINISHED" => break frame,
-                "TABLE_STATE_UPDATE" | "SEARCH_STATUS" | "CHART_SNAPSHOT" => continue,
+                "TABLE_STATE_UPDATE" | "SEARCH_STATUS" | "CHART_SNAPSHOT" | "RANGE_TABLES_UPDATE" => {
+                    continue;
+                }
                 other => panic!("unexpected frame type {other} while finishing"),
             }
         };

@@ -2,6 +2,7 @@
   "use strict";
 
   const table = document.getElementById("table");
+  const startingHands = document.getElementById("starting-hands");
   const feedback = document.getElementById("feedback");
   const statusEl = document.getElementById("ws-status");
   const soundBtn = document.getElementById("sound-toggle");
@@ -171,6 +172,21 @@
   const swap = (el, html) => {
     el.innerHTML = html;
   };
+
+  // Keeps the hero's starting-hand grid pointing at whatever is currently
+  // dealt, without re-rendering the (static, once-per-connection) grid
+  // itself — see data-hero-hand on #table-state and data-hand on each
+  // .pt-range-cell in starting_hands_panel.html.
+  function highlightHeroHand(label) {
+    const grid = document.getElementById("hero-range-table");
+    if (!grid) return;
+    grid.querySelectorAll(".pt-range-cell.pt-hero-current").forEach((cell) => {
+      cell.classList.remove("pt-hero-current");
+    });
+    if (!label) return;
+    const cell = grid.querySelector(`.pt-range-cell[data-hand="${label}"]`);
+    if (cell) cell.classList.add("pt-hero-current");
+  }
 
   /* ------------------------------------------------------ card dealing */
 
@@ -463,10 +479,14 @@ function setStatus(text, cls) {
             /* ignore malformed sound cues */
           }
         }
+        if (shell) highlightHeroHand(shell.dataset.heroHand);
         const logLines = document.getElementById("pt-hlog-lines");
         if (logLines) logLines.scrollTop = logLines.scrollHeight;
         break;
       }
+      case "RANGE_TABLES_UPDATE":
+        if (startingHands) swap(startingHands, msg.fragment);
+        break;
       case "TRIGGER_TACTICAL_OVERLAY":
         swap(feedback, msg.fragment);
         bindFeedback();

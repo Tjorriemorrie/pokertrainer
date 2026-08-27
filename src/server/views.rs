@@ -6,6 +6,7 @@ use crate::game::{Action, GameState, Seat, Street};
 use crate::opponent::MergedOpponentSnapshot;
 use crate::opponent_history::{HistoricRead, HistorySummary};
 use crate::range::BetSize;
+use crate::range::hands::Hand;
 use crate::server::session::Sound;
 use crate::snapshot::ActiveSummary;
 use askama::Template;
@@ -1052,6 +1053,11 @@ struct TableFragment {
     board: Vec<CardView>,
     waiting_for: Option<String>,
     action_block: Option<ActionBlockView>,
+    /// The hero's currently dealt hand class (e.g. `"AKs"`), rendered as a
+    /// `data-hero-hand` attribute so the client can keep the hero's
+    /// starting-hand grid highlighting the right cell without re-rendering
+    /// the grid on every action.
+    hero_hand: String,
 }
 
 pub fn table_fragment(
@@ -1063,8 +1069,10 @@ pub fn table_fragment(
 ) -> Result<String> {
     let level = state.blind_level();
     let hero_turn = !state.is_hand_over() && state.to_act() == Seat::Hero;
+    let hero_cards = state.hero_cards();
     Ok(TableFragment {
         hand_no,
+        hero_hand: Hand::from_cards(hero_cards[0], hero_cards[1]).label(),
         sounds_json: sounds_json(sounds),
         small_blind: level.small_blind,
         big_blind: level.big_blind,
@@ -1213,13 +1221,19 @@ struct HandCellView {
 #[derive(Template)]
 #[template(path = "fragments/opponent_range_table.html")]
 struct RangeTableFragment {
+    /// DOM id for the panel root — lets the client scope the hero-hand
+    /// highlight to the hero's own grid without touching the bot's.
+    panel_id: &'static str,
+    heading: String,
     window_actions: usize,
     cells: Vec<HandCellView>,
 }
 
 impl RangeTableFragment {
-    fn new(summary: &HistorySummary) -> Self {
+    fn new(panel_id: &'static str, heading: &str, summary: &HistorySummary) -> Self {
         Self {
+            panel_id,
+            heading: heading.to_string(),
             window_actions: summary.window_actions,
             cells: summary
                 .table
@@ -1248,6 +1262,26 @@ impl RangeTableFragment {
                 .collect(),
         }
     }
+}
+
+/// The always-visible starting-hand panel below the table: the hero's own
+/// grid on the left, the bot's on the right, sharing one fold/call/raise
+/// legend. Sent once per connection ([`crate::server::ws`]) rather than tied
+/// to the ephemeral tactical-overlay lifecycle — see
+/// `templates/fragments/starting_hands_panel.html`.
+#[derive(Template)]
+#[template(path = "fragments/starting_hands_panel.html")]
+struct StartingHandsFragment {
+    hero: RangeTableFragment,
+    bot: RangeTableFragment,
+}
+
+pub fn starting_hands_fragment(bot: &HistorySummary, hero: &HistorySummary) -> Result<String> {
+    Ok(StartingHandsFragment {
+        hero: RangeTableFragment::new("hero-range-table", "You — starting hands", hero),
+        bot: RangeTableFragment::new("bot-range-table", "Bots — starting hands", bot),
+    }
+    .render()?)
 }
 
 /// The hero's played action, when there was one to compare against.
@@ -1313,7 +1347,6 @@ struct TacticalOverlayFragment {
     hand_no: u64,
     intercepted: bool,
     opponents: OpponentsFragment,
-    range_table: RangeTableFragment,
     sentence: String,
     played: Option<PlayedView>,
     optimal_label: String,
@@ -1350,7 +1383,6 @@ pub fn tactical_overlay_fragment(
         hand_no,
         intercepted,
         opponents: OpponentsFragment::new(opponent, &historic.read),
-        range_table: RangeTableFragment::new(historic),
         sentence: ev_diff_sentence(decision, street),
         played: decision.played.as_ref().map(|played| PlayedView {
             label: coach_action_label(played.analysis.action, played.analysis.bucket, street),
@@ -2491,9 +2523,9 @@ mod tests {
     }
 
     #[test]
-    fn range_table_renders_graded_and_ungraded_cells() {
-        let mut historic = sample_historic();
-        let aa = historic
+    fn starting_hands_fragment_renders_both_grids_graded_and_ungraded() {
+        let mut bot_historic = sample_historic();
+        let aa = bot_historic
             .table
             .iter_mut()
             .find(|row| row.label == "AA")
@@ -2503,18 +2535,11 @@ mod tests {
         aa.call_pct = Some(10.0);
         aa.raise_pct = Some(90.0);
 
-        let fragment = tactical_overlay_fragment(
-            7,
-            &sample_analysis(),
-            false,
-            &sample_opponent(),
-            &historic,
-            20,
-            500,
-            Street::Flop,
-        )
-        .unwrap();
-        assert!(fragment.contains("Starting hands — last 842 actions"));
+        let fragment = starting_hands_fragment(&bot_historic, &HistorySummary::default()).unwrap();
+        assert!(fragment.contains("You — starting hands — last 0 actions"));
+        assert!(fragment.contains("Bots — starting hands — last 842 actions"));
+        assert!(fragment.contains(r#"id="hero-range-table""#));
+        assert!(fragment.contains(r#"id="bot-range-table""#));
         assert!(
             fragment.contains(r#"title="AA: 0% fold, 10% call, 90% raise (20 hands)""#),
             "{fragment}"

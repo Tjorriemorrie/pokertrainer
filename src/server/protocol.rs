@@ -43,6 +43,9 @@ pub enum ClientMessage {
 pub enum ServerMessage {
     /// A raw table-state HTML fragment to swap into the DOM.
     TableStateUpdate { fragment: String },
+    /// The always-visible starting-hands panel (hero + bot grids), sent once
+    /// per connection right after the initial table state.
+    RangeTablesUpdate { fragment: String },
     /// A full tactical-breakdown fragment to overlay the table.
     TriggerTacticalOverlay {
         fragment: String,
@@ -432,6 +435,14 @@ mod tests {
             .to_json()
             .unwrap(),
             r#"{"type":"TABLE_STATE_UPDATE","fragment":"<div>table</div>"}"#
+        );
+        assert_eq!(
+            ServerMessage::RangeTablesUpdate {
+                fragment: "<div>ranges</div>".into()
+            }
+            .to_json()
+            .unwrap(),
+            r#"{"type":"RANGE_TABLES_UPDATE","fragment":"<div>ranges</div>"}"#
         );
         assert_eq!(
             ServerMessage::TriggerTacticalOverlay {

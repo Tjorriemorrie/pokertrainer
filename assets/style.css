@@ -24,6 +24,10 @@
   --red-2: #9a3533;
   --text: #e8e6e3;
   --muted: #9aa5b1;
+  /* The table graphic and the starting-hands panel below it share this
+     width, so the two grids line up under the table instead of floating at
+     an unrelated size. */
+  --table-width: 1320px;
 }
 
 * { box-sizing: border-box; }
@@ -181,7 +185,7 @@ button { font-family: inherit; }
 
 .pt-feedback-col {
   flex: 1;
-  min-width: 320px;
+  min-width: 260px;
   position: sticky;
   top: 4.6rem;
 }
@@ -207,7 +211,7 @@ button { font-family: inherit; }
 /* ------------------------------------------------------------ table */
 
 .table-shell {
-  width: 1180px;
+  width: var(--table-width);
   border-radius: 16px;
   overflow: hidden;
   background: var(--panel);
@@ -1034,6 +1038,41 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
   margin: 0 0 0.5rem;
 }
 
+/* The always-visible starting-hands panel below the table: the hero's own
+   grid on the left, the bots' on the right, sharing one legend — see
+   starting_hands_panel.html. Sized to the table graphic (--table-width) so
+   the two line up underneath it. */
+.pt-starting-hands-wrap {
+  width: var(--table-width);
+  margin-top: 1rem;
+}
+
+.pt-range-legend {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.6rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.pt-range-legend-swatch {
+  display: inline-block;
+  width: 0.85rem;
+  height: 0.85rem;
+  border-radius: 3px;
+  margin-left: 0.6rem;
+}
+
+.pt-range-legend-swatch:first-child { margin-left: 0; }
+
+.pt-starting-hands {
+  display: flex;
+  gap: 1rem;
+}
+
+.pt-starting-hands .pt-range-block { flex: 1 1 0; min-width: 0; }
+
 /* The starting-hand table: a flat, row-major list of 169 cells wraps into a
    13x13 grid. Each graded cell stacks a fold/call/raise bar; ungraded cells
    (too few historic samples) show only the label. */
@@ -1041,7 +1080,9 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
 
 .pt-range-grid {
   display: grid;
-  grid-template-columns: repeat(13, minmax(0, 1.9rem));
+  /* `1fr` (not a fixed rem cap) so cells grow to fill however wide the
+     panel actually is — the hand-label text scales with them via `cqw`. */
+  grid-template-columns: repeat(13, minmax(0, 1fr));
   gap: 2px;
   margin-top: 0.6rem;
 }
@@ -1064,10 +1105,20 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
 
 .pt-range-cell.ungraded { opacity: 0.45; }
 
+/* The hero's own currently-dealt hand, kept in sync per hand by
+   assets/app.js off the table state's data-hero-hand attribute — see
+   highlightHeroHand(). Stays fully visible even when ungraded, since seeing
+   what you actually hold is the point regardless of sample size. */
+.pt-range-cell.pt-hero-current {
+  border-color: var(--gold);
+  box-shadow: 0 0 0 2px var(--gold);
+  opacity: 1;
+}
+
 .pt-range-label {
   position: relative;
   z-index: 1;
-  font-size: 30cqw;
+  font-size: 34cqw;
   font-weight: 800;
   line-height: 1;
   color: var(--text);

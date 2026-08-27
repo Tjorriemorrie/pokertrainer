@@ -17,7 +17,7 @@ Two kinds of `|safe` appear here, both deliberate:
   - `data-sounds` is serde_json output. Double-escaping it would still parse in
     the browser, so the ws.rs assertion on its exact text is the only guard.
 #}{% import "partials/table.html" as t -%}
-<div id="table-state" class="table-shell" data-hand="{{ hand_no }}" data-sounds='{{ sounds_json|safe }}'><div class="pt-topbar"><span class="pt-pill">Hand #{{ hand_no }}</span><span>Blinds {{ small_blind }}/{{ big_blind }} · {{ street }}</span><span class="pt-lvl-meta">Spin &amp; Gold · 3-Max</span></div><div class="pt-table-body"><aside class="pt-hlog"><div class="pt-hlog-title">Action log</div><div id="pt-hlog-lines" class="pt-hlog-lines">
+<div id="table-state" class="table-shell" data-hand="{{ hand_no }}" data-hero-hand="{{ hero_hand }}" data-sounds='{{ sounds_json|safe }}'><div class="pt-topbar"><span class="pt-pill">Hand #{{ hand_no }}</span><span>Blinds {{ small_blind }}/{{ big_blind }} · {{ street }}</span><span class="pt-lvl-meta">Spin &amp; Gold · 3-Max</span></div><div class="pt-table-body"><aside class="pt-hlog"><div class="pt-hlog-title">Action log</div><div id="pt-hlog-lines" class="pt-hlog-lines">
 {%- for line in log -%}
 <div class="{{ line.class }}">{{ line.text }}</div>
 {%- endfor -%}

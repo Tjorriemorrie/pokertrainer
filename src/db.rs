@@ -175,6 +175,71 @@ pub async fn load_recent_local_opponent_actions(
         .collect())
 }
 
+/// One locally-generated hero decision, with the engine's true dealt hole
+/// cards — the fallback/fill source for the hero's own starting-hand window
+/// whenever the imported `gg_hands` alone don't reach it (see
+/// `opponent_history`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct LocalHeroAction {
+    pub node: String,
+    pub stack_bucket: i16,
+    /// e.g. `"As Kh"`.
+    pub hole_cards: String,
+    /// `"Fold"` / `"CallCheck"` / `"BetRaise"`.
+    pub action: String,
+}
+
+/// Persists a batch of local hero decisions atomically.
+pub async fn insert_local_hero_actions(pool: &PgPool, actions: &[LocalHeroAction]) -> Result<()> {
+    if actions.is_empty() {
+        return Ok(());
+    }
+    let mut transaction = pool.begin().await?;
+    for action in actions {
+        sqlx::query(
+            "INSERT INTO local_hero_actions (node, stack_bucket, hole_cards, action)
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(&action.node)
+        .bind(action.stack_bucket)
+        .bind(&action.hole_cards)
+        .bind(&action.action)
+        .execute(&mut *transaction)
+        .await?;
+    }
+    transaction.commit().await?;
+    Ok(())
+}
+
+/// Loads the most recent local hero decisions (newest first), capped at
+/// `limit`.
+pub async fn load_recent_local_hero_actions(
+    pool: &PgPool,
+    limit: i64,
+) -> Result<Vec<LocalHeroAction>> {
+    if limit <= 0 {
+        return Ok(Vec::new());
+    }
+    let rows: Vec<(String, i16, String, String)> = sqlx::query_as(
+        "SELECT node, stack_bucket, hole_cards, action
+         FROM local_hero_actions
+         ORDER BY created_at DESC, id DESC
+         LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(node, stack_bucket, hole_cards, action)| LocalHeroAction {
+            node,
+            stack_bucket,
+            hole_cards,
+            action,
+        })
+        .collect())
+}
+
 pub async fn upsert_opponent_profile(pool: &PgPool, name: &str, player_type: &str) -> Result<i32> {
     sqlx::query_scalar(
         "INSERT INTO opponent_profiles (name, player_type)

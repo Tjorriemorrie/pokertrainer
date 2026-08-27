@@ -1,0 +1,10 @@
+{#
+The always-visible starting-hands panel below the table: the hero's own
+169-cell grid on the left, the bots' on the right, sharing one fold/call/raise
+legend. Sent once per connection (see `crate::server::ws::play_socket`) rather
+than tied to the tactical-overlay lifecycle, so it never disappears.
+
+`hero` and `bot` are nested `RangeTableFragment` templates, already rendered
+with their own escaping applied — `|safe` stops the composed markup being
+escaped a second time. Never put `|safe` on raw data.
+#}<div class="pt-starting-hands-wrap"><div class="pt-range-legend"><span class="pt-range-legend-swatch pt-range-fold"></span><span>Fold</span><span class="pt-range-legend-swatch pt-range-call"></span><span>Call</span><span class="pt-range-legend-swatch pt-range-raise"></span><span>Raise</span></div><div class="pt-starting-hands">{{ hero|safe }}{{ bot|safe }}</div></div>

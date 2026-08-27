@@ -1,8 +1,9 @@
 {#
 The full table shell page: GGPoker-dark skin, a toolbar (lifetime EV chart, the
 hero-vs-field skill chip, ws-status, sound toggle, finish button), the table
-column docked top-left, and the coach-feedback panel beside it (never covering
-the table).
+column docked top-left — table, then the always-visible starting-hands panel
+(hero left, bots right) below it — and the coach-feedback panel beside it
+(never covering the table).
 
 This page extends base.html directly rather than the subpage layout: its body
 carries two extra spaces of indentation throughout. It shares the global navbar
@@ -25,15 +26,14 @@ half of the practice feature /tournaments is the history of.
       <button id="finish-table" class="action-btn" type="button">Finish table</button>
     </div>
     <div class="pt-layout">
-      <section class="pt-table-col"><div id="table"></div></section>
+      <section class="pt-table-col"><div id="table"></div><div id="starting-hands"></div></section>
       <aside class="pt-feedback-col">
         <h2 class="pt-feedback-heading">Coach feedback</h2>
         <div id="feedback">
           <div class="pt-feedback-empty">
             <b>No mistakes flagged yet.</b>
             When a decision costs enough equity, the played-vs-optimal breakdown
-            appears here together with what the coach has learned about your
-            opponents so far — and the table stays fully visible next to it.
+            appears here — and the table stays fully visible next to it.
           </div>
         </div>
       </aside>
