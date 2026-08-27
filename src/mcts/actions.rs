@@ -1,8 +1,11 @@
 use crate::game::{Action, GameState, Street};
 use crate::range::BetSize;
 
-/// The GGPoker-style size buckets offered as raises/bets on each street.
-/// (`AllIn` is added separately so all-in semantics stay exact.)
+/// The size buckets offered as raises/bets on each street. Postflop keeps
+/// only 1/2-pot and pot (plus min and overbet) — 1/3-pot and 3/4-pot are
+/// deliberately left out: they add granularity the hero isn't trying to
+/// learn, just more near-identical rows to compare. (`AllIn` is added
+/// separately so all-in semantics stay exact.)
 fn size_buckets(street: Street) -> &'static [BetSize] {
     match street {
         Street::Preflop => &[
@@ -11,14 +14,7 @@ fn size_buckets(street: Street) -> &'static [BetSize] {
             BetSize::FourBb,
             BetSize::Pot,
         ],
-        _ => &[
-            BetSize::Min,
-            BetSize::ThirdPot,
-            BetSize::HalfPot,
-            BetSize::ThreeQuarterPot,
-            BetSize::Pot,
-            BetSize::Overbet,
-        ],
+        _ => &[BetSize::Min, BetSize::HalfPot, BetSize::Pot, BetSize::Overbet],
     }
 }
 
@@ -83,16 +79,26 @@ pub fn candidates(state: &GameState) -> Vec<(Action, Option<BetSize>)> {
     if legal.can_raise && legal.min_raise_to <= legal.max_raise_to {
         let facing_raise_preflop =
             street == Street::Preflop && to_call > 0 && state.current_bet() > big_blind;
+        let preflop_open = street == Street::Preflop && !facing_raise_preflop;
+        // Raising is only ever legal over an existing bet, so postflop this
+        // is always a facing-a-bet spot too — offer the same quick "double
+        // the bet" option GGPoker defaults to there, alongside the pot
+        // fractions.
         let buckets: &[BetSize] = if facing_raise_preflop {
-            &[
-                BetSize::TwoX,
-                BetSize::ThirdPot,
-                BetSize::HalfPot,
-                BetSize::ThreeQuarterPot,
-                BetSize::Pot,
-            ]
-        } else {
+            &[BetSize::TwoX, BetSize::HalfPot, BetSize::Pot]
+        } else if preflop_open {
             size_buckets(street)
+        } else {
+            // `Min` leads so a `TwoX` that clamps down to the same amount
+            // (a small bet doubled below the minimum raise) still labels as
+            // `Min`, not `Double` — first-inserted wins on a tied amount.
+            &[
+                BetSize::Min,
+                BetSize::TwoX,
+                BetSize::HalfPot,
+                BetSize::Pot,
+                BetSize::Overbet,
+            ]
         };
         for &bucket in buckets {
             let amount = bucket
@@ -101,9 +107,7 @@ pub fn candidates(state: &GameState) -> Vec<(Action, Option<BetSize>)> {
             if amount >= legal.max_raise_to {
                 push(&mut out, &legal, Action::AllIn, Some(BetSize::AllIn));
             } else {
-                let label = if facing_raise_preflop {
-                    bucket
-                } else {
+                let label = if preflop_open {
                     BetSize::classify(
                         street,
                         amount,
@@ -113,6 +117,8 @@ pub fn candidates(state: &GameState) -> Vec<(Action, Option<BetSize>)> {
                         legal.min_raise_to,
                         stack,
                     )
+                } else {
+                    bucket
                 };
                 push(&mut out, &legal, Action::Raise(amount), Some(label));
             }
@@ -202,7 +208,6 @@ mod tests {
         assert!(!actions.contains(&Action::Call));
         assert!(actions.contains(&Action::Bet(20)));
         assert!(actions.contains(&Action::Bet(30)));
-        assert!(actions.contains(&Action::Bet(45)));
         assert!(actions.contains(&Action::Bet(60)));
         assert!(actions.contains(&Action::Bet(120)));
         assert!(actions.contains(&Action::AllIn));
@@ -225,9 +230,8 @@ mod tests {
         assert!(actions.contains(&Action::AllIn));
         // 2x the call (160) clamps to the min-raise (180).
         assert!(actions.contains(&Action::Raise(180)));
-        // 1/2 pot (190) and 3/4 pot (245) survive; pot (300) collapses to all-in.
+        // 1/2 pot (190) survives; pot (300) collapses to all-in.
         assert!(actions.contains(&Action::Raise(190)));
-        assert!(actions.contains(&Action::Raise(245)));
         assert!(
             cands
                 .iter()

@@ -687,15 +687,16 @@ mod tests {
         assert_eq!(state.to_act(), Seat::Hero);
         assert_eq!(state.street(), Street::Preflop);
 
+        // Both opponent ranges are pinned to a single hand (AA), so extra
+        // worlds are free; the flakiness this regression once had came from
+        // rollout noise, not world sampling, so a deeper per-world iteration
+        // budget is what settles it. Still small enough to run instantly.
+        let config = MctsConfig {
+            iterations: 256,
+            ..MctsConfig::test()
+        };
         let mut rng = seeded_rng(19);
-        let result = analyze(
-            &mut rng,
-            &state,
-            &[aces(), aces()],
-            &MctsConfig::test(),
-            None,
-        )
-        .unwrap();
+        let result = analyze(&mut rng, &state, &[aces(), aces()], &config, None).unwrap();
 
         assert_eq!(
             result.optimal.action,
@@ -715,7 +716,7 @@ mod tests {
             }
         }
         assert!(
-            result.search.iterations >= MctsConfig::test().iterations,
+            result.search.iterations >= config.iterations,
             "the preflop street budget was applied"
         );
     }

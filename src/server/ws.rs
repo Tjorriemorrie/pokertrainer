@@ -1033,6 +1033,7 @@ fn events_to_messages(session: &mut TableSession, events: Vec<TableEvent>) -> Ve
                 session.opponent_history(),
                 session.state().legal_actions().call_amount,
                 session.state().stack(Seat::Hero),
+                session.state().street(),
             )
             .and_then(|fragment| {
                 ServerMessage::TriggerTacticalOverlay {

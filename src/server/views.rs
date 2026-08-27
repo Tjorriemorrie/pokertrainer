@@ -659,6 +659,42 @@ pub fn action_label(action: Action) -> String {
     }
 }
 
+/// The GGPoker-style size label for a bucket, matching the wording already
+/// used on the action-dock's helper buttons (`33%`, `50%`, `3BB`, `Min`, …)
+/// instead of a raw chip amount.
+fn bucket_size_label(bucket: BetSize, street: Street) -> &'static str {
+    match bucket {
+        BetSize::Min => "Min",
+        BetSize::TwoX => "Double",
+        BetSize::ThreeBb => "3BB",
+        BetSize::FourBb => "4BB",
+        BetSize::ThirdPot => "33%",
+        BetSize::HalfPot => "Half-Pot",
+        BetSize::ThreeQuarterPot => "75%",
+        BetSize::Pot if street == Street::Preflop => "Pot",
+        BetSize::Pot => "100%",
+        BetSize::Overbet => "Overbet",
+        BetSize::AllIn => "All-in",
+    }
+}
+
+/// A coach-panel action label: `Fold`/`Check`/`Call`/`All-in` read as in
+/// [`action_label`], but bets and raises read as the helper-button size the
+/// hero actually recognizes (`Raise 50%`, `Bet 100%`) instead of a raw chip
+/// amount — falling back to the chip amount when no bucket was recorded (an
+/// off-slider amount the hero played by hand).
+fn coach_action_label(action: Action, bucket: Option<BetSize>, street: Street) -> String {
+    let verb = match action {
+        Action::Bet(_) => "Bet",
+        Action::Raise(_) => "Raise",
+        _ => return action_label(action),
+    };
+    match bucket {
+        Some(bucket) => format!("{verb} {}", bucket_size_label(bucket, street)),
+        None => action_label(action),
+    }
+}
+
 /// A past-tense log line for an applied action, e.g. `You raise to 150`.
 pub fn describe_action(seat: Seat, action: Action, call_amount: u32) -> String {
     let actor = match seat {
@@ -1171,6 +1207,10 @@ struct RankingRow {
     class: &'static str,
     label: String,
     ev: String,
+    /// Chips the action removes from the hero's stack right now (fold/check
+    /// cost nothing; a call costs the call amount; a bet/raise costs the
+    /// amount; all-in costs the whole stack).
+    chips: u32,
     risk: RiskBadge,
 }
 
@@ -1239,6 +1279,7 @@ pub fn tactical_overlay_fragment(
     historic: &HistorySummary,
     call_amount: u32,
     hero_stack: u32,
+    street: Street,
 ) -> Result<String> {
     let optimal = decision.optimal;
     let mut rows: Vec<&Analysis> = decision.ranking.iter().collect();
@@ -1249,13 +1290,13 @@ pub fn tactical_overlay_fragment(
         intercepted,
         opponents: OpponentsFragment::new(opponent, &historic.read),
         range_table: RangeTableFragment::new(historic),
-        sentence: ev_diff_sentence(decision),
+        sentence: ev_diff_sentence(decision, street),
         played: decision.played.as_ref().map(|played| PlayedView {
-            label: action_label(played.analysis.action),
+            label: coach_action_label(played.analysis.action, played.analysis.bucket, street),
             ev: format!("{:.1}", played.analysis.ev),
             ev_loss_bb: format!("{:.2}", played.ev_loss_bb),
         }),
-        optimal_label: action_label(optimal.action),
+        optimal_label: coach_action_label(optimal.action, optimal.bucket, street),
         optimal_ev: format!("{:.1}", optimal.ev),
         ranking: rows
             .into_iter()
@@ -1271,8 +1312,9 @@ pub fn tactical_overlay_fragment(
                 } else {
                     ""
                 },
-                label: action_label(analysis.action),
+                label: coach_action_label(analysis.action, analysis.bucket, street),
                 ev: format!("{:.1}", analysis.ev),
+                chips: chip_cost(analysis.action, call_amount, hero_stack),
                 risk: risk_badge(analysis),
             })
             .collect(),
@@ -1296,14 +1338,15 @@ fn chip_cost(action: Action, call_amount: u32, hero_stack: u32) -> u32 {
 /// A plain-language takeaway shown above the raw EV numbers: names the
 /// played and optimal actions and translates the EV gap into what it means
 /// for a human stack. Bigger leaks get sharper language.
-fn ev_diff_sentence(decision: &AnalyzedDecision) -> String {
-    let optimal_label = action_label(decision.optimal.action);
+fn ev_diff_sentence(decision: &AnalyzedDecision, street: Street) -> String {
+    let optimal_label = coach_action_label(decision.optimal.action, decision.optimal.bucket, street);
     match decision.played.as_ref() {
         Some(played) if played.is_optimal => {
             format!("Perfect — {optimal_label} was the highest-value line and you took it.")
         }
         Some(played) => {
-            let played_label = action_label(played.analysis.action);
+            let played_label =
+                coach_action_label(played.analysis.action, played.analysis.bucket, street);
             let loss = played.ev_loss_bb;
             if loss < 0.5 {
                 format!(
@@ -2166,6 +2209,7 @@ mod tests {
             &sample_historic(),
             20,
             500,
+            Street::Flop,
         )
         .unwrap();
         assert!(fragment.contains("Hand #7 — Decision review"));
@@ -2200,6 +2244,7 @@ mod tests {
             &sample_historic(),
             20,
             500,
+            Street::Flop,
         )
         .unwrap();
         assert!(fragment.contains("Hand #7 — Blunder intercepted"));
@@ -2227,6 +2272,7 @@ mod tests {
             &HistorySummary::default(),
             20,
             500,
+            Street::Flop,
         )
         .unwrap();
         assert!(!fragment.contains("EV lost"));
@@ -2279,6 +2325,7 @@ mod tests {
             &HistorySummary::default(),
             20,
             500,
+            Street::Flop,
         )
         .unwrap();
         let fold = fragment.find("<td>Fold</td>").unwrap();
@@ -2318,10 +2365,10 @@ mod tests {
             decision
         };
 
-        assert!(ev_diff_sentence(&played_ev_loss(0.25)).contains("rounding error"));
-        assert!(ev_diff_sentence(&played_ev_loss(0.9)).contains("adds up"));
-        assert!(ev_diff_sentence(&played_ev_loss(3.0)).contains("Costly"));
-        assert!(ev_diff_sentence(&played_ev_loss(6.5)).contains("big leak"));
+        assert!(ev_diff_sentence(&played_ev_loss(0.25), Street::Flop).contains("rounding error"));
+        assert!(ev_diff_sentence(&played_ev_loss(0.9), Street::Flop).contains("adds up"));
+        assert!(ev_diff_sentence(&played_ev_loss(3.0), Street::Flop).contains("Costly"));
+        assert!(ev_diff_sentence(&played_ev_loss(6.5), Street::Flop).contains("big leak"));
 
         let mut perfect = base.clone();
         perfect
@@ -2329,7 +2376,7 @@ mod tests {
             .as_mut()
             .expect("sample has a played evaluation")
             .is_optimal = true;
-        assert!(ev_diff_sentence(&perfect).contains("you took it"));
+        assert!(ev_diff_sentence(&perfect, Street::Flop).contains("you took it"));
     }
 
     #[test]
@@ -2342,6 +2389,7 @@ mod tests {
             &sample_historic(),
             20,
             500,
+            Street::Flop,
         )
         .unwrap();
         assert!(fragment.contains("<span>VPIP</span><b>67%</b>"));
@@ -2374,6 +2422,7 @@ mod tests {
             &sample_historic(),
             20,
             500,
+            Street::Flop,
         )
         .unwrap();
         assert!(fragment.contains("<span>Aggression</span><b>∞</b>"));
@@ -2400,6 +2449,7 @@ mod tests {
             &historic,
             20,
             500,
+            Street::Flop,
         )
         .unwrap();
         assert!(fragment.contains("Starting hands — last 842 actions"));
