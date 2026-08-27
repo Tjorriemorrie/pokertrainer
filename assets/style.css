@@ -891,7 +891,15 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
 .pt-ranking th { color: #6b7280; font-weight: 600; }
 .pt-ranking tr.optimal { color: #86efac; }
 .pt-ranking tr.played { color: #fca5a5; }
-.pt-ranking .pt-visits { text-align: right; font-variant-numeric: tabular-nums; }
+
+.pt-visits-note {
+  caption-side: bottom;
+  text-align: right;
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+  color: #6b7280;
+  padding: 0.3rem 0.5rem 0;
+}
 
 .pt-risk-flag {
   display: inline-block;

@@ -1172,8 +1172,6 @@ struct RankingRow {
     label: String,
     ev: String,
     risk: RiskBadge,
-    /// Comma-grouped so the busiest candidate is easy to spot at a glance.
-    visits: String,
 }
 
 /// A plain-language stand-in for the raw bust-probability/variance pair:
@@ -1225,6 +1223,11 @@ struct TacticalOverlayFragment {
     optimal_label: String,
     optimal_ev: String,
     ranking: Vec<RankingRow>,
+    /// Total root visits behind the search, comma-grouped for display. Every
+    /// candidate now gets an equal share (see the round-robin root selection
+    /// in `mcts::tree`), so one number for the whole table replaces what used
+    /// to be a per-row count.
+    visits: String,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1240,6 +1243,7 @@ pub fn tactical_overlay_fragment(
     let optimal = decision.optimal;
     let mut rows: Vec<&Analysis> = decision.ranking.iter().collect();
     rows.sort_by_key(|analysis| chip_cost(analysis.action, call_amount, hero_stack));
+    let visits = comma_count(rows.iter().map(|analysis| analysis.visits).max().unwrap_or(0));
     Ok(TacticalOverlayFragment {
         hand_no,
         intercepted,
@@ -1270,9 +1274,9 @@ pub fn tactical_overlay_fragment(
                 label: action_label(analysis.action),
                 ev: format!("{:.1}", analysis.ev),
                 risk: risk_badge(analysis),
-                visits: comma_count(analysis.visits),
             })
             .collect(),
+        visits,
     }
     .render()?)
 }
@@ -1399,7 +1403,7 @@ mod tests {
             "the solver depth badge lives in the action dock, not the header shell"
         );
         assert!(
-            page.contains(r#"/assets/style.css?v=19"#),
+            page.contains(r#"/assets/style.css?v=20"#),
             "the stylesheet link is versioned so browsers drop stale cached CSS"
         );
         assert!(
@@ -2175,10 +2179,9 @@ mod tests {
         assert!(fragment.contains("EV lost: <b>0.90</b> BB"));
         assert!(fragment.contains(r#"<tr class="optimal"><td>Fold</td><td>0.0</td>"#));
         assert!(fragment.contains(r#"<tr class="played"><td>Call</td><td>-18.0</td>"#));
-        assert!(fragment.contains(r#"<th class="pt-visits">Visits</th>"#));
         assert!(
-            fragment.contains(r#"<td class="pt-visits">120</td>"#),
-            "visit counts render right-aligned via the pt-visits class: {fragment}"
+            fragment.contains(r#"<caption class="pt-visits-note">120 visits</caption>"#),
+            "the table carries a single visits count for the whole search: {fragment}"
         );
         assert!(fragment.contains(r#"data-overlay-close"#));
         assert!(
