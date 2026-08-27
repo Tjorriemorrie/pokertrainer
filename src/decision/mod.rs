@@ -1,7 +1,3 @@
-pub mod objective;
-
-pub use objective::{DerivedRisk, SurvivalConfig, survival_score};
-
 use std::cmp::Ordering;
 
 use rand::Rng;
@@ -13,7 +9,8 @@ use crate::range::BetSize;
 use crate::range::hands::Range;
 
 /// One candidate action as seen by the decision layer: the solver's chip-EV
-/// and risk estimates, plus the survivability score used for ranking.
+/// estimate plus the payoff variance and bust probability it carries,
+/// reported for display but not weighed into ranking.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Analysis {
     pub action: Action,
@@ -21,7 +18,6 @@ pub struct Analysis {
     pub ev: f64,
     pub variance: f64,
     pub bust_prob: f64,
-    pub score: f64,
     pub visits: u64,
 }
 
@@ -32,10 +28,10 @@ impl Analysis {
     }
 }
 
-/// How a played action compares to the survivability-optimal one.
+/// How a played action compares to the highest-EV one.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PlayedEvaluation {
-    /// The solver/risk analysis of the played action itself.
+    /// The solver's analysis of the played action itself.
     pub analysis: Analysis,
     /// The chip EV given up relative to the optimal action, normalized to
     /// big blinds (0.0 when the played action is the optimal one). Meant for
@@ -48,7 +44,7 @@ pub struct PlayedEvaluation {
     /// pot-fraction basis is what actually makes a preflop mistake count as
     /// heavily as an equally-bad river mistake.
     pub ev_loss_pot: f64,
-    /// Whether the played action is exactly the survivability-optimal one.
+    /// Whether the played action is exactly the highest-EV one.
     pub is_optimal: bool,
 }
 
@@ -73,31 +69,15 @@ pub struct SearchReport {
 /// The outcome of analyzing the hero's current decision node.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AnalyzedDecision {
-    /// Every candidate, best survivability score first.
+    /// Every candidate, highest chip EV first.
     pub ranking: Vec<Analysis>,
-    /// The single strictly-best action: the highest survivability score,
-    /// ties broken by chip EV, then bust probability, then variance.
+    /// The single strictly-best action: the highest chip EV, ties broken by
+    /// bust probability then variance.
     pub optimal: Analysis,
     /// The evaluation of the played action, when one was submitted.
     pub played: Option<PlayedEvaluation>,
     /// The solve's realized search effort.
     pub search: SearchReport,
-}
-
-/// Derives the survivability coefficients for the hero's stack, rescaled to
-/// this hand's actual table context (see [`SurvivalConfig::for_hand`]) rather
-/// than the static config alone.
-fn hand_risk(state: &GameState, survival_config: &SurvivalConfig, stack: u32) -> Result<DerivedRisk> {
-    let opponent_stacks: Vec<u32> = state
-        .active_seats()
-        .into_iter()
-        .filter(|&seat| seat != Seat::Hero)
-        .map(|seat| state.stack(seat))
-        .collect();
-    let big_blind = state.blind_level().big_blind;
-    survival_config
-        .for_hand(stack, &opponent_stacks, big_blind)
-        .derive(stack)
 }
 
 /// Validates a player-submitted action against the current state: the hand
@@ -119,19 +99,18 @@ pub fn validate_action(state: &GameState, action: Action) -> Result<()> {
     Ok(())
 }
 
-/// Analyzes the hero's current decision: runs one MCTS solve, scores every
-/// candidate with the survivability objective, and — when a played action is
-/// supplied — evaluates it against the optimal action.
+/// Analyzes the hero's current decision: runs one MCTS solve, ranks every
+/// candidate by chip EV, and — when a played action is supplied — evaluates
+/// it against the optimal action.
 ///
 /// A played action that is not one of the standard bucket candidates (e.g. an
 /// exact bet-slider amount) is injected into the root candidate set so its EV
-/// and risk profile are measured exactly.
+/// profile is measured exactly.
 pub fn analyze<R: Rng + ?Sized>(
     rng: &mut R,
     state: &GameState,
     ranges: &[Range; 2],
     mcts_config: &MctsConfig,
-    survival_config: &SurvivalConfig,
     played: Option<Action>,
 ) -> Result<AnalyzedDecision> {
     if state.is_hand_over() {
@@ -151,8 +130,6 @@ pub fn analyze<R: Rng + ?Sized>(
         candidates.push((action, classify_played(state, action)));
     }
 
-    let stack = state.stack(Seat::Hero);
-    let risk = hand_risk(state, survival_config, stack)?;
     let result = mcts::solve_with_candidates(rng, state, ranges, mcts_config, &candidates)?;
 
     let mut analyses: Vec<Analysis> = result
@@ -164,7 +141,6 @@ pub fn analyze<R: Rng + ?Sized>(
             ev: value.ev,
             variance: value.variance,
             bust_prob: value.bust_prob,
-            score: risk.score(value.ev, value.variance, value.bust_prob),
             visits: value.visits,
         })
         .collect();
@@ -217,7 +193,6 @@ pub fn analyze<R: Rng + ?Sized>(
 pub fn analyze_snapshot(
     state: &GameState,
     snapshot: &crate::mcts::SolveResult,
-    survival_config: &SurvivalConfig,
     played: Option<Action>,
 ) -> Result<AnalyzedDecision> {
     if state.is_hand_over() {
@@ -230,9 +205,6 @@ pub fn analyze_snapshot(
         validate_action(state, action)?;
     }
 
-    let stack = state.stack(Seat::Hero);
-    let risk = hand_risk(state, survival_config, stack)?;
-
     let mut analyses: Vec<Analysis> = snapshot
         .actions
         .iter()
@@ -242,7 +214,6 @@ pub fn analyze_snapshot(
             ev: value.ev,
             variance: value.variance,
             bust_prob: value.bust_prob,
-            score: risk.score(value.ev, value.variance, value.bust_prob),
             visits: value.visits,
         })
         .collect();
@@ -310,13 +281,12 @@ pub(crate) fn classify_played(state: &GameState, action: Action) -> Option<BetSi
     ))
 }
 
-/// A total order over analyses: highest survivability score first, then
-/// higher chip EV, then lower bust probability, then lower payoff variance.
-/// `sort_by` is stable, so candidate order breaks any remaining tie.
+/// A total order over analyses: highest chip EV first, ties broken by lower
+/// bust probability then lower payoff variance. `sort_by` is stable, so
+/// candidate order breaks any remaining tie.
 fn rank_desc(a: &Analysis, b: &Analysis) -> Ordering {
-    b.score
-        .total_cmp(&a.score)
-        .then(b.ev.total_cmp(&a.ev))
+    b.ev
+        .total_cmp(&a.ev)
         .then(a.bust_prob.total_cmp(&b.bust_prob))
         .then(a.variance.total_cmp(&b.variance))
 }
@@ -467,7 +437,7 @@ mod tests {
     }
 
     #[test]
-    fn analyze_ranks_by_survival_score_and_reports_ev_loss() {
+    fn analyze_ranks_by_ev_and_reports_ev_loss() {
         let state = river_facing_bet(junk_hand());
         let mut rng = seeded_rng(12);
         let result = analyze(
@@ -475,7 +445,6 @@ mod tests {
             &state,
             &[aces(), aces()],
             &MctsConfig::test(),
-            &SurvivalConfig::default(),
             Some(Action::Call),
         )
         .unwrap();
@@ -483,7 +452,7 @@ mod tests {
         for pair in result.ranking.windows(2) {
             assert!(
                 rank_desc(&pair[0], &pair[1]) != Ordering::Greater,
-                "ranking not sorted by survivability"
+                "ranking not sorted by EV"
             );
         }
         assert_eq!(result.ranking.len(), mcts::candidates(&state).len());
@@ -518,7 +487,6 @@ mod tests {
             &state,
             &[uniform(), uniform()],
             &MctsConfig::test(),
-            &SurvivalConfig::default(),
             Some(Action::Fold),
         )
         .unwrap();
@@ -560,7 +528,6 @@ mod tests {
             &state,
             &[uniform(), uniform()],
             &MctsConfig::test(),
-            &SurvivalConfig::default(),
             Some(played),
         )
         .unwrap();
@@ -576,18 +543,10 @@ mod tests {
         let mut rng = seeded_rng(15);
         let ranges = [uniform(), uniform()];
         let config = MctsConfig::test();
-        let survival = SurvivalConfig::default();
 
         let state = river_facing_bet(junk_hand());
         assert!(matches!(
-            analyze(
-                &mut rng,
-                &state,
-                &ranges,
-                &config,
-                &survival,
-                Some(Action::Check)
-            ),
+            analyze(&mut rng, &state, &ranges, &config, Some(Action::Check)),
             Err(Error::Decision(_))
         ));
 
@@ -596,14 +555,7 @@ mod tests {
             .start_hand(&mut Deck::shuffled(&mut seeded_rng(16)))
             .unwrap();
         assert!(matches!(
-            analyze(
-                &mut rng,
-                &state,
-                &ranges,
-                &config,
-                &survival,
-                Some(Action::Call)
-            ),
+            analyze(&mut rng, &state, &ranges, &config, Some(Action::Call)),
             Err(Error::Decision(_))
         ));
 
@@ -615,7 +567,7 @@ mod tests {
         finished.apply_action(Action::Fold).unwrap();
         assert!(finished.is_hand_over());
         assert!(matches!(
-            analyze(&mut rng, &finished, &ranges, &config, &survival, None),
+            analyze(&mut rng, &finished, &ranges, &config, None),
             Err(Error::Decision(_))
         ));
     }
@@ -626,19 +578,13 @@ mod tests {
         let ranges = [aces(), aces()];
         let snapshot =
             mcts::solve(&mut seeded_rng(12), &state, &ranges, &MctsConfig::test()).unwrap();
-        let from_snapshot = analyze_snapshot(
-            &state,
-            &snapshot,
-            &SurvivalConfig::default(),
-            Some(Action::Call),
-        )
-        .unwrap();
+        let from_snapshot =
+            analyze_snapshot(&state, &snapshot, Some(Action::Call)).unwrap();
         let full = analyze(
             &mut seeded_rng(12),
             &state,
             &ranges,
             &MctsConfig::test(),
-            &SurvivalConfig::default(),
             Some(Action::Call),
         )
         .unwrap();
@@ -664,12 +610,7 @@ mod tests {
             "fixture should use an off-bucket amount"
         );
         assert!(matches!(
-            analyze_snapshot(
-                &state,
-                &snapshot,
-                &SurvivalConfig::default(),
-                Some(off_bucket)
-            ),
+            analyze_snapshot(&state, &snapshot, Some(off_bucket)),
             Err(Error::Decision(_))
         ));
 
@@ -678,7 +619,7 @@ mod tests {
             .start_hand(&mut Deck::shuffled(&mut seeded_rng(21)))
             .unwrap();
         assert!(matches!(
-            analyze_snapshot(&wrong, &snapshot, &SurvivalConfig::default(), None),
+            analyze_snapshot(&wrong, &snapshot, None),
             Err(Error::Decision(_))
         ));
     }
@@ -688,40 +629,43 @@ mod tests {
         let state = river_facing_bet(junk_hand());
         let ranges = [uniform(), uniform()];
         let config = MctsConfig::test();
-        let survival = SurvivalConfig::default();
 
         let mut a = seeded_rng(17);
         let mut b = seeded_rng(17);
-        let first = analyze(&mut a, &state, &ranges, &config, &survival, None).unwrap();
-        let second = analyze(&mut b, &state, &ranges, &config, &survival, None).unwrap();
+        let first = analyze(&mut a, &state, &ranges, &config, None).unwrap();
+        let second = analyze(&mut b, &state, &ranges, &config, None).unwrap();
         assert_eq!(first, second);
     }
 
     #[test]
-    fn score_and_ev_agree_but_risk_resolves_close_calls() {
-        let config = SurvivalConfig::default();
-        let risk = config.derive(500).unwrap();
-
+    fn rank_desc_breaks_equal_ev_ties_by_bust_probability_then_variance() {
         let safe = Analysis {
             action: Action::Call,
             bucket: None,
             ev: 10.0,
             variance: 100.0,
             bust_prob: 0.0,
-            score: risk.score(10.0, 100.0, 0.0),
             visits: 1,
         };
         let busty = Analysis {
             action: Action::AllIn,
             bucket: Some(BetSize::AllIn),
-            ev: 20.0,
+            ev: 10.0,
             variance: 90_000.0,
             bust_prob: 0.4,
-            score: risk.score(20.0, 90_000.0, 0.4),
             visits: 1,
         };
-        assert!(safe.ev < busty.ev);
         assert_eq!(rank_desc(&safe, &busty), Ordering::Less);
+
+        let higher_ev = Analysis {
+            ev: 20.0,
+            ..busty
+        };
+        assert_eq!(
+            rank_desc(&safe, &higher_ev),
+            Ordering::Greater,
+            "a higher-EV action ranks first even when it carries more risk"
+        );
     }
 
     /// Regression for the junk-hand coaching complaint: with 6♠3♦ preflop
@@ -749,7 +693,6 @@ mod tests {
             &state,
             &[aces(), aces()],
             &MctsConfig::test(),
-            &SurvivalConfig::default(),
             None,
         )
         .unwrap();
@@ -766,7 +709,7 @@ mod tests {
                 Action::Bet(_) | Action::Raise(_) | Action::AllIn
             ) {
                 assert!(
-                    candidate.score <= result.optimal.score,
+                    candidate.ev <= result.optimal.ev,
                     "a raise scored above fold for 63o: {candidate:?}"
                 );
             }

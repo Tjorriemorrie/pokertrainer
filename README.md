@@ -74,11 +74,9 @@ interface and coaches decision-making with a range-based solver.
   the wrong badge or unlock the dock early.
 - **Decision layer:** validates player-submitted actions (including
   off-bucket bet-slider amounts) and evaluates them against the optimal
-  action. Because only first place pays, "optimal" maximizes a survivability
-  score derived from CRRA utility over the hero's stack:
-  `EV − λσ² − κ·P(bust)` with λ = γ/(2S) and bust cost κ = S·ln(S/b) under
-  Kelly (γ = 1) — variance and bust risk are penalized more the shorter the
-  hero's stack. The played action's EV loss is normalized to **big blinds**,
+  action. "Optimal" is simply the highest chip-EV candidate — no variance or
+  bust-probability penalty is applied, so a short stack is graded exactly
+  like a deep one. The played action's EV loss is normalized to **big blinds**,
   so a preflop mistake counts as heavily as an equally bad river mistake
   regardless of pot size.
 - **HTTP + WebSocket bridge:** an Axum server (`127.0.0.1:8744` by

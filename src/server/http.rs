@@ -12,7 +12,6 @@ use tower_http::services::ServeDir;
 
 use crate::analytics;
 use crate::blunder::BlunderConfig;
-use crate::decision::SurvivalConfig;
 use crate::error::Result;
 use crate::hh;
 use crate::mcts::MctsConfig;
@@ -29,7 +28,6 @@ use crate::server::{views, ws};
 pub struct AppState {
     pub assets: ServeDir,
     pub mcts: MctsConfig,
-    pub survival: SurvivalConfig,
     pub blunder: BlunderConfig,
     pub pool: Option<PgPool>,
     pub snapshot_interval: usize,
@@ -543,7 +541,6 @@ mod tests {
         Arc::new(AppState {
             assets: default_assets(),
             mcts: MctsConfig::test(),
-            survival: SurvivalConfig::default(),
             blunder: BlunderConfig::default(),
             pool: None,
             snapshot_interval: 100,
@@ -617,7 +614,6 @@ mod tests {
         let state = Arc::new(AppState {
             assets: default_assets(),
             mcts: MctsConfig::test(),
-            survival: SurvivalConfig::default(),
             blunder: BlunderConfig::default(),
             pool: Some(pool.clone()),
             snapshot_interval: 100,
@@ -739,7 +735,6 @@ mod tests {
         let state = Arc::new(AppState {
             assets: default_assets(),
             mcts: MctsConfig::test(),
-            survival: SurvivalConfig::default(),
             blunder: BlunderConfig::default(),
             pool: Some(pool.clone()),
             snapshot_interval: 100,
@@ -799,7 +794,6 @@ mod tests {
         let state = Arc::new(AppState {
             assets: default_assets(),
             mcts: MctsConfig::test(),
-            survival: SurvivalConfig::default(),
             blunder: BlunderConfig::default(),
             pool: Some(pool.clone()),
             snapshot_interval: 100,
@@ -877,7 +871,6 @@ mod tests {
         let state = Arc::new(AppState {
             assets: default_assets(),
             mcts: MctsConfig::test(),
-            survival: SurvivalConfig::default(),
             blunder: BlunderConfig::default(),
             pool: Some(pool.clone()),
             snapshot_interval: 100,
@@ -943,7 +936,6 @@ mod tests {
         let state = Arc::new(AppState {
             assets: default_assets(),
             mcts: MctsConfig::test(),
-            survival: SurvivalConfig::default(),
             blunder: BlunderConfig::default(),
             pool: Some(pool.clone()),
             snapshot_interval: 100,
@@ -964,7 +956,6 @@ mod tests {
             Arc::new(AppState {
                 assets: default_assets(),
                 mcts: MctsConfig::test(),
-                survival: SurvivalConfig::default(),
                 blunder: BlunderConfig::default(),
                 pool: Some(pool.clone()),
                 snapshot_interval: 100,
@@ -1177,7 +1168,6 @@ You finished in 1st place.
         let state = Arc::new(AppState {
             assets: default_assets(),
             mcts: MctsConfig::test(),
-            survival: SurvivalConfig::default(),
             blunder: BlunderConfig::default(),
             pool: Some(pool.clone()),
             snapshot_interval: 100,
@@ -1277,7 +1267,6 @@ You finished in 1st place.
         let state = Arc::new(AppState {
             assets: default_assets(),
             mcts: MctsConfig::test(),
-            survival: SurvivalConfig::default(),
             blunder: BlunderConfig::default(),
             pool: Some(pool.clone()),
             snapshot_interval: 100,
@@ -1344,7 +1333,6 @@ You finished in 1st place.
         let state = Arc::new(AppState {
             assets: default_assets(),
             mcts: MctsConfig::test(),
-            survival: SurvivalConfig::default(),
             blunder: BlunderConfig::default(),
             pool: Some(pool.clone()),
             snapshot_interval: 100,
@@ -1391,7 +1379,6 @@ You finished in 1st place.
         let idle_state = Arc::new(AppState {
             assets: default_assets(),
             mcts: MctsConfig::test(),
-            survival: SurvivalConfig::default(),
             blunder: BlunderConfig::default(),
             pool: Some(pool.clone()),
             snapshot_interval: 100,
@@ -1415,7 +1402,6 @@ You finished in 1st place.
         let state = Arc::new(AppState {
             assets: default_assets(),
             mcts: MctsConfig::test(),
-            survival: SurvivalConfig::default(),
             blunder: BlunderConfig::default(),
             pool: Some(pool.clone()),
             snapshot_interval: 100,
@@ -1478,7 +1464,6 @@ You finished in 1st place.
         let state = Arc::new(AppState {
             assets: default_assets(),
             mcts: MctsConfig::test(),
-            survival: SurvivalConfig::default(),
             blunder: BlunderConfig::default(),
             pool: Some(pool.clone()),
             snapshot_interval: 100,

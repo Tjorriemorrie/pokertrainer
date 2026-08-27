@@ -134,7 +134,6 @@ async fn handle_socket(socket: WebSocket, app: Arc<AppState>) {
                 &snapshot,
                 rand::random::<u64>(),
                 app.mcts,
-                app.survival,
                 app.blunder,
                 opponent_model,
             ) {
@@ -191,7 +190,6 @@ async fn handle_socket(socket: WebSocket, app: Arc<AppState>) {
             let mut session = TableSession::new(
                 rand::random::<u64>(),
                 app.mcts,
-                app.survival,
                 app.blunder,
                 template,
                 starting_stack,
@@ -1081,9 +1079,7 @@ fn error_message(message: &str) -> String {
 mod tests {
     use super::*;
     use crate::blunder::BlunderConfig;
-    use crate::decision::{
-        Analysis, AnalyzedDecision, PlayedEvaluation, SearchReport, SurvivalConfig,
-    };
+    use crate::decision::{Analysis, AnalyzedDecision, PlayedEvaluation, SearchReport};
     use crate::game::{Action, Seat};
     use crate::mcts::MctsConfig;
     use crate::server::http::{AppState, ServeListener, default_assets};
@@ -1099,7 +1095,6 @@ mod tests {
         let mut session = TableSession::new(
             81,
             MctsConfig::test(),
-            SurvivalConfig::default(),
             BlunderConfig::default(),
             None,
             crate::game::STARTING_STACK,
@@ -1516,7 +1511,6 @@ mod tests {
             9,
             99,
             MctsConfig::test(),
-            SurvivalConfig::default(),
             BlunderConfig::default(),
             None,
         );
@@ -1544,7 +1538,6 @@ mod tests {
             23,
             96,
             MctsConfig::test(),
-            SurvivalConfig::default(),
             BlunderConfig::default(),
             None,
         );
@@ -1578,7 +1571,6 @@ mod tests {
             ev: 0.0,
             variance: 0.0,
             bust_prob: 0.0,
-            score: 0.0,
             visits: 120,
         };
         AnalyzedDecision {
@@ -1727,7 +1719,6 @@ mod tests {
             9,
             99,
             MctsConfig::test(),
-            SurvivalConfig::default(),
             BlunderConfig::default(),
             None,
         );
@@ -1911,7 +1902,6 @@ mod tests {
             Arc::new(AppState {
                 assets: default_assets(),
                 mcts: MctsConfig::test(),
-                survival: SurvivalConfig::default(),
                 blunder: BlunderConfig::default(),
                 pool,
                 snapshot_interval,

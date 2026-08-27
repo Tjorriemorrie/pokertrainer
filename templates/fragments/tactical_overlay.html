@@ -23,9 +23,9 @@ escaped a second time. Never put `|safe` on raw data.
 {%- else -%}
 <div class="pt-compare"><div class="pt-optimal">Optimal: <b>{{ optimal_label }}</b> — EV {{ optimal_ev }}</div></div>
 {%- endif -%}
-<table class="pt-ranking"><tr><th>Action</th><th>Score</th><th>EV</th><th>Risk</th><th class="pt-visits">Visits</th></tr>
+<table class="pt-ranking"><tr><th>Action</th><th>EV</th><th>Risk</th><th class="pt-visits">Visits</th></tr>
 {%- for row in ranking -%}
-<tr class="{{ row.class }}"><td>{{ row.label }}</td><td>{{ row.score }}</td><td>{{ row.ev }}</td><td><span class="pt-risk-flag {{ row.risk.class }}" title="{{ row.risk.tooltip }}">{{ row.risk.label }}</span></td><td class="pt-visits">{{ row.visits }}</td></tr>
+<tr class="{{ row.class }}"><td>{{ row.label }}</td><td>{{ row.ev }}</td><td><span class="pt-risk-flag {{ row.risk.class }}" title="{{ row.risk.tooltip }}">{{ row.risk.label }}</span></td><td class="pt-visits">{{ row.visits }}</td></tr>
 {%- endfor -%}
 </table>
 {%- if intercepted -%}

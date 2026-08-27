@@ -21,7 +21,6 @@ use std::time::Duration;
 use sqlx::PgPool;
 
 use crate::blunder::BlunderConfig;
-use crate::decision::SurvivalConfig;
 use crate::error::Result;
 use crate::mcts::MctsConfig;
 
@@ -52,7 +51,6 @@ pub const LIVE_MCTS: MctsConfig = MctsConfig {
 pub struct ServerConfig {
     pub bind: SocketAddr,
     pub mcts: MctsConfig,
-    pub survival: SurvivalConfig,
     pub blunder: BlunderConfig,
     pub snapshot_interval: usize,
     pub result_pause_ms: u64,
@@ -64,7 +62,6 @@ impl ServerConfig {
         Self {
             bind: SocketAddr::from(([127, 0, 0, 1], 8744)),
             mcts: LIVE_MCTS,
-            survival: SurvivalConfig::default(),
             blunder: BlunderConfig::default(),
             snapshot_interval: 100,
             result_pause_ms: 5700,
@@ -79,7 +76,6 @@ pub async fn serve(config: ServerConfig, pool: Option<PgPool>) -> Result<()> {
     let state = Arc::new(AppState {
         assets: http::default_assets(),
         mcts: config.mcts,
-        survival: config.survival,
         blunder: config.blunder,
         pool,
         snapshot_interval: config.snapshot_interval,
@@ -121,7 +117,6 @@ mod tests {
             ServerConfig {
                 bind,
                 mcts: MctsConfig::test(),
-                survival: SurvivalConfig::default(),
                 blunder: crate::blunder::BlunderConfig::default(),
                 snapshot_interval: 100,
                 result_pause_ms: 0,

@@ -1,7 +1,7 @@
 use crate::analytics::{PendingDecision, PendingHandResult};
 use crate::blunder::{BlunderConfig, Tracker};
 use crate::card::{Card, Deck};
-use crate::decision::{self, AnalyzedDecision, SurvivalConfig, validate_action};
+use crate::decision::{self, AnalyzedDecision, validate_action};
 use crate::error::{Error, Result};
 use crate::game::blinds::BLIND_SCHEDULE;
 use crate::game::{Action, ActionOutcome, GameState, HandEndReason, Seat, Street};
@@ -75,7 +75,7 @@ pub enum TableEvent {
 }
 
 /// An intercepted submission held back by the blunder engine: once the player
-/// confirms the review, the coach's survivability-optimal action is applied to
+/// confirms the review, the coach's highest-EV action is applied to
 /// the table in place of the blunder (the blunder itself stays what the
 /// session history and EV chart record).
 pub struct PendingInterception {
@@ -104,7 +104,6 @@ pub struct TableSession {
     state: GameState,
     deck: Deck,
     mcts: MctsConfig,
-    survival: SurvivalConfig,
     ranges: [Range; 2],
     /// The field skill template the two bots play with; `None` falls back to
     /// the placeholder heuristic.
@@ -157,7 +156,6 @@ impl TableSession {
     pub fn new(
         seed: u64,
         mcts: MctsConfig,
-        survival: SurvivalConfig,
         blunder: BlunderConfig,
         template: Option<OpponentTemplate>,
         starting_stack: u32,
@@ -173,7 +171,6 @@ impl TableSession {
             state,
             deck,
             mcts,
-            survival,
             ranges: uniform_ranges(),
             template,
             opponent_model,
@@ -203,7 +200,6 @@ impl TableSession {
         hand_no: u64,
         seed: u64,
         mcts: MctsConfig,
-        survival: SurvivalConfig,
         blunder: BlunderConfig,
         template: Option<OpponentTemplate>,
     ) -> Self {
@@ -211,7 +207,6 @@ impl TableSession {
             state,
             deck,
             mcts,
-            survival,
             ranges: uniform_ranges(),
             template,
             opponent_model: OpponentModel::default(),
@@ -241,7 +236,6 @@ impl TableSession {
         snapshot: &crate::snapshot::TournamentSnapshot,
         seed: u64,
         mcts: MctsConfig,
-        survival: SurvivalConfig,
         blunder: BlunderConfig,
         opponent_model: OpponentModel,
     ) -> Result<Self> {
@@ -264,7 +258,6 @@ impl TableSession {
             state,
             deck,
             mcts,
-            survival,
             ranges: uniform_ranges(),
             template: snapshot.template_skill.map(OpponentTemplate::new),
             opponent_model,
@@ -504,7 +497,7 @@ impl TableSession {
     }
 
     /// The action the coach will apply to the table once the pending
-    /// interception is confirmed: the survivability-optimal action replacing
+    /// interception is confirmed: the highest-EV action replacing
     /// the held-back blunder.
     pub fn resolving_action(&self) -> Option<Action> {
         self.pending
@@ -673,7 +666,6 @@ impl TableSession {
             &self.state,
             &self.ranges,
             &self.mcts,
-            &self.survival,
             Some(action),
         )?;
         self.finish_submission(action, analyzed)
@@ -695,18 +687,16 @@ impl TableSession {
             ));
         }
 
-        let analyzed =
-            match decision::analyze_snapshot(&self.state, snapshot, &self.survival, Some(action)) {
-                Ok(analyzed) => analyzed,
-                Err(_) => decision::analyze(
-                    &mut self.rng,
-                    &self.state,
-                    &self.ranges,
-                    &self.mcts,
-                    &self.survival,
-                    Some(action),
-                )?,
-            };
+        let analyzed = match decision::analyze_snapshot(&self.state, snapshot, Some(action)) {
+            Ok(analyzed) => analyzed,
+            Err(_) => decision::analyze(
+                &mut self.rng,
+                &self.state,
+                &self.ranges,
+                &self.mcts,
+                Some(action),
+            )?,
+        };
         self.finish_submission(action, analyzed)
     }
 
@@ -1028,7 +1018,6 @@ mod tests {
     use super::*;
     use crate::blunder::BlunderConfig;
     use crate::card::{Card, Deck, Rank, Suit};
-    use crate::decision::SurvivalConfig;
     use crate::error::Error;
     use crate::game::STARTING_STACK;
     use crate::game::Street;
@@ -1047,10 +1036,6 @@ mod tests {
 
     fn probe_config() -> MctsConfig {
         MctsConfig::test()
-    }
-
-    fn survival() -> SurvivalConfig {
-        SurvivalConfig::default()
     }
 
     /// Test preset: with an empty rolling history nothing can ever cross the
@@ -1149,7 +1134,6 @@ mod tests {
         let mut session = TableSession::new(
             41,
             probe_config(),
-            survival(),
             never_intercepts(),
             None,
             STARTING_STACK,
@@ -1169,7 +1153,6 @@ mod tests {
         let session = TableSession::new(
             77,
             probe_config(),
-            survival(),
             never_intercepts(),
             None,
             420,
@@ -1185,7 +1168,6 @@ mod tests {
         let mut session = TableSession::new(
             41,
             probe_config(),
-            survival(),
             never_intercepts(),
             None,
             STARTING_STACK,
@@ -1214,7 +1196,6 @@ mod tests {
             1,
             71,
             probe_config(),
-            survival(),
             never_intercepts(),
             None,
         );
@@ -1259,7 +1240,6 @@ mod tests {
             3,
             63,
             probe_config(),
-            survival(),
             never_intercepts(),
             None,
         );
@@ -1322,7 +1302,6 @@ mod tests {
             2,
             64,
             probe_config(),
-            survival(),
             never_intercepts(),
             None,
         );
@@ -1353,7 +1332,6 @@ mod tests {
             3,
             42,
             probe_config(),
-            survival(),
             never_intercepts(),
             None,
         );
@@ -1371,7 +1349,6 @@ mod tests {
             3,
             47,
             probe_config(),
-            survival(),
             never_intercepts(),
             None,
         );
@@ -1407,7 +1384,6 @@ mod tests {
             1,
             43,
             probe_config(),
-            survival(),
             never_intercepts(),
             None,
         );
@@ -1449,7 +1425,6 @@ mod tests {
             1,
             43,
             probe_config(),
-            survival(),
             never_intercepts(),
             None,
         );
@@ -1483,7 +1458,6 @@ mod tests {
             &state,
             &[uniform(), uniform()],
             &probe_config(),
-            &survival(),
             None,
         )
         .unwrap();
@@ -1500,7 +1474,6 @@ mod tests {
             1,
             44,
             probe_config(),
-            survival(),
             never_intercepts(),
             None,
         );
@@ -1532,7 +1505,6 @@ mod tests {
             &state,
             &[uniform(), uniform()],
             &probe_config(),
-            &survival(),
             None,
         )
         .unwrap();
@@ -1549,7 +1521,6 @@ mod tests {
             1,
             44,
             probe_config(),
-            survival(),
             always_intercepts(),
             None,
         );
@@ -1654,7 +1625,6 @@ mod tests {
             &state,
             &[uniform(), uniform()],
             &probe_config(),
-            &survival(),
             None,
         )
         .unwrap();
@@ -1665,7 +1635,6 @@ mod tests {
             1,
             44,
             probe_config(),
-            survival(),
             always_intercepts(),
             None,
         );
@@ -1692,7 +1661,6 @@ mod tests {
             1,
             45,
             probe_config(),
-            survival(),
             never_intercepts(),
             None,
         );
@@ -1780,7 +1748,6 @@ mod tests {
             1,
             47,
             probe_config(),
-            survival(),
             never_intercepts(),
             None,
         );
@@ -1813,7 +1780,6 @@ mod tests {
             1,
             51,
             probe_config(),
-            survival(),
             never_intercepts(),
             None,
         );
@@ -1858,7 +1824,6 @@ mod tests {
             1,
             53,
             probe_config(),
-            survival(),
             never_intercepts(),
             None,
         );
@@ -1889,7 +1854,6 @@ mod tests {
             1,
             54,
             probe_config(),
-            survival(),
             never_intercepts(),
             None,
         );
@@ -1923,7 +1887,6 @@ mod tests {
         let mut session = TableSession::new(
             48,
             probe_config(),
-            survival(),
             never_intercepts(),
             None,
             STARTING_STACK,
@@ -1952,7 +1915,6 @@ mod tests {
             1,
             50,
             probe_config(),
-            survival(),
             never_intercepts(),
             None,
         );
@@ -2033,7 +1995,6 @@ mod tests {
             1,
             50,
             probe_config(),
-            survival(),
             never_intercepts(),
             None,
         );
@@ -2073,7 +2034,6 @@ mod tests {
             1,
             50,
             probe_config(),
-            survival(),
             never_intercepts(),
             None,
         );
@@ -2098,7 +2058,6 @@ mod tests {
             1,
             49,
             probe_config(),
-            survival(),
             never_intercepts(),
             None,
         );
@@ -2154,7 +2113,6 @@ mod tests {
             1,
             60,
             probe_config(),
-            survival(),
             never_intercepts(),
             None,
         );
@@ -2191,7 +2149,6 @@ mod tests {
             1,
             61,
             probe_config(),
-            survival(),
             never_intercepts(),
             None,
         );
@@ -2214,7 +2171,6 @@ mod tests {
             23,
             62,
             probe_config(),
-            survival(),
             never_intercepts(),
             None,
         );
@@ -2240,7 +2196,6 @@ mod tests {
             23,
             63,
             probe_config(),
-            survival(),
             never_intercepts(),
             None,
         );
@@ -2265,7 +2220,6 @@ mod tests {
             4,
             64,
             probe_config(),
-            survival(),
             never_intercepts(),
             None,
         );
@@ -2295,7 +2249,6 @@ mod tests {
             7,
             62,
             probe_config(),
-            survival(),
             never_intercepts(),
             None,
         );
@@ -2307,7 +2260,6 @@ mod tests {
             &before,
             999,
             probe_config(),
-            survival(),
             never_intercepts(),
             OpponentModel::default(),
         )
@@ -2380,7 +2332,6 @@ mod tests {
             3,
             63,
             probe_config(),
-            survival(),
             never_intercepts(),
             None,
         );
@@ -2398,7 +2349,6 @@ mod tests {
             &snapshot,
             1000,
             probe_config(),
-            survival(),
             never_intercepts(),
             OpponentModel::default(),
         )
@@ -2430,7 +2380,6 @@ mod tests {
             2,
             64,
             probe_config(),
-            survival(),
             never_intercepts(),
             None,
         );
@@ -2449,7 +2398,6 @@ mod tests {
             1,
             65,
             probe_config(),
-            survival(),
             never_intercepts(),
             None,
         );
@@ -2460,7 +2408,6 @@ mod tests {
                 &snapshot,
                 1,
                 probe_config(),
-                survival(),
                 never_intercepts(),
                 OpponentModel::default()
             ),
@@ -2474,7 +2421,6 @@ mod tests {
                 &snapshot,
                 1,
                 probe_config(),
-                survival(),
                 never_intercepts(),
                 OpponentModel::default()
             ),
@@ -2488,7 +2434,6 @@ mod tests {
                 &snapshot,
                 1,
                 probe_config(),
-                survival(),
                 never_intercepts(),
                 OpponentModel::default()
             ),
@@ -2502,7 +2447,6 @@ mod tests {
                 &snapshot,
                 1,
                 probe_config(),
-                survival(),
                 never_intercepts(),
                 OpponentModel::default()
             ),
@@ -2540,10 +2484,14 @@ mod tests {
             1,
             0,
             probe_config(),
-            survival(),
             never_intercepts(),
             None,
         );
+        // Two decisions are submitted below (the check, then the pre-armed
+        // fold); prime the rolling history so the first submission can't
+        // become the lone-point threshold the second one crosses — see
+        // `never_intercepts`'s doc comment.
+        session.prime_blunder_history(&[1000.0]);
 
         let events = session.submit_check_fold().unwrap();
 
@@ -2592,7 +2540,6 @@ mod tests {
             1,
             105,
             probe_config(),
-            survival(),
             always_intercepts(),
             None,
         );

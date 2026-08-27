@@ -1170,9 +1170,6 @@ struct RankingRow {
     /// `optimal`, `played`, or empty.
     class: &'static str,
     label: String,
-    /// The survivability score actually used to pick `optimal` — EV after
-    /// the risk penalty below, so a row can out-rank a higher-EV one.
-    score: String,
     ev: String,
     risk: RiskBadge,
     /// Comma-grouped so the busiest candidate is easy to spot at a glance.
@@ -1271,7 +1268,6 @@ pub fn tactical_overlay_fragment(
                     ""
                 },
                 label: action_label(analysis.action),
-                score: format!("{:.1}", analysis.score),
                 ev: format!("{:.1}", analysis.ev),
                 risk: risk_badge(analysis),
                 visits: comma_count(analysis.visits),
@@ -2126,7 +2122,6 @@ mod tests {
             ev: 0.0,
             variance: 0.0,
             bust_prob: 0.0,
-            score: 0.0,
             visits: 120,
         };
         let call = Analysis {
@@ -2135,7 +2130,6 @@ mod tests {
             ev: -18.0,
             variance: 2000.0,
             bust_prob: 0.1,
-            score: -25.0,
             visits: 80,
         };
         AnalyzedDecision {
@@ -2180,8 +2174,7 @@ mod tests {
         assert!(fragment.contains("Optimal: <b>Fold</b>"));
         assert!(fragment.contains("EV lost: <b>0.90</b> BB"));
         assert!(fragment.contains(r#"<tr class="optimal"><td>Fold</td><td>0.0</td>"#));
-        assert!(fragment.contains(r#"<tr class="played"><td>Call</td><td>-25.0</td>"#));
-        assert!(fragment.contains("<th>Score</th>"));
+        assert!(fragment.contains(r#"<tr class="played"><td>Call</td><td>-18.0</td>"#));
         assert!(fragment.contains(r#"<th class="pt-visits">Visits</th>"#));
         assert!(
             fragment.contains(r#"<td class="pt-visits">120</td>"#),
@@ -2244,37 +2237,32 @@ mod tests {
     #[test]
     fn candidate_table_sorts_cheapest_first_with_fold_on_top() {
         let mut decision = sample_analysis();
-        // Survivability order is deliberate noise: the display must re-sort
-        // by chips committed — fold (0), check (0), call (20), raise (160),
-        // all-in (500).
+        // EV order is deliberate noise: the display must re-sort by chips
+        // committed — fold (0), check (0), call (20), raise (160), all-in
+        // (500).
         decision.ranking = vec![
             Analysis {
                 ev: 900.0,
-                score: 9.0,
                 ..decision.ranking[0]
             },
             Analysis {
                 action: Action::AllIn,
                 ev: 200.0,
-                score: 8.0,
                 ..decision.ranking[0]
             },
             Analysis {
                 action: Action::Raise(160),
                 ev: 150.0,
-                score: 7.0,
                 ..decision.ranking[0]
             },
             Analysis {
                 action: Action::Check,
                 ev: 0.0,
-                score: 6.0,
                 ..decision.ranking[0]
             },
             Analysis {
                 action: Action::Call,
                 ev: -20.0,
-                score: 5.0,
                 ..decision.ranking[0]
             },
         ];
