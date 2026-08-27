@@ -348,7 +348,7 @@ async fn play_socket(
     let mut solver_alive = true;
     let mut ticks_since_snapshot = 0usize;
 
-    let end = loop {
+    let end = 'socket: loop {
         tokio::select! {
             maybe = receiver.next() => {
                 let Some(message) = maybe else { break ConnectionEnd::Disconnected };
@@ -417,11 +417,11 @@ async fn play_socket(
                     }
                 }
 
-                if session.state().is_hand_over() {
+                while session.state().is_hand_over() {
                     tokio::time::sleep(std::time::Duration::from_millis(app.result_pause_ms)).await;
                     if !send_all(&mut sender, advance_frames(&mut *session)).await {
                         let _ = command_tx.send(SearchCommand::Stop);
-                        break ConnectionEnd::Disconnected;
+                        break 'socket ConnectionEnd::Disconnected;
                     }
                     session.take_pump_actions();
                     save_table(app.pool.as_ref(), session_id, session).await;
@@ -439,16 +439,21 @@ async fn play_socket(
                     // The freshly dealt hand can still end the tournament (the
                     // hero posts an all-in blind and the opponents play it
                     // out to a showdown), so the tournament may end here too
-                    // — stop and show the modal instead of dealing on.
+                    // — stop and show the modal instead of dealing on. A
+                    // freshly dealt hand can also end uncontested again right
+                    // away (e.g. the hero is the only seat left to act
+                    // against), so this stays a `while` above: keep pausing
+                    // and dealing until a hand actually leaves the hero a
+                    // decision.
                     if let Some(frame) =
                         tournament_over_frame(session, app.pool.as_ref(), session_id).await
                     {
                         let _ = command_tx.send(SearchCommand::Stop);
                         if sender.send(Message::Text(frame.into())).await.is_err() {
-                            break ConnectionEnd::Disconnected;
+                            break 'socket ConnectionEnd::Disconnected;
                         }
                         let _ = sender.close().await;
-                        break ConnectionEnd::Released;
+                        break 'socket ConnectionEnd::Released;
                     }
                 }
 
@@ -854,11 +859,20 @@ async fn post_resume_frames(
     if let Some(frame) = tournament_over_frame(session, pool, session_id).await {
         return vec![frame];
     }
-    if !session.state().is_hand_over() {
-        return Vec::new();
+    let mut frames = Vec::new();
+    // A freshly dealt hand can end uncontested again right away (e.g. the
+    // hero is the only seat left to act against), so this keeps pausing and
+    // dealing until a hand actually leaves the hero a decision, or the
+    // tournament ends.
+    while session.state().is_hand_over() {
+        tokio::time::sleep(std::time::Duration::from_millis(pause_ms)).await;
+        frames.extend(advance_frames(session));
+        if let Some(frame) = tournament_over_frame(session, pool, session_id).await {
+            frames.push(frame);
+            return frames;
+        }
     }
-    tokio::time::sleep(std::time::Duration::from_millis(pause_ms)).await;
-    advance_frames(session)
+    frames
 }
 
 /// Handles one client text frame; never fails the connection — problems are
@@ -1474,6 +1488,63 @@ mod tests {
         assert!(
             frames.is_empty(),
             "a live decision needs no extra connect frames"
+        );
+    }
+
+    /// Regression test for a table that froze after auto-playing one hand: a
+    /// heads-up table (the third seat already busted) parked on a finished
+    /// hand can deal straight into another hand that folds around
+    /// uncontested before the hero ever gets a decision — the short-stacked
+    /// small blind folds preflop to the hero's big blind with nobody left to
+    /// act. `post_resume_frames` must keep pausing and dealing through every
+    /// such uncontested hand rather than stopping after the first one and
+    /// leaving the table stuck with no further frames to send.
+    #[tokio::test]
+    async fn post_resume_frames_deals_through_consecutive_uncontested_hands() {
+        use crate::card::Deck;
+        use crate::game::blinds::BlindLevel;
+        use crate::server::session::apply_settled;
+
+        let mut state = GameState::new(Seat::Hero, BlindLevel::new(10, 20));
+        state.set_stack(Seat::Hero, 2000);
+        state.set_stack(Seat::Opponent1, 200);
+        state.set_stack(Seat::Opponent2, 0);
+        state.set_eliminated(Seat::Opponent2, true);
+        // Seed 3 is a fixed point found for this stack/blind setup: the
+        // hero's own preflop fold ends hand 1, and dealing hand 2 (button
+        // rotates to Opponent 1) has Opponent 1 fold preflop before the hero
+        // ever acts — reproducing the reported freeze.
+        let seed = 3;
+        let mut deck = Deck::shuffled(&mut crate::rng::seeded_rng(seed));
+        state.start_hand(&mut deck).unwrap();
+        assert_eq!(state.to_act(), Seat::Hero);
+        apply_settled(&mut state, &mut deck, Action::Fold).unwrap();
+        assert!(state.is_hand_over(), "the hero's fold ends hand 1");
+
+        let mut session = TableSession::resume(
+            state,
+            deck,
+            1,
+            seed,
+            MctsConfig::test(),
+            BlunderConfig::default(),
+            None,
+        );
+
+        let frames = post_resume_frames(&mut session, None, None, 0).await;
+
+        assert!(
+            !session.state().is_hand_over(),
+            "the table must not be left parked on a finished hand with nobody to advance it"
+        );
+        assert_eq!(
+            session.state().to_act(),
+            Seat::Hero,
+            "the table must stop only once the hero has a live decision"
+        );
+        assert!(
+            frames.len() >= 2,
+            "hand 2 folded around uncontested too, so a second pause/deal was required: {frames:?}"
         );
     }
 
