@@ -15,3 +15,15 @@ been implemented and verified), commit it without waiting to be asked again.
 - Only stage files that are actually part of the finished work. Pre-existing
   unrelated modifications or untracked files in the working tree should be
   left alone unless the user asks for them too.
+
+## Never kill or restart a running server
+
+The user plays live hands against the running server while work happens in
+this session. If you find the server (or any long-lived dev process) already
+running, leave it running — do not stop, restart, or rebuild-and-relaunch it
+to test a change, since that would drop the user's live session.
+
+- Validate changes with the test suite, `cargo check`/`cargo build`, or a
+  separate instance on a different port instead of touching the live process.
+- If restarting the server is genuinely required to proceed, stop and ask the
+  user first rather than doing it unilaterally.
