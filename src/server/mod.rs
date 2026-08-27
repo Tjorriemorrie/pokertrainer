@@ -29,7 +29,7 @@ use crate::mcts::MctsConfig;
 pub const LIVE_MCTS: MctsConfig = MctsConfig {
     worlds: 16,
     iterations: 96,
-    uct_c: 60.0,
+    uct_c: 90.0,
     max_depth: 5,
     min_duration: Duration::from_secs(5),
     max_duration: Duration::from_secs(20),
