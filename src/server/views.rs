@@ -1,6 +1,6 @@
 use crate::analytics::{SessionSummary, TournamentDetail};
 use crate::card::{Card, Suit};
-use crate::decision::{Analysis, AnalyzedDecision, SearchReport};
+use crate::decision::{Analysis, AnalyzedDecision};
 use crate::error::Result;
 use crate::game::{Action, GameState, Seat, Street};
 use crate::opponent::MergedOpponentSnapshot;
@@ -1175,12 +1175,13 @@ struct RankingRow {
     score: String,
     ev: String,
     risk: RiskBadge,
-    visits: u64,
+    /// Comma-grouped so the busiest candidate is easy to spot at a glance.
+    visits: String,
 }
 
 /// A plain-language stand-in for the raw bust-probability/variance pair:
-/// mirrors [`SearchEffort`]'s badge-plus-tooltip shape so the table reads at
-/// a glance, while the exact numbers stay one hover away for the curious.
+/// a badge plus a tooltip, so the table reads at a glance while the exact
+/// numbers stay one hover away for the curious.
 struct RiskBadge {
     class: &'static str,
     label: &'static str,
@@ -1227,7 +1228,6 @@ struct TacticalOverlayFragment {
     optimal_label: String,
     optimal_ev: String,
     ranking: Vec<RankingRow>,
-    effort: SearchEffort,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1274,10 +1274,9 @@ pub fn tactical_overlay_fragment(
                 score: format!("{:.1}", analysis.score),
                 ev: format!("{:.1}", analysis.ev),
                 risk: risk_badge(analysis),
-                visits: analysis.visits,
+                visits: comma_count(analysis.visits),
             })
             .collect(),
-        effort: search_effort(&decision.search),
     }
     .render()?)
 }
@@ -1328,84 +1327,17 @@ fn ev_diff_sentence(decision: &AnalyzedDecision) -> String {
     }
 }
 
-/// A plain-language summary of the search effort behind a decision: a color
-/// grade (how much work the coach did), a caption in everyday words, and a
-/// confidence note. The raw numbers stay available in the tooltip.
-struct SearchEffort {
-    class: &'static str,
-    label: &'static str,
-    caption: String,
-    note: &'static str,
-    tooltip: String,
-}
-
-fn search_effort(search: &SearchReport) -> SearchEffort {
-    let root_visits = search.worlds * search.iterations;
-    let (class, label, note) = if root_visits >= 10_000 {
-        (
-            "pt-search-deep",
-            "Deep search",
-            "Extra thorough — high confidence.",
-        )
-    } else if root_visits >= 3_000 {
-        (
-            "pt-search-solid",
-            "Solid search",
-            "Thorough enough for standard decisions.",
-        )
-    } else {
-        (
-            "pt-search-quick",
-            "Quick search",
-            "A fast read — fine for straightforward spots.",
-        )
-    };
-
-    let depth = if search.max_tree_depth == search.max_depth {
-        format!("thinking up to {} moves ahead", search.max_tree_depth)
-    } else {
-        format!(
-            "thinking up to {} move{} of a planned {}",
-            search.max_tree_depth,
-            if search.max_tree_depth == 1 { "" } else { "s" },
-            search.max_depth
-        )
-    };
-    let caption = format!(
-        "Played out {} possible opponent hands × {} evaluations each, {depth} — {} simulated actions.",
-        search.worlds,
-        search.iterations,
-        human_count(search.rollout_actions)
-    );
-    let tooltip = format!(
-        "worlds = {} · iterations = {} · tree depth {}/{} · nodes = {} · rollout actions = {}",
-        search.worlds,
-        search.iterations,
-        search.max_tree_depth,
-        search.max_depth,
-        search.nodes,
-        search.rollout_actions
-    );
-
-    SearchEffort {
-        class,
-        label,
-        caption,
-        note,
-        tooltip,
+/// Comma-groups a count for display: `1240 → "1,240"`.
+fn comma_count(value: u64) -> String {
+    let digits = value.to_string();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, digit) in digits.chars().rev().enumerate() {
+        if i != 0 && i % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(digit);
     }
-}
-
-/// Humanizes a big count: `1,240 → 1.2k`, `13,838 → 13.8k`, small counts
-/// unchanged.
-fn human_count(value: u64) -> String {
-    if value >= 1_000_000 {
-        format!("{:.1}M", value as f64 / 1_000_000.0)
-    } else if value >= 1_000 {
-        format!("{:.1}k", value as f64 / 1_000.0)
-    } else {
-        value.to_string()
-    }
+    grouped.chars().rev().collect()
 }
 
 #[cfg(test)]
@@ -1471,7 +1403,7 @@ mod tests {
             "the solver depth badge lives in the action dock, not the header shell"
         );
         assert!(
-            page.contains(r#"/assets/style.css?v=18"#),
+            page.contains(r#"/assets/style.css?v=19"#),
             "the stylesheet link is versioned so browsers drop stale cached CSS"
         );
         assert!(
@@ -2250,22 +2182,12 @@ mod tests {
         assert!(fragment.contains(r#"<tr class="optimal"><td>Fold</td><td>0.0</td>"#));
         assert!(fragment.contains(r#"<tr class="played"><td>Call</td><td>-25.0</td>"#));
         assert!(fragment.contains("<th>Score</th>"));
-        assert!(fragment.contains("<th>Visits</th>"));
+        assert!(fragment.contains(r#"<th class="pt-visits">Visits</th>"#));
+        assert!(
+            fragment.contains(r#"<td class="pt-visits">120</td>"#),
+            "visit counts render right-aligned via the pt-visits class: {fragment}"
+        );
         assert!(fragment.contains(r#"data-overlay-close"#));
-        assert!(
-            fragment.contains("Quick search"),
-            "the friendly search-effort line replaces the raw jargon: {fragment}"
-        );
-        assert!(
-            fragment.contains(
-                "Played out 16 possible opponent hands × 96 evaluations each, thinking up to 3 moves ahead — 4.1k simulated actions."
-            ),
-            "{fragment}"
-        );
-        assert!(
-            fragment.contains(r#"title="worlds = 16 · iterations = 96"#),
-            "the raw numbers stay reachable in the tooltip: {fragment}"
-        );
         assert!(
             fragment.contains(r#"class="pt-feedback-card""#),
             "the breakdown renders in the coach panel beside the table"
@@ -2528,67 +2450,13 @@ mod tests {
     }
 
     #[test]
-    fn human_count_scales_and_keeps_small_counts() {
-        assert_eq!(human_count(0), "0");
-        assert_eq!(human_count(25), "25");
-        assert_eq!(human_count(999), "999");
-        assert_eq!(human_count(1_240), "1.2k");
-        assert_eq!(human_count(9_999), "10.0k");
-        assert_eq!(human_count(10_000), "10.0k");
-        assert_eq!(human_count(13_838), "13.8k");
-        assert_eq!(human_count(120_000), "120.0k");
-        assert_eq!(human_count(1_000_000), "1.0M");
-        assert_eq!(human_count(2_300_000), "2.3M");
-    }
-
-    #[test]
-    fn search_effort_grades_by_root_visits() {
-        assert_eq!(search_effort(&search(32, 62)).class, "pt-search-quick");
-        assert_eq!(search_effort(&search(16, 192)).class, "pt-search-solid");
-        assert_eq!(search_effort(&search(128, 80)).class, "pt-search-deep");
-    }
-
-    /// A baseline report with the uncommon fields fixed; `worlds` and
-    /// `iterations` parameterize the root-visit grade.
-    fn search(worlds: usize, iterations: usize) -> SearchReport {
-        SearchReport {
-            worlds,
-            iterations,
-            max_depth: 3,
-            max_tree_depth: 3,
-            nodes: 100,
-            rollout_actions: 200,
-        }
-    }
-
-    #[test]
-    fn search_effort_mentions_a_fallen_short_depth() {
-        let effort = search_effort(&SearchReport {
-            worlds: 8,
-            iterations: 200,
-            max_depth: 4,
-            max_tree_depth: 1,
-            nodes: 100,
-            rollout_actions: 200,
-        });
-        assert_eq!(
-            effort.caption,
-            "Played out 8 possible opponent hands × 200 evaluations each, thinking up to 1 move of a planned 4 — 200 simulated actions."
-        );
-    }
-
-    #[test]
-    fn search_effort_reached_cap_reads_in_moves() {
-        let effort = search_effort(&SearchReport {
-            worlds: 8,
-            iterations: 200,
-            max_depth: 3,
-            max_tree_depth: 3,
-            nodes: 100,
-            rollout_actions: 12_345,
-        });
-        assert!(effort.caption.contains("thinking up to 3 moves ahead"));
-        assert!(effort.caption.contains("12.3k simulated actions"));
+    fn comma_count_groups_thousands() {
+        assert_eq!(comma_count(0), "0");
+        assert_eq!(comma_count(25), "25");
+        assert_eq!(comma_count(999), "999");
+        assert_eq!(comma_count(1_240), "1,240");
+        assert_eq!(comma_count(13_838), "13,838");
+        assert_eq!(comma_count(2_300_000), "2,300,000");
     }
 
     #[test]

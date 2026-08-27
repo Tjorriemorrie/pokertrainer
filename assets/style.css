@@ -891,6 +891,7 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
 .pt-ranking th { color: #6b7280; font-weight: 600; }
 .pt-ranking tr.optimal { color: #86efac; }
 .pt-ranking tr.played { color: #fca5a5; }
+.pt-ranking .pt-visits { text-align: right; font-variant-numeric: tabular-nums; }
 
 .pt-risk-flag {
   display: inline-block;
@@ -1077,50 +1078,6 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
 .pt-range-fold { background: rgba(59, 63, 82, 0.85); }
 .pt-range-call { background: rgba(134, 239, 172, 0.55); }
 .pt-range-raise { background: rgba(252, 165, 165, 0.85); }
-
-/* The search-effort line: a colored grade chip, a plain-language caption,
-   and a confidence note. Raw numbers live in the title tooltip. */
-.pt-search-meta {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.6rem;
-  background: #0a0f16;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 0.6rem 0.8rem;
-  margin: 0.2rem 0 1rem;
-}
-
-.pt-search-badge {
-  flex: 0 0 auto;
-  font-size: 0.68rem;
-  font-weight: 800;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  border-radius: 999px;
-  padding: 0.2rem 0.7rem;
-}
-
-.pt-search-quick .pt-search-badge { background: #3d4a5c; color: #d7dde6; }
-.pt-search-solid .pt-search-badge { background: #064e3b; color: #86efac; }
-.pt-search-deep .pt-search-badge { background: #78350f; color: #fcd34d; }
-
-.pt-search-body {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.pt-search-caption {
-  font-size: 0.8rem;
-  color: #c7d0da;
-  line-height: 1.45;
-}
-
-.pt-search-note {
-  font-size: 0.72rem;
-  color: #6b7280;
-}
 
 /* -------------------------------------------------------- history page */
 

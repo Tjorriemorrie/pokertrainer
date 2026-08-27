@@ -114,13 +114,9 @@ interface and coaches decision-making with a range-based solver.
   small-sample disclaimer until five hands exist). Each opponent card carries
   their position badges (BTN / SB / BB), a Folded / All-in / Busted status,
   and the stack pill with the same `?`/Alt BB reveal as the table.
-- **Plain-language search effort:** the raw solver telemetry (worlds ×
-  iterations, tree depth, nodes, rollout actions) is replaced by a color
-  grade — **Quick**, **Solid**, or **Deep** search — and one everyday
-  sentence such as *"Played out 64 possible opponent hands × 256 evaluations
-  each, thinking up to 4 moves ahead — 30.2k simulated actions"*. A short
-  confidence note explains whether that is a lot or a little, and the raw
-  numbers remain available in the hover tooltip.
+- **Candidate visit counts:** the ranking table's `Visits` column shows how
+  much search effort backs each candidate, comma-grouped and right-aligned
+  so the busiest line is easy to spot at a glance.
 - **Blunder intervention engine:** monitors the hero's rolling error
   rate (EV loss per action, in big blinds so pot size never skews severity)
   and intercepts the worst blunders with a dynamic, calibrated threshold.
