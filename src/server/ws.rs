@@ -1935,6 +1935,31 @@ mod tests {
         .expect("timed out waiting for a server message")
     }
 
+    /// Like [`next_text`], but returns `None` instead of panicking when the
+    /// connection errors or closes. Tests whose tournament can legitimately
+    /// end mid-exchange (a knockout at the engine's 15bb starting stacks,
+    /// before the hero sees the frame sequence they're driving toward) use
+    /// this to detect that outcome and retry with a fresh table, rather than
+    /// treating a real but out-of-scope conclusion as a failure. The server
+    /// closes the socket once it finalizes a naturally-concluded tournament,
+    /// so this can surface as a clean close or an aborted-connection error
+    /// depending on exactly when the client was reading.
+    async fn next_text_or_closed(
+        stream: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
+    ) -> Option<String> {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match stream.next().await {
+                    Some(Ok(TMessage::Text(text))) => return Some(text.to_string()),
+                    Some(Ok(_)) => continue,
+                    Some(Err(_)) | None => return None,
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for a server message")
+    }
+
     #[tokio::test]
     async fn websocket_end_to_end_flow() {
         let (address, _server) = spawn_server().await;
@@ -2132,64 +2157,89 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        // Free any pre-existing active row so the claim starts fresh.
-        sqlx::query("DELETE FROM active_tournament WHERE single = TRUE")
-            .execute(&pool)
-            .await
-            .unwrap();
 
         let (address, _server) = spawn_server_with(Some(pool.clone()), 1, 0).await;
-        let (mut stream, _) = connect_async(format!("ws://{address}/ws")).await.unwrap();
 
-        let initial = parse(&next_text(&mut stream).await);
-        assert_eq!(initial["type"], "TABLE_STATE_UPDATE");
-        let snapshot = parse(&next_text(&mut stream).await);
-        assert_eq!(
-            snapshot["type"], "CHART_SNAPSHOT",
-            "a pooled connection replays the stored history first"
-        );
+        // Every fresh tournament is dealt from a genuinely random seed, and
+        // at the engine's 15bb starting stacks the played call can
+        // occasionally end the tournament outright (a knockout) before this
+        // exchange completes — the server then finalizes and closes the
+        // socket. That's a real, legitimate outcome, not a bug, just not the
+        // scenario this test is about, so retry with a fresh table instead
+        // of treating it as a failure.
+        let mut retries = 0;
+        let mut stream = loop {
+            // Free any pre-existing active row so the claim starts fresh.
+            sqlx::query("DELETE FROM active_tournament WHERE single = TRUE")
+                .execute(&pool)
+                .await
+                .unwrap();
 
-        stream
-            .send(TMessage::Text(
-                r#"{"type":"ACTION_SUBMIT","action":{"kind":"call"}}"#.into(),
-            ))
-            .await
-            .unwrap();
-        let mut refreshed = false;
-        let mut state_seen = false;
-        loop {
-            let frame = parse(&next_text(&mut stream).await);
-            match frame["type"].as_str().unwrap() {
-                "CHART_SNAPSHOT" => {
-                    refreshed = true;
-                    assert!(
-                        !frame["points"].as_array().unwrap().is_empty(),
-                        "the snapshot covers at least the played action"
-                    );
-                    if state_seen {
-                        break;
+            let (mut stream, _) = connect_async(format!("ws://{address}/ws")).await.unwrap();
+
+            let initial = parse(&next_text(&mut stream).await);
+            assert_eq!(initial["type"], "TABLE_STATE_UPDATE");
+            let snapshot = parse(&next_text(&mut stream).await);
+            assert_eq!(
+                snapshot["type"], "CHART_SNAPSHOT",
+                "a pooled connection replays the stored history first"
+            );
+
+            stream
+                .send(TMessage::Text(
+                    r#"{"type":"ACTION_SUBMIT","action":{"kind":"call"}}"#.into(),
+                ))
+                .await
+                .unwrap();
+            let mut refreshed = false;
+            let mut state_seen = false;
+            let concluded_early = loop {
+                let Some(text) = next_text_or_closed(&mut stream).await else {
+                    break true;
+                };
+                let frame = parse(&text);
+                match frame["type"].as_str().unwrap() {
+                    "CHART_SNAPSHOT" => {
+                        refreshed = true;
+                        assert!(
+                            !frame["points"].as_array().unwrap().is_empty(),
+                            "the snapshot covers at least the played action"
+                        );
+                        if state_seen {
+                            break false;
+                        }
                     }
-                }
-                "TRIGGER_TACTICAL_OVERLAY" => {
-                    stream
-                        .send(TMessage::Text(r#"{"type":"REVIEW_DONE"}"#.into()))
-                        .await
-                        .unwrap();
-                }
-                "TABLE_STATE_UPDATE" => {
-                    state_seen = true;
-                    if refreshed {
-                        break;
+                    "TRIGGER_TACTICAL_OVERLAY" => {
+                        stream
+                            .send(TMessage::Text(r#"{"type":"REVIEW_DONE"}"#.into()))
+                            .await
+                            .unwrap();
                     }
+                    "TABLE_STATE_UPDATE" => {
+                        state_seen = true;
+                        if refreshed {
+                            break false;
+                        }
+                    }
+                    "TOURNAMENT_FINISHED" => break true,
+                    _ => {}
                 }
-                _ => {}
+            };
+            if concluded_early {
+                retries += 1;
+                assert!(
+                    retries < 20,
+                    "20 straight tournaments ended before this exchange completed"
+                );
+                continue;
             }
-        }
-        assert!(
-            refreshed,
-            "the snapshot refreshes once the interval elapses"
-        );
-        assert!(state_seen, "the table state followed the played action");
+            assert!(
+                refreshed,
+                "the snapshot refreshes once the interval elapses"
+            );
+            assert!(state_seen, "the table state followed the played action");
+            break stream;
+        };
 
         stream
             .send(TMessage::Text(r#"{"type":"FINISH_TABLE"}"#.into()))
@@ -2261,69 +2311,90 @@ mod tests {
     async fn reconnect_resumes_the_tournament_where_it_left_off() {
         let _guard = crate::analytics::DB_TEST_LOCK.lock().await;
         let pool = crate::db::test_pool().await;
-        sqlx::query("DELETE FROM active_tournament WHERE single = TRUE")
-            .execute(&pool)
-            .await
-            .unwrap();
 
         let (address, _server) = spawn_server_with(Some(pool.clone()), 100, 0).await;
 
-        // First visit: a fresh table, hand #1, hero to act.
-        let (mut stream, _) = connect_async(format!("ws://{address}/ws")).await.unwrap();
-        let initial = parse(&next_text(&mut stream).await);
-        assert_eq!(initial["type"], "TABLE_STATE_UPDATE");
-        assert!(initial["fragment"].as_str().unwrap().contains("Hand #1"));
+        // Every fresh tournament is dealt from a genuinely random seed
+        // (`rand::random`, not a fixed test seed — see the new-tournament
+        // branch in this file), and at the engine's 15bb starting stacks a
+        // hand can occasionally knock someone out (hero included) before the
+        // hero ever sees a second decision. That's a real, legitimate
+        // outcome, not a bug — just not the scenario this test is about —
+        // so retry with a fresh table rather than asserting it can't happen.
+        let mut retries = 0;
+        let (mut stream, decision, hand_marker) = loop {
+            sqlx::query("DELETE FROM active_tournament WHERE single = TRUE")
+                .execute(&pool)
+                .await
+                .unwrap();
 
-        // Play one action and wait until the hero must decide again.
-        stream
-            .send(TMessage::Text(
-                r#"{"type":"ACTION_SUBMIT","action":{"kind":"call"}}"#.into(),
-            ))
-            .await
-            .unwrap();
-        let decision = loop {
-            let frame = parse(&next_text(&mut stream).await);
-            match frame["type"].as_str().unwrap() {
-                "TRIGGER_TACTICAL_OVERLAY" => {
-                    stream
-                        .send(TMessage::Text(r#"{"type":"REVIEW_DONE"}"#.into()))
-                        .await
-                        .unwrap();
+            // First visit: a fresh table, hand #1, hero to act.
+            let (mut stream, _) = connect_async(format!("ws://{address}/ws")).await.unwrap();
+            let initial = parse(&next_text(&mut stream).await);
+            assert_eq!(initial["type"], "TABLE_STATE_UPDATE");
+            assert!(initial["fragment"].as_str().unwrap().contains("Hand #1"));
+
+            // Play one action and wait until the hero must decide again.
+            stream
+                .send(TMessage::Text(
+                    r#"{"type":"ACTION_SUBMIT","action":{"kind":"call"}}"#.into(),
+                ))
+                .await
+                .unwrap();
+            let decision = loop {
+                let frame = parse(&next_text(&mut stream).await);
+                match frame["type"].as_str().unwrap() {
+                    "TRIGGER_TACTICAL_OVERLAY" => {
+                        stream
+                            .send(TMessage::Text(r#"{"type":"REVIEW_DONE"}"#.into()))
+                            .await
+                            .unwrap();
+                    }
+                    "TABLE_STATE_UPDATE" => {
+                        let fragment = frame["fragment"].as_str().unwrap();
+                        // Hand #1 can walk to showdown on checks alone after
+                        // the hero's one call, with no further hero decision
+                        // — the wait then spills into hand #2 (or beyond)
+                        // before a decision block appears again. Any
+                        // non-decision frame just means it still isn't the
+                        // hero's turn; the surrounding `next_text` timeout is
+                        // the backstop against a genuine hang.
+                        let Some(datadecision) = fragment
+                            .split(r#"class="pt-action-block" data-decision=""#)
+                            .nth(1)
+                            .and_then(|rest| rest.split('"').next())
+                        else {
+                            continue;
+                        };
+                        break Some(datadecision.to_string());
+                    }
+                    "TOURNAMENT_FINISHED" => break None,
+                    "CHART_TICK" | "SEARCH_STATUS" | "CHART_SNAPSHOT" => {}
+                    other => panic!("unexpected frame type {other}"),
                 }
-                "TABLE_STATE_UPDATE" => {
-                    let fragment = frame["fragment"].as_str().unwrap();
-                    // Hand #1 can walk to showdown on checks alone after the
-                    // hero's one call, with no further hero decision — the
-                    // wait then spills into hand #2 (or beyond) before a
-                    // decision block appears again. Any non-decision frame
-                    // just means it still isn't the hero's turn; the
-                    // surrounding `next_text` timeout is the backstop against
-                    // a genuine hang.
-                    let Some(datadecision) = fragment
-                        .split(r#"class="pt-action-block" data-decision=""#)
-                        .nth(1)
-                        .and_then(|rest| rest.split('"').next())
-                    else {
-                        continue;
-                    };
-                    break datadecision.to_string();
-                }
-                "CHART_TICK" | "SEARCH_STATUS" | "CHART_SNAPSHOT" => {}
-                other => panic!("unexpected frame type {other}"),
-            }
+            };
+            let Some(decision) = decision else {
+                retries += 1;
+                assert!(
+                    retries < 20,
+                    "20 straight tournaments ended before a second hero decision"
+                );
+                continue;
+            };
+            // The hand the captured decision belongs to — usually still hand
+            // #1, but a walked hand (every street checks through after the
+            // hero's call) can leave zero further hero decisions in hand #1,
+            // so the first decision found here is already hand #2's. Either
+            // way the resume below must land on this same hand and token.
+            let hand_marker = format!(
+                "Hand #{}",
+                decision
+                    .strip_prefix('h')
+                    .and_then(|rest| rest.split('-').next())
+                    .expect("decision token starts with the hand number")
+            );
+            break (stream, decision, hand_marker);
         };
-        // The hand the captured decision belongs to — usually still hand #1,
-        // but a walked hand (every street checks through after the hero's
-        // call) can leave zero further hero decisions in hand #1, so the
-        // first decision found here is already hand #2's. Either way the
-        // resume below must land on this same hand and token.
-        let hand_marker = format!(
-            "Hand #{}",
-            decision
-                .strip_prefix('h')
-                .and_then(|rest| rest.split('-').next())
-                .expect("decision token starts with the hand number")
-        );
         stream.close(None).await.unwrap();
 
         // Wait for the server to release the table, then reconnect.
