@@ -300,13 +300,25 @@ pub fn aggressor_context(node: Node, was_preflop_aggressor: bool, facing_cbet: b
 
 // -------------------------------------------------------------- the window
 
-/// One opponent decision in the combined window: which hand class it was,
-/// the node it occurred at, the actor's stack bucket and position, the
-/// coarse action taken, and the two booleans that let a flop decision be
-/// read as a c-bet or fold-to-c-bet opportunity.
+/// One opponent decision in the combined window: the node it occurred at,
+/// the actor's stack bucket and position, the coarse action taken, the two
+/// booleans that let a flop decision be read as a c-bet or fold-to-c-bet
+/// opportunity, and — when known — which hand class it was.
+///
+/// `hand` is `None` for a real imported hand that folded (or otherwise
+/// never reached showdown): `gg_hands` only reveals an opponent's cards at
+/// showdown, so a fold can never carry a known hand class, but the fact
+/// that a fold *happened* is still real signal for [`build_action_frequency_model`]
+/// and [`build_historic_read`] (neither looks at `hand` at all) — only the
+/// hand-class consumers ([`build_range_model`],
+/// [`build_preflop_raise_range_model`], [`build_starting_hand_table`]) skip
+/// a `None` entry. Discarding the whole decision whenever the hand was
+/// unknown (as this used to) silently drops every real fold from the
+/// window, leaving the fold-to-bet/action-frequency read of the field
+/// artificially aggressive no matter how much real history is imported.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HistoricAction {
-    pub hand: Hand,
+    pub hand: Option<Hand>,
     pub node: Node,
     pub stack_bucket: StackBucket,
     pub position: Position,
@@ -326,7 +338,7 @@ fn parse_hole_cards(text: &str) -> Option<Hand> {
 impl HistoricAction {
     fn from_local(row: LocalOpponentAction) -> Option<HistoricAction> {
         Some(HistoricAction {
-            hand: parse_hole_cards(&row.hole_cards)?,
+            hand: Some(parse_hole_cards(&row.hole_cards)?),
             node: Node::parse(&row.node)?,
             stack_bucket: StackBucket::from_bb(row.stack_bucket as u32),
             position: Position::parse(&row.position)?,
@@ -338,7 +350,7 @@ impl HistoricAction {
 
     fn from_local_hero(row: crate::db::LocalHeroAction) -> Option<HistoricAction> {
         Some(HistoricAction {
-            hand: parse_hole_cards(&row.hole_cards)?,
+            hand: Some(parse_hole_cards(&row.hole_cards)?),
             node: Node::parse(&row.node)?,
             stack_bucket: StackBucket::from_bb(row.stack_bucket as u32),
             position: Position::parse(&row.position)?,
@@ -349,12 +361,19 @@ impl HistoricAction {
     }
 }
 
-/// Walks the most recent imported hands into [`HistoricAction`]s, keeping
-/// only decisions where the opponent's cards were revealed at showdown —
-/// most decisions have no reveal (folds never show) and are skipped here,
-/// which is expected: [`load_action_window`] always adds local play (which
-/// has ground-truth cards) on top. Also returns how many hands were looked
-/// at, for the window's "how many hands is this built from" count.
+/// Walks the most recent imported hands into [`HistoricAction`]s. The
+/// opponent's cards are only known when the hand reached showdown (folds
+/// never reveal), but the node/category/context is real signal regardless —
+/// a fold with an unknown hand still keeps the decision, just with
+/// `hand: None`, so [`build_action_frequency_model`]/[`build_historic_read`]
+/// (neither needs the hand class) see every decision, not only the
+/// showdown-biased subset that used to survive here. Discarding an
+/// unknown-hand decision entirely made the field's *fold rate itself*
+/// artificially near zero — the exact "opponent almost never folds" signal
+/// that made hero's reraise/call look overly profitable, and that no volume
+/// of imported hands could ever fix, since a fold's cards are structurally
+/// never in the import. Also returns how many hands were looked at, for the
+/// window's "how many hands is this built from" count.
 async fn load_gg_actions(pool: &PgPool, limit: i64) -> Result<(Vec<HistoricAction>, usize)> {
     let hands = crate::opponent_analysis::load_recent_hands(pool, limit).await?;
     let mut actions = Vec::new();
@@ -368,11 +387,8 @@ async fn load_gg_actions(pool: &PgPool, limit: i64) -> Result<(Vec<HistoricActio
             continue;
         };
         for point in walked.opponent {
-            let Some(hand_class) = point.opponent_hand else {
-                continue;
-            };
             actions.push(HistoricAction {
-                hand: hand_class,
+                hand: point.opponent_hand,
                 node: decision_node(&point.state),
                 stack_bucket: decision_stack_bucket(&point.state),
                 position: decision_position(&point.state),
@@ -428,7 +444,7 @@ async fn load_hero_gg_actions(pool: &PgPool, limit: i64) -> Result<(Vec<Historic
         let hand_class = Hand::from_cards(hero_cards[0], hero_cards[1]);
         for point in walked.hero {
             actions.push(HistoricAction {
-                hand: hand_class,
+                hand: Some(hand_class),
                 node: decision_node(&point.state),
                 stack_bucket: decision_stack_bucket(&point.state),
                 position: decision_position(&point.state),
@@ -551,10 +567,11 @@ fn smoothed_range(hand_counts: &[u32; HAND_COUNT]) -> StoredRange {
 pub fn build_range_model(actions: &[HistoricAction]) -> HashMap<(Node, StackBucket), StoredRange> {
     let mut counts: HashMap<(Node, StackBucket), [u32; HAND_COUNT]> = HashMap::new();
     for action in actions {
+        let Some(hand) = action.hand else { continue };
         let entry = counts
             .entry((action.node, action.stack_bucket))
             .or_insert([0u32; HAND_COUNT]);
-        entry[action.hand.index()] += 1;
+        entry[hand.index()] += 1;
     }
     counts
         .into_iter()
@@ -593,8 +610,9 @@ pub fn build_preflop_raise_range_model(
         {
             continue;
         }
+        let Some(hand) = action.hand else { continue };
         let entry = counts.entry(action.stack_bucket).or_insert([0u32; HAND_COUNT]);
-        entry[action.hand.index()] += 1;
+        entry[hand.index()] += 1;
     }
     counts
         .into_iter()
@@ -892,12 +910,13 @@ pub fn build_starting_hand_table(actions: &[HistoricAction]) -> Vec<HandRow> {
         if !action.node.is_preflop() {
             continue;
         }
+        let Some(hand) = action.hand else { continue };
         let slot = match action.category {
             ActionCategory::Fold => 0,
             ActionCategory::CallCheck => 1,
             ActionCategory::BetRaise | ActionCategory::Shove => 2,
         };
-        counts[action.hand.index()][slot] += 1;
+        counts[hand.index()][slot] += 1;
     }
     all_hands()
         .map(|hand| {
@@ -1321,6 +1340,21 @@ Seat 3: 14c11a2a (big blind) folded on the River";
         action_with_context(hand, node, bucket, Position::Third, category, false, false)
     }
 
+    /// A decision with no known hand class — a real imported fold, whose
+    /// cards are structurally never revealed. Still real signal for
+    /// [`build_action_frequency_model`]/[`build_historic_read`].
+    fn action_without_hand(node: Node, bucket: StackBucket, category: ActionCategory) -> HistoricAction {
+        HistoricAction {
+            hand: None,
+            node,
+            stack_bucket: bucket,
+            position: Position::Third,
+            category,
+            was_preflop_aggressor: false,
+            facing_cbet: false,
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn action_with_context(
         hand: RangeHand,
@@ -1332,7 +1366,7 @@ Seat 3: 14c11a2a (big blind) folded on the River";
         facing_cbet: bool,
     ) -> HistoricAction {
         HistoricAction {
-            hand,
+            hand: Some(hand),
             node,
             stack_bucket: bucket,
             position,
@@ -1369,7 +1403,7 @@ Seat 3: 14c11a2a (big blind) folded on the River";
             facing_cbet: true,
         };
         let historic = HistoricAction::from_local(row).expect("well-formed row parses");
-        assert_eq!(historic.hand, hand(Rank::Queen, Rank::Queen, false));
+        assert_eq!(historic.hand, Some(hand(Rank::Queen, Rank::Queen, false)));
         assert_eq!(historic.node, Node::FlopVsBet);
         assert_eq!(historic.stack_bucket, StackBucket::Bb15);
         assert_eq!(historic.position, Position::Button);
@@ -1391,7 +1425,7 @@ Seat 3: 14c11a2a (big blind) folded on the River";
             facing_cbet: true,
         };
         let historic = HistoricAction::from_local_hero(row).expect("well-formed row parses");
-        assert_eq!(historic.hand, hand(Rank::Queen, Rank::Queen, false));
+        assert_eq!(historic.hand, Some(hand(Rank::Queen, Rank::Queen, false)));
         assert_eq!(historic.node, Node::FlopVsBet);
         assert_eq!(historic.stack_bucket, StackBucket::Bb15);
         assert_eq!(historic.position, Position::Button);
@@ -1502,6 +1536,21 @@ Seat 3: 14c11a2a (big blind) folded on the River";
     #[test]
     fn build_range_model_is_empty_for_an_empty_window() {
         assert!(build_range_model(&[]).is_empty());
+    }
+
+    #[test]
+    fn build_range_model_skips_actions_with_no_known_hand() {
+        let aa = hand(Rank::Ace, Rank::Ace, false);
+        let actions = vec![
+            action(aa, Node::PfOpen, StackBucket::Bb25, ActionCategory::BetRaise),
+            action_without_hand(Node::PfOpen, StackBucket::Bb25, ActionCategory::Fold),
+        ];
+        let model = build_range_model(&actions);
+        let range = &model[&(Node::PfOpen, StackBucket::Bb25)];
+        assert_eq!(
+            range.sample_count, 1,
+            "the unknown-hand fold contributes no hand-class sample"
+        );
     }
 
     /// Regression for the "raise 4-8o into a real raise" coaching complaint:
@@ -1704,6 +1753,33 @@ Seat 3: 14c11a2a (big blind) folded on the River";
         assert!(build_action_frequency_model(&[]).is_empty());
     }
 
+    /// Regression for the "coach thinks the field never folds" complaint:
+    /// `gg_hands` only reveals cards at showdown, so a real fold's hand is
+    /// structurally always `None` — but the fold itself is real signal for
+    /// the action-frequency mix. Discarding a decision just because its
+    /// hand is unknown (as [`build_range_model`]'s consumers must, but this
+    /// model never did) made the field look like it almost never folds, no
+    /// matter how much real history was imported.
+    #[test]
+    fn build_action_frequency_model_counts_decisions_with_no_known_hand() {
+        let actions = vec![
+            action_without_hand(Node::PfOpen, StackBucket::Bb25, ActionCategory::Fold),
+            action_without_hand(Node::PfOpen, StackBucket::Bb25, ActionCategory::Fold),
+            action(
+                hand(Rank::Ace, Rank::Ace, false),
+                Node::PfOpen,
+                StackBucket::Bb25,
+                ActionCategory::BetRaise,
+            ),
+        ];
+        let model = build_action_frequency_model(&actions);
+        let ctx = aggressor_context(Node::PfOpen, false, false);
+        let entry = &model[&(Node::PfOpen, StackBucket::Bb25, Position::Third, ctx)];
+        assert_eq!(entry.sample_count, 3, "both unknown-hand folds still count");
+        assert_eq!(entry.fold, 2.0 / 3.0);
+        assert_eq!(entry.raise, 1.0 / 3.0);
+    }
+
     // ------------------------------------------------------- hand table
 
     #[test]
@@ -1847,6 +1923,7 @@ Seat 3: 14c11a2a (big blind) folded on the River";
     async fn test_pool() -> sqlx::PgPool {
         crate::db::test_pool().await
     }
+
 
     #[tokio::test]
     async fn local_opponent_actions_round_trip_and_fill_the_shortfall() {
