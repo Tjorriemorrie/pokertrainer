@@ -15,19 +15,15 @@ fn opponents_can_still_respond(state: &GameState, acting: Seat) -> bool {
     })
 }
 
-/// The size buckets offered as raises/bets on each street. Postflop keeps
-/// only 1/2-pot and pot (plus min and overbet) — 1/3-pot and 3/4-pot are
-/// deliberately left out: they add granularity the hero isn't trying to
-/// learn, just more near-identical rows to compare. (`AllIn` is added
-/// separately so all-in semantics stay exact.)
+/// The size buckets offered as raises/bets on each street. Preflop opens
+/// keep only the 2bb min-raise and 4bb — no 3bb, no pot: two clearly
+/// distinct sizes the hero can learn instead of a spread of near-identical
+/// ones. Postflop keeps only 1/2-pot and pot (plus min and overbet) —
+/// 1/3-pot and 3/4-pot are deliberately left out for the same reason.
+/// (`AllIn` is added separately so all-in semantics stay exact.)
 fn size_buckets(street: Street) -> &'static [BetSize] {
     match street {
-        Street::Preflop => &[
-            BetSize::Min,
-            BetSize::ThreeBb,
-            BetSize::FourBb,
-            BetSize::Pot,
-        ],
+        Street::Preflop => &[BetSize::Min, BetSize::FourBb],
         _ => &[BetSize::Min, BetSize::HalfPot, BetSize::Pot, BetSize::Overbet],
     }
 }
@@ -206,7 +202,7 @@ mod tests {
     }
 
     #[test]
-    fn preflop_open_offers_fold_call_all_buckets_and_all_in() {
+    fn preflop_open_offers_fold_call_min_and_four_bb_and_all_in() {
         let state = hero_open_state();
         let cands = candidates(&state);
         let actions = actions_of(&state);
@@ -214,10 +210,13 @@ mod tests {
         assert!(actions.contains(&Action::Call));
         assert!(!actions.contains(&Action::Check));
         assert!(actions.contains(&Action::Raise(40)));
-        assert!(actions.contains(&Action::Raise(60)));
-        assert!(actions.contains(&Action::Raise(70)));
         assert!(actions.contains(&Action::Raise(80)));
         assert!(actions.contains(&Action::AllIn));
+        assert_eq!(
+            cands.len(),
+            5,
+            "preflop opens should only offer fold/call/min/4bb/all-in, got {cands:?}"
+        );
         for (action, _) in &cands {
             assert!(
                 state.legal_actions().allows(*action),

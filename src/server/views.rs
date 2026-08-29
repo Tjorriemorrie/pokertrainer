@@ -973,12 +973,7 @@ impl ActionPanelFragment {
                     BetSize::Pot,
                 ]
             } else {
-                &[
-                    BetSize::Min,
-                    BetSize::ThreeBb,
-                    BetSize::FourBb,
-                    BetSize::Pot,
-                ]
+                &[BetSize::Min, BetSize::FourBb]
             };
             let mut chips: Vec<SizeChip> = Vec::new();
             for bucket in buckets {
@@ -1977,15 +1972,19 @@ mod tests {
         state.apply_action(Action::Call).unwrap();
         let fragment = table_fragment(&state, 1, 0, &[], &[]).unwrap();
         assert!(
-            fragment.contains(">2BB<") && fragment.contains(">3BB<") && fragment.contains(">4BB<"),
+            fragment.contains(">2BB<") && fragment.contains(">4BB<"),
             "preflop open sizing chips are labeled in big blinds, GGPoker-style: {fragment}"
         );
         assert!(
-            fragment.contains(">Pot<"),
-            "the pot-sized preflop chip reads \"Pot\", not a BB multiple: {fragment}"
+            !fragment.contains(">3BB<") && !fragment.contains(r#"data-bucket="3BB""#),
+            "preflop opens only offer 2bb and 4bb, no 3bb: {fragment}"
         );
         assert!(
-            fragment.contains(r#"data-bucket="3BB""#),
+            !fragment.contains(">Pot<"),
+            "preflop opens only offer 2bb and 4bb, no pot-sized chip: {fragment}"
+        );
+        assert!(
+            fragment.contains(r#"data-bucket="MIN""#),
             "bucket identity stays on the wire protocol: {fragment}"
         );
         assert!(fragment.contains(r#"data-kind="raise""#));

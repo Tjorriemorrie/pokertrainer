@@ -423,6 +423,7 @@ mod tests {
     use crate::card::Deck;
     use crate::game::Street;
     use crate::game::blinds::BlindLevel;
+    use crate::range::BetSize;
     use crate::range::hands::{HAND_COUNT, Range};
     use crate::rng::seeded_rng;
 
@@ -466,9 +467,17 @@ mod tests {
     /// whole path stays inside one betting round.
     fn raised_decision() -> (GameState, PursuedPath) {
         let mut state = preflop_decision();
-        let raise = Action::Raise(60);
+        let raise = candidates(&state)
+            .into_iter()
+            .find_map(|(action, bucket)| {
+                matches!(bucket, Some(BetSize::FourBb)).then_some(action)
+            })
+            .expect("preflop open offers a 4bb raise");
         state.apply_action(raise).unwrap();
-        let re_raise = Action::Raise(100);
+        let re_raise = candidates(&state)
+            .into_iter()
+            .find_map(|(action, _)| matches!(action, Action::Raise(_)).then_some(action))
+            .expect("facing a raise offers a re-raise");
         state.apply_action(re_raise).unwrap();
         state.apply_action(Action::Fold).unwrap();
         assert_eq!(
