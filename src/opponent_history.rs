@@ -473,10 +473,40 @@ pub async fn load_hero_action_window(
 /// and easing off as real observations accumulate.
 const RANGE_SMOOTHING: f32 = 1.0;
 
+/// The free-text `contextual_ranges.node` key for
+/// [`build_preflop_raise_range_model`] — not a member of [`Node`] (that enum
+/// classifies which decision *node* a player is at) but persisted through
+/// the same table/[`RangeResolver`]/[`SequenceNode`] machinery, which keys
+/// purely on strings.
+const PF_RAISER_NODE_KEY: &str = "PF_RAISER";
+
+/// Laplace-smooths a per-hand-class tally into a normalized 169-hand range
+/// plus its raw sample count — the shared math behind
+/// [`build_range_model`] and [`build_preflop_raise_range_model`].
+fn smoothed_range(hand_counts: &[u32; HAND_COUNT]) -> StoredRange {
+    let total: u32 = hand_counts.iter().sum();
+    let denom = total as f32 + RANGE_SMOOTHING * HAND_COUNT as f32;
+    let mut weights: Range = [0.0f32; HAND_COUNT];
+    for (weight, count) in weights.iter_mut().zip(hand_counts.iter()) {
+        *weight = (*count as f32 + RANGE_SMOOTHING) / denom;
+    }
+    StoredRange {
+        weights,
+        sample_count: total,
+    }
+}
+
 /// Tallies the window into a per-node, per-stack-bucket 169-hand range: the
 /// share of times each hand class showed up acting at that spot, Laplace-
 /// smoothed (see [`RANGE_SMOOTHING`]) so a thin sample never rules a hand
 /// class out entirely. Nodes with no samples are simply absent from the map.
+///
+/// This pools every action taken at the node together (fold, call, and
+/// raise alike), so it approximates "whoever hasn't decided yet at this
+/// spot" reasonably well — it is not the range of a seat that has *already*
+/// acted here. A seat that has voluntarily raised or shoved preflop this
+/// hand is self-selected into a much narrower range than this pooled prior
+/// shows; see [`build_preflop_raise_range_model`] for that case.
 pub fn build_range_model(actions: &[HistoricAction]) -> HashMap<(Node, StackBucket), StoredRange> {
     let mut counts: HashMap<(Node, StackBucket), [u32; HAND_COUNT]> = HashMap::new();
     for action in actions {
@@ -487,21 +517,7 @@ pub fn build_range_model(actions: &[HistoricAction]) -> HashMap<(Node, StackBuck
     }
     counts
         .into_iter()
-        .map(|(key, hand_counts)| {
-            let total: u32 = hand_counts.iter().sum();
-            let denom = total as f32 + RANGE_SMOOTHING * HAND_COUNT as f32;
-            let mut weights: Range = [0.0f32; HAND_COUNT];
-            for (weight, count) in weights.iter_mut().zip(hand_counts.iter()) {
-                *weight = (*count as f32 + RANGE_SMOOTHING) / denom;
-            }
-            (
-                key,
-                StoredRange {
-                    weights,
-                    sample_count: total,
-                },
-            )
-        })
+        .map(|(key, hand_counts)| (key, smoothed_range(&hand_counts)))
         .collect()
 }
 
@@ -517,6 +533,49 @@ pub async fn save_range_model(
     Ok(())
 }
 
+/// Tallies the window's preflop raises and shoves (opens and reraises
+/// alike) into a per-stack-bucket range, Laplace-smoothed like
+/// [`build_range_model`]: what hands the field actually shows when it
+/// *voluntarily raises* preflop, rather than [`build_range_model`]'s
+/// `PfOpen`/`PfVsRaise` ranges, which also mix in the folds and calls seen
+/// at those same nodes and so understate how much a real raise narrows the
+/// range. Fed into the solver as a seat's range specifically when that seat
+/// has already raised or shoved preflop this hand — see
+/// [`OpponentRangeModel::resolve_preflop_raiser`].
+pub fn build_preflop_raise_range_model(
+    actions: &[HistoricAction],
+) -> HashMap<StackBucket, StoredRange> {
+    let mut counts: HashMap<StackBucket, [u32; HAND_COUNT]> = HashMap::new();
+    for action in actions {
+        if !action.node.is_preflop()
+            || !matches!(action.category, ActionCategory::BetRaise | ActionCategory::Shove)
+        {
+            continue;
+        }
+        let entry = counts.entry(action.stack_bucket).or_insert([0u32; HAND_COUNT]);
+        entry[action.hand.index()] += 1;
+    }
+    counts
+        .into_iter()
+        .map(|(bucket, hand_counts)| (bucket, smoothed_range(&hand_counts)))
+        .collect()
+}
+
+/// Persists the preflop-raiser range model under the single pooled opponent
+/// profile, reusing `contextual_ranges` with the free-text
+/// [`PF_RAISER_NODE_KEY`] in place of a real [`Node`] key.
+pub async fn save_preflop_raise_range_model(
+    pool: &PgPool,
+    profile_id: i32,
+    model: &HashMap<StackBucket, StoredRange>,
+) -> Result<()> {
+    for (bucket, range) in model {
+        db::upsert_contextual_range(pool, profile_id, PF_RAISER_NODE_KEY, bucket.as_i16(), range)
+            .await?;
+    }
+    Ok(())
+}
+
 /// The resolved per-node ranges a session loads once at start, used as the
 /// solver's prior for the opponent's likely holdings instead of assuming a
 /// uniform range. Nodes below [`crate::range::MIN_SAMPLE_HANDS`] are simply
@@ -525,6 +584,7 @@ pub async fn save_range_model(
 #[derive(Clone, Debug, Default)]
 pub struct OpponentRangeModel {
     ranges: HashMap<(Node, StackBucket), Range>,
+    preflop_raiser_ranges: HashMap<StackBucket, Range>,
 }
 
 impl OpponentRangeModel {
@@ -532,11 +592,38 @@ impl OpponentRangeModel {
         self.ranges.get(&(node, bucket)).copied()
     }
 
+    /// The range a seat shows when it has voluntarily raised or shoved
+    /// preflop this hand — see [`build_preflop_raise_range_model`]. Callers
+    /// should prefer this over [`Self::resolve`] for a seat that has
+    /// already raised, since the pooled per-node range mixes in the folds
+    /// and calls seen at the same decision point.
+    pub fn resolve_preflop_raiser(&self, bucket: StackBucket) -> Option<Range> {
+        self.preflop_raiser_ranges.get(&bucket).copied()
+    }
+
     /// Builds a model directly from resolved entries, bypassing the DB —
     /// for tests that need `resolve` to return a specific range.
     #[cfg(test)]
     pub(crate) fn from_entries(entries: HashMap<(Node, StackBucket), Range>) -> Self {
-        Self { ranges: entries }
+        Self {
+            ranges: entries,
+            preflop_raiser_ranges: HashMap::new(),
+        }
+    }
+
+    /// Builds a model directly from resolved entries plus resolved
+    /// raiser-range entries, bypassing the DB — for tests that need both
+    /// `resolve` and [`Self::resolve_preflop_raiser`] to return distinct
+    /// ranges at once (so a test can tell which one a caller actually used).
+    #[cfg(test)]
+    pub(crate) fn from_entries_with_raiser(
+        entries: HashMap<(Node, StackBucket), Range>,
+        raiser_entries: HashMap<StackBucket, Range>,
+    ) -> Self {
+        Self {
+            ranges: entries,
+            preflop_raiser_ranges: raiser_entries,
+        }
     }
 }
 
@@ -555,7 +642,18 @@ pub async fn load_range_model(pool: &PgPool, profile_id: i32) -> Result<Opponent
             }
         }
     }
-    Ok(OpponentRangeModel { ranges })
+    let mut preflop_raiser_ranges = HashMap::new();
+    for bucket in StackBucket::ALL {
+        let sequence_node = SequenceNode::new(profile_id, bucket, PF_RAISER_NODE_KEY);
+        let resolved = resolver.resolve(&store, &sequence_node).await?;
+        if !resolved.used_population {
+            preflop_raiser_ranges.insert(bucket, resolved.weights);
+        }
+    }
+    Ok(OpponentRangeModel {
+        ranges,
+        preflop_raiser_ranges,
+    })
 }
 
 // ------------------------------------------------------- frequency model
@@ -921,6 +1019,8 @@ pub async fn refresh(pool: &PgPool) -> Result<HistorySummary> {
     let profile_id = db::upsert_opponent_profile(pool, POOLED_PROFILE_NAME, "FIELD").await?;
     let model = build_range_model(&actions);
     save_range_model(pool, profile_id, &model).await?;
+    let raise_model = build_preflop_raise_range_model(&actions);
+    save_preflop_raise_range_model(pool, profile_id, &raise_model).await?;
     let frequency_model = build_action_frequency_model(&actions);
     save_action_frequency_model(pool, profile_id, &frequency_model).await?;
     Ok(HistorySummary {
@@ -1386,6 +1486,56 @@ Seat 3: 14c11a2a (big blind) folded on the River";
                 premium.label()
             );
         }
+    }
+
+    // ---------------------------------------------------- raiser range
+
+    /// The regression above ([`build_range_model_never_zeroes_out_an_unobserved_premium_hand`])
+    /// keeps the pooled `PfVsRaise` range from hard-zeroing premiums, but
+    /// that range still pools *every* action taken facing a raise — folds
+    /// and calls included — so it stays far wider than what a seat that
+    /// actually raised would show. `build_preflop_raise_range_model` is the
+    /// fix for that seat specifically: it only tallies hands from raises
+    /// and shoves, so a raiser's assumed range comes out tight, not pooled.
+    #[test]
+    fn build_preflop_raise_range_model_only_tallies_raises_and_shoves() {
+        let aa = hand(Rank::Ace, Rank::Ace, false);
+        let seven_deuce = hand(Rank::Seven, Rank::Two, false);
+        let actions = vec![
+            action(aa, Node::PfOpen, StackBucket::Bb25, ActionCategory::BetRaise),
+            action(aa, Node::PfVsRaise, StackBucket::Bb25, ActionCategory::Shove),
+            // A fold and a call at the very same nodes must not count —
+            // only the seat's own raise/shove decisions narrow its range.
+            action(
+                seven_deuce,
+                Node::PfOpen,
+                StackBucket::Bb25,
+                ActionCategory::Fold,
+            ),
+            action(
+                seven_deuce,
+                Node::PfVsRaise,
+                StackBucket::Bb25,
+                ActionCategory::CallCheck,
+            ),
+            // Postflop raises never count either — this is a preflop-only
+            // range.
+            action(
+                seven_deuce,
+                Node::FlopLead,
+                StackBucket::Bb25,
+                ActionCategory::BetRaise,
+            ),
+        ];
+        let model = build_preflop_raise_range_model(&actions);
+        let range = &model[&StackBucket::Bb25];
+        assert_eq!(range.sample_count, 2, "only the two raise/shove actions count");
+        assert!(range.weights[aa.index()] > range.weights[seven_deuce.index()]);
+    }
+
+    #[test]
+    fn build_preflop_raise_range_model_is_empty_for_an_empty_window() {
+        assert!(build_preflop_raise_range_model(&[]).is_empty());
     }
 
     // ------------------------------------------------------ frequency model

@@ -62,7 +62,40 @@ const SKILL_TAU_CHIPS: f64 = 20.0;
 /// for the acting seat so far (see [`crate::opponent_history::HistoricAction`]
 /// for what they mean) — the caller tracks these across the hand's actions,
 /// since a single [`GameState`] doesn't retain who raised preflop once the
-/// action reaches the flop.
+/// action reaches the flop. `preflop_aggressor` is the same running tracker
+/// in raw (unrotated) seat terms — who, if anyone, has raised or shoved
+/// preflop this hand — used to give that seat's own range a raiser's prior
+/// instead of the pooled per-node one; see
+/// [`crate::opponent_history::OpponentRangeModel::resolve_preflop_raiser`].
+/// Builds the `[Option<Range>; NUM_PLAYERS]` opponent-range prior
+/// [`mcts::solve_for_seat`] samples from, in the rotated frame where `seat`
+/// occupies the hero role: both other seats get the pooled per-node prior,
+/// then — if one of them has voluntarily raised or shoved preflop this hand
+/// — that seat's slot is overwritten with the narrower raiser-specific
+/// prior. `preflop_aggressor` is in raw (unrotated) seat terms, same as
+/// `state`/`seat`; [`Seat::rotated`] maps it into `rotated`'s frame.
+fn ranges_for_solve(
+    rotated: &GameState,
+    seat: Seat,
+    opponent_ranges: &OpponentRangeModel,
+    preflop_aggressor: Option<Seat>,
+) -> [Option<Range>; NUM_PLAYERS] {
+    let mut ranges: [Option<Range>; NUM_PLAYERS] = [None; NUM_PLAYERS];
+    let node = crate::opponent_history::decision_node(rotated);
+    let bucket = crate::opponent_history::decision_stack_bucket(rotated);
+    if let Some(prior) = opponent_ranges.resolve(node, bucket) {
+        ranges[Seat::Opponent1.index()] = Some(prior);
+        ranges[Seat::Opponent2.index()] = Some(prior);
+    }
+    if rotated.street() == Street::Preflop
+        && let Some(raiser) = preflop_aggressor.map(|s| s.rotated(seat))
+        && let Some(raiser_range) = opponent_ranges.resolve_preflop_raiser(bucket)
+    {
+        ranges[raiser.index()] = Some(raiser_range);
+    }
+    ranges
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn template_action<R: Rng + ?Sized>(
     rng: &mut R,
@@ -74,6 +107,7 @@ pub fn template_action<R: Rng + ?Sized>(
     opponent_frequencies: &ActionFrequencyModel,
     was_preflop_aggressor: bool,
     facing_cbet: bool,
+    preflop_aggressor: Option<Seat>,
 ) -> Action {
     let rotated = state.rotated(seat);
     let skill = template.skill.clamp(0.0, 1.0);
@@ -81,13 +115,7 @@ pub fn template_action<R: Rng + ?Sized>(
     let mut pins: [Option<[Card; 2]>; NUM_PLAYERS] = [None; NUM_PLAYERS];
     pins[Seat::Hero.index()] = Some(rotated.hero_cards());
 
-    let mut ranges: [Option<Range>; NUM_PLAYERS] = [None; NUM_PLAYERS];
-    let node = crate::opponent_history::decision_node(&rotated);
-    let bucket = crate::opponent_history::decision_stack_bucket(&rotated);
-    if let Some(prior) = opponent_ranges.resolve(node, bucket) {
-        ranges[Seat::Opponent1.index()] = Some(prior);
-        ranges[Seat::Opponent2.index()] = Some(prior);
-    }
+    let ranges = ranges_for_solve(&rotated, seat, opponent_ranges, preflop_aggressor);
 
     let solve = mcts::solve_for_seat(
         rng,
@@ -101,6 +129,8 @@ pub fn template_action<R: Rng + ?Sized>(
         return placeholder_action(rng, state);
     };
 
+    let node = crate::opponent_history::decision_node(&rotated);
+    let bucket = crate::opponent_history::decision_stack_bucket(&rotated);
     let position = crate::opponent_history::decision_position(&rotated);
     let ctx = crate::opponent_history::aggressor_context(node, was_preflop_aggressor, facing_cbet);
     let selected = match opponent_frequencies.resolve(node, bucket, position, ctx) {
@@ -804,6 +834,57 @@ mod tests {
         state
     }
 
+    /// Same regression as the `TableSession::ranges` test — a seat that has
+    /// voluntarily raised or shoved preflop this hand must resolve against
+    /// the narrower raiser-specific prior, not the pooled per-node prior
+    /// every seat used to share regardless of what it actually did. This
+    /// exercises the same routing bots use for their own decisions.
+    #[test]
+    fn ranges_for_solve_gives_the_raisers_seat_the_raiser_prior() {
+        let state = dealt_state();
+        let seat = state.to_act();
+        let rotated = state.rotated(seat);
+
+        let mut pooled = [0.0f32; crate::range::hands::HAND_COUNT];
+        pooled[0] = 1.0; // AA — the generic "whoever is at this node" prior.
+        let node = crate::opponent_history::decision_node(&rotated);
+        let bucket = crate::opponent_history::decision_stack_bucket(&rotated);
+        let mut entries = std::collections::HashMap::new();
+        entries.insert((node, bucket), pooled);
+
+        let seven_deuce =
+            crate::range::hands::Hand::new(crate::card::Rank::Seven, crate::card::Rank::Two, false)
+                .index();
+        let mut raiser = [0.0f32; crate::range::hands::HAND_COUNT];
+        raiser[seven_deuce] = 1.0;
+        let mut raiser_entries = std::collections::HashMap::new();
+        raiser_entries.insert(bucket, raiser);
+
+        let ranges_model =
+            crate::opponent_history::OpponentRangeModel::from_entries_with_raiser(
+                entries,
+                raiser_entries,
+            );
+
+        // The other two real seats, other than the acting seat itself.
+        let mut others = Seat::ALL.into_iter().filter(|s| *s != seat);
+        let raiser_seat = others.next().unwrap();
+        let waiting_seat = others.next().unwrap();
+
+        let ranges = ranges_for_solve(&rotated, seat, &ranges_model, Some(raiser_seat));
+
+        assert_eq!(
+            ranges[raiser_seat.rotated(seat).index()],
+            Some(raiser),
+            "the seat recorded as the preflop raiser gets the raiser prior"
+        );
+        assert_eq!(
+            ranges[waiting_seat.rotated(seat).index()],
+            Some(pooled),
+            "a seat that hasn't acted yet still gets the pooled node prior"
+        );
+    }
+
     #[test]
     fn template_skill_is_clamped_into_the_band() {
         assert_eq!(OpponentTemplate::new(0.62).skill, 0.62);
@@ -936,6 +1017,7 @@ mod tests {
                 &frequencies,
                 false,
                 false,
+                None,
             );
             assert_ne!(
                 action,
@@ -958,7 +1040,7 @@ mod tests {
                 let seat = state.to_act();
                 let action = template_action(
                     &mut rng, &state, seat, &config, &template, &ranges, &frequencies, false,
-                    false,
+                    false, None,
                 );
                 assert!(
                     state.legal_actions().allows(action),
@@ -987,6 +1069,7 @@ mod tests {
                 &frequencies,
                 false,
                 false,
+                None,
             ),
             template_action(
                 &mut b,
@@ -998,6 +1081,7 @@ mod tests {
                 &frequencies,
                 false,
                 false,
+                None,
             )
         );
     }

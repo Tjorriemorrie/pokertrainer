@@ -363,20 +363,40 @@ impl TableSession {
         &self.log
     }
 
-    /// The opponent range prior fed to the solver for the decision the hero
-    /// currently faces: the learned per-node/stack-bucket range (the same
-    /// model the bots' own play already draws from) when the sample is
-    /// trusted, falling back to a uniform "any two cards" prior otherwise.
-    /// Both opponent seats share it — they're modeled as one population.
+    /// The opponent range priors fed to the solver for the decision the hero
+    /// currently faces, one per opponent seat — see [`Self::range_for_seat`].
     pub fn ranges(&self) -> [Range; 2] {
-        let node = decision_node(&self.state);
+        [
+            self.range_for_seat(Seat::Opponent1),
+            self.range_for_seat(Seat::Opponent2),
+        ]
+    }
+
+    /// The opponent range prior for one seat: the learned per-node/stack-
+    /// bucket range (the same model the bots' own play already draws from)
+    /// when the sample is trusted, falling back to a uniform "any two
+    /// cards" prior otherwise.
+    ///
+    /// A seat that has already voluntarily raised or shoved preflop this
+    /// hand is self-selected into a narrower range than the pooled
+    /// per-node prior shows (that prior mixes in every fold and call seen
+    /// at the same node too) — such a seat resolves against
+    /// [`crate::opponent_history::OpponentRangeModel::resolve_preflop_raiser`]
+    /// instead. A seat that hasn't acted yet resolves against hero's own
+    /// current node, same as before this seat split — both seats are
+    /// otherwise modeled as one population.
+    fn range_for_seat(&self, seat: Seat) -> Range {
         let bucket = decision_stack_bucket(&self.state);
-        let prior = self
-            .opponent_model
+        if self.state.street() == Street::Preflop && self.preflop_aggressor == Some(seat)
+            && let Some(raiser_range) = self.opponent_model.ranges.resolve_preflop_raiser(bucket)
+        {
+            return raiser_range;
+        }
+        let node = decision_node(&self.state);
+        self.opponent_model
             .ranges
             .resolve(node, bucket)
-            .unwrap_or_else(|| uniform_ranges()[0]);
-        [prior, prior]
+            .unwrap_or_else(|| uniform_ranges()[0])
     }
 
     /// Drains the opponent actions the last [`Self::pump`] applied, in play
@@ -687,6 +707,7 @@ impl TableSession {
                     &self.opponent_model.frequencies,
                     was_preflop_aggressor,
                     facing_cbet,
+                    self.preflop_aggressor,
                 ),
                 None => placeholder_action(&mut self.rng, &self.state),
             };
@@ -1318,6 +1339,78 @@ mod tests {
             session.ranges(),
             [tight, tight],
             "a resolved node/bucket range feeds both opponent seats"
+        );
+    }
+
+    /// Regression for the "raise 4-8o into a real raise" coaching complaint:
+    /// before this fix, both opponent seats always resolved the same pooled
+    /// per-node range, so a seat that had just voluntarily raised preflop
+    /// was modeled with the *same* wide "whoever hasn't decided yet" prior
+    /// as a seat still to act — making a reraise over the actual raiser look
+    /// far more profitable than it is. The raiser's own seat must now read a
+    /// distinct, narrower prior once it has raised.
+    #[test]
+    fn ranges_use_the_preflop_raisers_own_prior_for_the_seat_that_raised() {
+        let mut session = TableSession::new(
+            41,
+            probe_config(),
+            never_intercepts(),
+            None,
+            STARTING_STACK,
+            OpponentModel::default(),
+        );
+        session.deal_next_hand().unwrap();
+
+        let node = crate::opponent_history::decision_node(session.state());
+        let bucket = crate::opponent_history::decision_stack_bucket(session.state());
+        let mut pooled = [0.0f32; HAND_COUNT];
+        pooled[0] = 1.0; // AA — the generic "whoever is at this node" prior.
+        let mut entries = std::collections::HashMap::new();
+        entries.insert((node, bucket), pooled);
+
+        let seven_deuce = crate::range::hands::Hand::new(Rank::Seven, Rank::Two, false).index();
+        let mut raiser = [0.0f32; HAND_COUNT];
+        raiser[seven_deuce] = 1.0;
+        let mut raiser_entries = std::collections::HashMap::new();
+        raiser_entries.insert(bucket, raiser);
+
+        let model = OpponentModel {
+            ranges: crate::opponent_history::OpponentRangeModel::from_entries_with_raiser(
+                entries,
+                raiser_entries,
+            ),
+            frequencies: Default::default(),
+            historic: Default::default(),
+            hero_historic: Default::default(),
+        };
+        let mut session = TableSession::new(
+            41,
+            probe_config(),
+            never_intercepts(),
+            None,
+            STARTING_STACK,
+            model,
+        );
+        session.deal_next_hand().unwrap();
+
+        assert_eq!(
+            session.ranges(),
+            [pooled, pooled],
+            "nobody has raised yet — both seats fall back to the pooled node prior"
+        );
+
+        session.preflop_aggressor = Some(Seat::Opponent2);
+        assert_eq!(
+            session.ranges(),
+            [pooled, raiser],
+            "only the seat that actually raised switches to the raiser prior"
+        );
+
+        session.preflop_aggressor = Some(Seat::Opponent1);
+        assert_eq!(
+            session.ranges(),
+            [raiser, pooled],
+            "the prior follows whichever seat is recorded as the raiser"
         );
     }
 

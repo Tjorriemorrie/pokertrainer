@@ -38,6 +38,17 @@ impl Seat {
             Seat::Opponent2 => 2,
         }
     }
+
+    /// Where this seat lands in the [`GameState::rotated`](crate::game::GameState::rotated)
+    /// view that relabels `new_hero` into the hero seat — the same relabeling
+    /// [`GameState::rotated`](crate::game::GameState::rotated) applies to
+    /// `button`/`to_act`/`last_full_raise`, exposed here for callers that
+    /// need to track a single seat (e.g. this hand's preflop aggressor)
+    /// across that relabeling without rotating the whole state.
+    pub fn rotated(self, new_hero: Seat) -> Seat {
+        let shifted = (self.index() + Self::ALL.len() - new_hero.index()) % Self::ALL.len();
+        Self::ALL[shifted]
+    }
 }
 
 impl fmt::Display for Seat {
@@ -129,6 +140,24 @@ mod tests {
         assert_eq!(Seat::Hero.index(), 0);
         assert_eq!(Seat::Opponent1.index(), 1);
         assert_eq!(Seat::Opponent2.index(), 2);
+    }
+
+    #[test]
+    fn rotated_relabels_new_hero_to_hero_and_preserves_relative_order() {
+        // Rotating onto oneself is the identity — matches
+        // `GameState::rotated`'s `new_hero == Seat::Hero` fast path.
+        for seat in Seat::ALL {
+            assert_eq!(seat.rotated(Seat::Hero), seat);
+        }
+        // Rotating a seat onto itself always lands it in the hero slot.
+        for seat in Seat::ALL {
+            assert_eq!(seat.rotated(seat), Seat::Hero);
+        }
+        // Clockwise order is preserved: whoever sits after `new_hero`
+        // becomes Opponent1, and the one after that becomes Opponent2 —
+        // mirroring `GameState::rotated`'s `order`/`shift` construction.
+        assert_eq!(Seat::Opponent2.rotated(Seat::Opponent1), Seat::Opponent1);
+        assert_eq!(Seat::Hero.rotated(Seat::Opponent1), Seat::Opponent2);
     }
 
     #[test]
