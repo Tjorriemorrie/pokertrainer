@@ -678,6 +678,10 @@ impl TableSession {
             let actor = self.state.to_act();
             let legal = self.state.legal_actions();
             let call_amount = legal.call_amount;
+            // Captured before the action settles, since an all-in zeroes the
+            // actor's stack: the total chips they'll have on the street once
+            // committed.
+            let all_in_total = self.state.stack(actor) + self.state.street_contribution(actor);
             // Captured before the action settles: the c-bet context
             // describes the decision the actor is currently facing.
             let was_preflop_aggressor = self.was_preflop_aggressor(actor);
@@ -714,7 +718,12 @@ impl TableSession {
             if let Some(sound) = Self::sound_for(action) {
                 self.push_sound(sound);
             }
-            self.log_line(views::describe_action(actor, action, call_amount));
+            let log_amount = if action == Action::AllIn {
+                all_in_total
+            } else {
+                call_amount
+            };
+            self.log_line(views::describe_action(actor, action, log_amount));
             acted = true;
             if self.state.is_hand_over() {
                 self.log_hand_result();
@@ -895,7 +904,12 @@ impl TableSession {
         ev_loss: f64,
     ) -> Result<Vec<TableEvent>> {
         let call_amount = self.state.legal_actions().call_amount;
-        self.log_line(views::describe_action(Seat::Hero, action, call_amount));
+        let log_amount = if action == Action::AllIn {
+            self.state.stack(Seat::Hero) + self.state.street_contribution(Seat::Hero)
+        } else {
+            call_amount
+        };
+        self.log_line(views::describe_action(Seat::Hero, action, log_amount));
         if action == Action::AllIn {
             self.hero_all_in_this_hand = true;
         }

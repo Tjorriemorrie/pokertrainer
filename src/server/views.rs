@@ -753,7 +753,10 @@ fn coach_action_label(action: Action, bucket: Option<BetSize>, street: Street) -
 }
 
 /// A past-tense log line for an applied action, e.g. `You raise to 150`.
-pub fn describe_action(seat: Seat, action: Action, call_amount: u32) -> String {
+/// `amount` is the call amount for [`Action::Call`] or the total chips
+/// committed to the street for [`Action::AllIn`]; it's ignored otherwise
+/// since `Bet`/`Raise` already carry their own amount.
+pub fn describe_action(seat: Seat, action: Action, amount: u32) -> String {
     let actor = match seat {
         Seat::Hero => "You".to_string(),
         other => other.to_string(),
@@ -761,10 +764,10 @@ pub fn describe_action(seat: Seat, action: Action, call_amount: u32) -> String {
     match action {
         Action::Fold => format!("{actor} fold"),
         Action::Check => format!("{actor} check"),
-        Action::Call => format!("{actor} call {call_amount}"),
+        Action::Call => format!("{actor} call {amount}"),
         Action::Bet(amount) => format!("{actor} bet {amount}"),
         Action::Raise(amount) => format!("{actor} raise to {amount}"),
-        Action::AllIn => format!("{actor} go all-in"),
+        Action::AllIn => format!("{actor} go all-in for {amount}"),
     }
 }
 
@@ -1528,7 +1531,7 @@ mod tests {
         );
         assert_eq!(
             describe_action(Seat::Opponent1, Action::AllIn, 100),
-            "Opponent 1 go all-in"
+            "Opponent 1 go all-in for 100"
         );
     }
 
