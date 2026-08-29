@@ -43,3 +43,14 @@ unrelated to the task at hand.
   proceeding rather than guessing.
 - Still respect "never kill or restart a running server" above — fixing a
   test never requires touching the live process.
+
+## Delete bash.exe.stackdump before finishing
+
+Git Bash on this machine occasionally drops a `bash.exe.stackdump` crash
+artifact in the repo root. It has no value and must never be committed.
+
+- Before ending a session (and before any commit), check for and delete
+  `bash.exe.stackdump` if it exists.
+- If it keeps reappearing, mention it to the user rather than silently
+  deleting it every time — it may indicate a Git Bash crash worth looking
+  into.
