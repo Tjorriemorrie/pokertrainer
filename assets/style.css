@@ -1424,15 +1424,32 @@ body.pt-body.alt-held .pt-bb-real { display: inline; }
 }
 
 .pt-skill-chip {
-  white-space: nowrap;
-  padding: 0.15rem 0.6rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  height: 46px;
+  padding: 0 0.6rem;
   border: 1px solid #57534e;
-  border-radius: 999px;
+  border-radius: 6px;
   color: #d6d3d1;
-  font-size: 0.8rem;
 }
 
-.pt-skill-chip b { color: #fbbf24; }
+.pt-skill-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  line-height: 1.25;
+}
+
+.pt-skill-col span {
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.7;
+}
+
+.pt-skill-chip b { color: #fbbf24; font-size: 0.9rem; }
 
 .pt-status-running {
   padding: 0.75rem 1rem;

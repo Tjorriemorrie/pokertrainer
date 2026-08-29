@@ -418,7 +418,7 @@ function setStatus(text, cls) {
       return;
     }
     const max = Math.max(...values, 1);
-    const step = canvas.width / 999;
+    const step = canvas.width / (values.length - 1);
     ctx.beginPath();
     values.forEach((value, i) => {
       const x = i * step;

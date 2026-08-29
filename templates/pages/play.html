@@ -20,7 +20,10 @@ half of the practice feature /tournaments is the history of.
   <main class="pt-main">
     <div class="pt-table-toolbar">
       <canvas id="ev-chart" width="1200" height="48" class="ev-chart"></canvas>
-{% if let Some(skill) = skill %}      <div class="pt-skill-chip" title="Skill on a 0..1 scale: how close your decisions average to the solver vs the imported opponents both bots play like. Generate the field skill under Hand history → Analyze imported opponents.">You <b>{{ skill.you }}</b> · Bots <b>{{ skill.bots }}</b></div>
+{% if let Some(skill) = skill %}      <div class="pt-skill-chip" title="Skill on a 0..1 scale: how close your decisions average to the solver vs the imported opponents both bots play like. Generate the field skill under Hand history → Analyze imported opponents.">
+        <div class="pt-skill-col"><span>You</span><b>{{ skill.you }}</b></div>
+        <div class="pt-skill-col"><span>Bots</span><b>{{ skill.bots }}</b></div>
+      </div>
 {% endif %}      <div id="ws-status" class="status-wait">connecting…</div>
       <button id="sound-toggle" class="pt-icon-btn" type="button" title="Toggle table sounds">🔊</button>
       <button id="finish-table" class="action-btn" type="button">Finish table</button>
