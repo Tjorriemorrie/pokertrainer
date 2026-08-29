@@ -459,19 +459,30 @@ pub async fn load_hero_action_window(
 
 // ----------------------------------------------------------- range model
 
-/// Add-one (Laplace) pseudo-count blended into every hand class before
-/// normalizing a range. [`MIN_SAMPLE_HANDS`] only gates *whether* a node's
-/// range is trusted at all — it doesn't stop a barely-passing sample (e.g.
-/// 30-50 real actions spread across all 169 hand classes) from leaving most
-/// classes at a literal zero count. Solved against a range with hard zeros,
-/// the MCTS treats every unseen class — routinely including premium hands
-/// like AA/KK/AKs that simply haven't come up yet in a small window — as
+/// Total Laplace pseudo-count blended across all 169 hand classes before
+/// normalizing a range (i.e. each class gets `RANGE_SMOOTHING_TOTAL /
+/// HAND_COUNT` pseudo-observations, not one full pseudo-observation each).
+/// [`MIN_SAMPLE_HANDS`] only gates *whether* a node's range is trusted at
+/// all — it doesn't stop a barely-passing sample (e.g. 30-70 real actions
+/// spread across all 169 hand classes) from leaving most classes at a
+/// literal zero count. Solved against a range with hard zeros, the MCTS
+/// treats every unseen class — routinely including premium hands like
+/// AA/KK/AKs that simply haven't come up yet in a small window — as
 /// *impossible* for the opponent to hold, which inflates a bluff/thin-value
 /// raise's apparent fold equity far beyond what the real (unobserved) tail
 /// of the opponent's range would allow. Smoothing keeps every class
 /// reachable, shrinking hard toward uniform while the sample is this small
 /// and easing off as real observations accumulate.
-const RANGE_SMOOTHING: f32 = 1.0;
+///
+/// The pseudo-count must total to *far less* than one hand's worth of pull
+/// per class — spreading a full pseudo-observation over every one of the
+/// 169 classes (the previous per-class `RANGE_SMOOTHING = 1.0`) adds up to
+/// 169 pseudo-observations, which dwarfs the real signal in any
+/// locally-trained window (tens to low hundreds of samples) and leaves
+/// every learned range reading as barely-distinguishable-from-uniform —
+/// exactly the failure this smoothing exists to prevent, just reached from
+/// the opposite direction.
+const RANGE_SMOOTHING_TOTAL: f32 = 8.0;
 
 /// The free-text `contextual_ranges.node` key for
 /// [`build_preflop_raise_range_model`] — not a member of [`Node`] (that enum
@@ -485,10 +496,11 @@ const PF_RAISER_NODE_KEY: &str = "PF_RAISER";
 /// [`build_range_model`] and [`build_preflop_raise_range_model`].
 fn smoothed_range(hand_counts: &[u32; HAND_COUNT]) -> StoredRange {
     let total: u32 = hand_counts.iter().sum();
-    let denom = total as f32 + RANGE_SMOOTHING * HAND_COUNT as f32;
+    let pseudo_per_class = RANGE_SMOOTHING_TOTAL / HAND_COUNT as f32;
+    let denom = total as f32 + RANGE_SMOOTHING_TOTAL;
     let mut weights: Range = [0.0f32; HAND_COUNT];
     for (weight, count) in weights.iter_mut().zip(hand_counts.iter()) {
-        *weight = (*count as f32 + RANGE_SMOOTHING) / denom;
+        *weight = (*count as f32 + pseudo_per_class) / denom;
     }
     StoredRange {
         weights,
@@ -498,7 +510,7 @@ fn smoothed_range(hand_counts: &[u32; HAND_COUNT]) -> StoredRange {
 
 /// Tallies the window into a per-node, per-stack-bucket 169-hand range: the
 /// share of times each hand class showed up acting at that spot, Laplace-
-/// smoothed (see [`RANGE_SMOOTHING`]) so a thin sample never rules a hand
+/// smoothed (see [`RANGE_SMOOTHING_TOTAL`]) so a thin sample never rules a hand
 /// class out entirely. Nodes with no samples are simply absent from the map.
 ///
 /// This pools every action taken at the node together (fold, call, and
@@ -1422,9 +1434,10 @@ Seat 3: 14c11a2a (big blind) folded on the River";
         let model = build_range_model(&actions);
         let main = &model[&(Node::PfOpen, StackBucket::Bb25)];
         assert_eq!(main.sample_count, 3);
-        let main_denom = 3.0 + RANGE_SMOOTHING * HAND_COUNT as f32;
-        assert!((main.weights[aa.index()] - (2.0 + RANGE_SMOOTHING) / main_denom).abs() < 1e-6);
-        assert!((main.weights[kk.index()] - (1.0 + RANGE_SMOOTHING) / main_denom).abs() < 1e-6);
+        let pseudo = RANGE_SMOOTHING_TOTAL / HAND_COUNT as f32;
+        let main_denom = 3.0 + RANGE_SMOOTHING_TOTAL;
+        assert!((main.weights[aa.index()] - (2.0 + pseudo) / main_denom).abs() < 1e-6);
+        assert!((main.weights[kk.index()] - (1.0 + pseudo) / main_denom).abs() < 1e-6);
         // AA still outweighs KK, which still outweighs a hand class that
         // never showed up in the window — smoothing damps the raw
         // frequencies toward uniform without erasing the real signal.
@@ -1438,11 +1451,8 @@ Seat 3: 14c11a2a (big blind) folded on the River";
 
         let other_bucket = &model[&(Node::PfOpen, StackBucket::Bb10)];
         assert_eq!(other_bucket.sample_count, 1);
-        let other_denom = 1.0 + RANGE_SMOOTHING * HAND_COUNT as f32;
-        assert!(
-            (other_bucket.weights[aa.index()] - (1.0 + RANGE_SMOOTHING) / other_denom).abs()
-                < 1e-6
-        );
+        let other_denom = 1.0 + RANGE_SMOOTHING_TOTAL;
+        assert!((other_bucket.weights[aa.index()] - (1.0 + pseudo) / other_denom).abs() < 1e-6);
     }
 
     #[test]
@@ -1931,7 +1941,8 @@ Seat 3: 14c11a2a (big blind) folded on the River";
         let range = resolved
             .resolve(Node::TurnVsBet, StackBucket::Bb15)
             .expect("40 samples clears MIN_SAMPLE_HANDS");
-        let expected_aa = (40.0 + RANGE_SMOOTHING) / (40.0 + RANGE_SMOOTHING * HAND_COUNT as f32);
+        let expected_aa =
+            (40.0 + RANGE_SMOOTHING_TOTAL / HAND_COUNT as f32) / (40.0 + RANGE_SMOOTHING_TOTAL);
         assert!((range[aa.index()] - expected_aa).abs() < 1e-6);
         let kk = crate::range::hands::Hand::new(Rank::King, Rank::King, false);
         assert!(

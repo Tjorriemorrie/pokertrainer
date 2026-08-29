@@ -1,9 +1,9 @@
 use rand::Rng;
 
-use crate::card::{Card, Deck};
+use crate::card::{Card, Deck, Rank};
 use crate::error::{Error, Result};
 use crate::eval::HandClass;
-use crate::game::{Action, ActionOutcome, GameState, Seat};
+use crate::game::{Action, ActionOutcome, GameState, Seat, Street};
 use crate::rng::weighted_index;
 
 use super::actions::candidates;
@@ -19,6 +19,75 @@ fn strength_tier(class: HandClass) -> f64 {
         HandClass::FullHouse | HandClass::Quads => 3.5,
         HandClass::StraightFlush => 4.0,
     }
+}
+
+/// A seat's coarse strength tier for the rollout policy, on the street it's
+/// currently deciding on. Preflop uses [`preflop_tier`] instead of
+/// [`strength_tier`]`(`[`GameState::eval_hand`]`(seat).class())`:
+/// [`GameState::best_hand`] pads a seat's two hole cards out to seven with
+/// repeated placeholder cards when the board is empty, so preflop that
+/// postflop-oriented evaluation degenerates to "is it a pocket pair or
+/// not" — every non-paired starting hand classifies as `HighCard`
+/// regardless of actual quality, so e.g. `AKo` reads as *weaker* than `72o`
+/// (which accidentally pairs the placeholder). That made the simulated
+/// opponent fold real preflop premiums to price pressure exactly as often
+/// as it folds genuine junk, wildly overstating a preflop
+/// raise/reraise's fold equity.
+fn tier_for(state: &GameState, seat: Seat) -> f64 {
+    if state.street() == Street::Preflop {
+        preflop_tier(state.hole_cards_unchecked(seat))
+    } else {
+        strength_tier(state.eval_hand(seat).class())
+    }
+}
+
+/// Preflop hand strength via the Chen Formula, rescaled from its native
+/// 0..20 (worst unplayable hand .. `AA`) onto the same 0..4 ladder
+/// [`strength_tier`] uses, so both feed [`fold_mass`]/[`raise_mass`]/
+/// [`bet_mass`] on a consistent scale.
+fn preflop_tier(cards: [Card; 2]) -> f64 {
+    (chen_score(cards) / 20.0 * 4.0).clamp(0.0, 4.0)
+}
+
+/// The Chen Formula: a standard, well-known closed-form preflop starting-
+/// hand strength score. High card points (`A=10, K=8, Q=7, J=6`, else
+/// `rank/2` rounded up to the nearest half), doubled (minimum 5) for a
+/// pair; otherwise +2 for suited, a gap penalty that grows with the rank
+/// distance between the two cards, and +1 back for a 0- or 1-gap hand
+/// whose high card is a jack or lower (straight-friendly connectors).
+fn chen_score(cards: [Card; 2]) -> f64 {
+    let (a, b) = (cards[0], cards[1]);
+    let (high, low) = if a.rank() >= b.rank() { (a, b) } else { (b, a) };
+    let pair = high.rank() == low.rank();
+
+    let high_points = match high.rank() {
+        Rank::Ace => 10.0,
+        Rank::King => 8.0,
+        Rank::Queen => 7.0,
+        Rank::Jack => 6.0,
+        rank => (rank as u8 as f64 + 2.0) / 2.0,
+    };
+
+    if pair {
+        return (high_points * 2.0).max(5.0);
+    }
+
+    let mut score = high_points;
+    if high.suit() == low.suit() {
+        score += 2.0;
+    }
+    let gap = high.rank() as i32 - low.rank() as i32 - 1;
+    score -= match gap {
+        0 => 0.0,
+        1 => 1.0,
+        2 => 2.0,
+        3 => 4.0,
+        _ => 5.0,
+    };
+    if gap <= 1 && high.rank() <= Rank::Jack {
+        score += 1.0;
+    }
+    score.max(0.0)
 }
 
 /// Fold mass for the opponent policy: proportional to the price of calling
@@ -55,7 +124,7 @@ fn price_of(state: &GameState) -> f64 {
 /// the price of calling, calls lighter when the price is low, and bets or
 /// raises more often with stronger holdings.
 pub(crate) fn opponent_probs(state: &GameState) -> Vec<f64> {
-    action_probs(state, strength_tier(state.eval_hand(state.to_act()).class()))
+    action_probs(state, tier_for(state, state.to_act()))
 }
 
 /// How the hero's hand stacks up against the live opponents' actual holdings
@@ -64,9 +133,11 @@ pub(crate) fn opponent_probs(state: &GameState) -> Vec<f64> {
 /// uses. Unlike an absolute hand-class tier, this is range-aware — a bare top
 /// pair is "the nuts" (tier 4) against a range that never has better, and
 /// "worthless" (tier 0) against a range pinned to sets, because each world
-/// already knows the opponents' real dealt cards.
+/// already knows the opponents' real dealt cards. Preflop, "beats" compares
+/// [`preflop_tier`] scores instead of [`GameState::eval_hand`] — see
+/// [`tier_for`] for why a direct postflop-style comparison degenerates
+/// there.
 fn relative_strength(state: &GameState) -> f64 {
-    let hero_eval = state.eval_hand(Seat::Hero);
     let live_opponents: Vec<Seat> = [Seat::Opponent1, Seat::Opponent2]
         .into_iter()
         .filter(|&seat| !state.folded(seat))
@@ -74,14 +145,30 @@ fn relative_strength(state: &GameState) -> f64 {
     if live_opponents.is_empty() {
         return 4.0;
     }
-    let beats: f64 = live_opponents
-        .iter()
-        .map(|&seat| match hero_eval.cmp(&state.eval_hand(seat)) {
-            std::cmp::Ordering::Greater => 1.0,
-            std::cmp::Ordering::Equal => 0.5,
-            std::cmp::Ordering::Less => 0.0,
-        })
-        .sum();
+    let beats: f64 = if state.street() == Street::Preflop {
+        let hero_tier = preflop_tier(state.hole_cards_unchecked(Seat::Hero));
+        live_opponents
+            .iter()
+            .map(|&seat| {
+                let opp_tier = preflop_tier(state.hole_cards_unchecked(seat));
+                match hero_tier.total_cmp(&opp_tier) {
+                    std::cmp::Ordering::Greater => 1.0,
+                    std::cmp::Ordering::Equal => 0.5,
+                    std::cmp::Ordering::Less => 0.0,
+                }
+            })
+            .sum()
+    } else {
+        let hero_eval = state.eval_hand(Seat::Hero);
+        live_opponents
+            .iter()
+            .map(|&seat| match hero_eval.cmp(&state.eval_hand(seat)) {
+                std::cmp::Ordering::Greater => 1.0,
+                std::cmp::Ordering::Equal => 0.5,
+                std::cmp::Ordering::Less => 0.0,
+            })
+            .sum()
+    };
     4.0 * beats / live_opponents.len() as f64
 }
 
@@ -320,6 +407,51 @@ mod tests {
         assert_eq!(strength_tier(HandClass::FullHouse), 3.5);
         assert_eq!(strength_tier(HandClass::Quads), 3.5);
         assert_eq!(strength_tier(HandClass::StraightFlush), 4.0);
+    }
+
+    fn card(rank: Rank, suit: Suit) -> Card {
+        Card::new(rank, suit)
+    }
+
+    /// Regression for the "raise 4h8d into a real raise" coaching complaint:
+    /// preflop, [`strength_tier`]`(`[`GameState::eval_hand`]`(seat).class())`
+    /// degenerated to "pocket pair or not", so a premium non-paired hand
+    /// like AKo read as *weaker* than garbage like 72o (which accidentally
+    /// pairs `best_hand`'s placeholder padding card). [`preflop_tier`] must
+    /// rank real starting-hand quality instead.
+    #[test]
+    fn preflop_tier_ranks_starting_hands_the_way_chen_scoring_intends() {
+        let aa = [card(Rank::Ace, Suit::Clubs), card(Rank::Ace, Suit::Spades)];
+        let ako = [card(Rank::Ace, Suit::Hearts), card(Rank::King, Suit::Diamonds)];
+        let aks = [card(Rank::Ace, Suit::Hearts), card(Rank::King, Suit::Hearts)];
+        let seven_deuce = [card(Rank::Seven, Suit::Clubs), card(Rank::Two, Suit::Spades)];
+        let two_two = [card(Rank::Two, Suit::Clubs), card(Rank::Two, Suit::Diamonds)];
+
+        assert!(
+            preflop_tier(ako) > preflop_tier(seven_deuce),
+            "AKo must rank above 72o, not below it"
+        );
+        assert!(preflop_tier(aa) > preflop_tier(ako), "AA beats AKo");
+        assert!(preflop_tier(aks) > preflop_tier(ako), "suited beats offsuit");
+        assert!(
+            preflop_tier(two_two) > preflop_tier(seven_deuce),
+            "even a small pair beats unpaired junk"
+        );
+        assert_eq!(preflop_tier(aa), 4.0, "AA is the top of the ladder");
+        for hand in [aa, ako, aks, seven_deuce, two_two] {
+            assert!((0.0..=4.0).contains(&preflop_tier(hand)));
+        }
+    }
+
+    #[test]
+    fn tier_for_uses_preflop_tier_before_any_board_and_eval_hand_after() {
+        let mut state = hero_open_state();
+        state.set_hole_cards(Seat::Hero, [card(Rank::Ace, Suit::Hearts), card(Rank::King, Suit::Diamonds)]);
+        state.set_hole_cards(Seat::Opponent1, [card(Rank::Seven, Suit::Clubs), card(Rank::Two, Suit::Spades)]);
+        assert!(
+            tier_for(&state, Seat::Hero) > tier_for(&state, Seat::Opponent1),
+            "preflop, AKo must outrank 72o"
+        );
     }
 
     #[test]

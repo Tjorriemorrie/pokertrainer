@@ -584,6 +584,15 @@ impl GameState {
         }
     }
 
+    /// A seat's hole cards, bypassing the `revealed` gate — solver-internal,
+    /// mirroring [`Self::best_hand`]'s direct field access. Every seat in a
+    /// per-world search state already has a concrete dealt holding (the
+    /// world's determinization); this is for rollout-policy heuristics that
+    /// need it directly rather than through [`Self::eval_hand`].
+    pub(crate) fn hole_cards_unchecked(&self, seat: Seat) -> [Card; 2] {
+        self.hole_cards[seat.index()]
+    }
+
     /// Clones the state with every seat's hole cards replaced by the given
     /// holdings. Solver-internal: builds the perfect-information snapshot a
     /// single determinization is searched on; street, pots and action flow
