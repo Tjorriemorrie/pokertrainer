@@ -102,6 +102,23 @@ impl PopulationSource for UniformPopulation {
     }
 }
 
+/// A Chen-score-weighted population fallback: proportional to each class's
+/// [`crate::range::hands::Hand::chen_score`] instead of flat/uniform. Used
+/// in place of [`UniformPopulation`] wherever the range being resolved is a
+/// *preflop* opponent-holding prior — below [`MIN_SAMPLE_HANDS`] a literal
+/// uniform fallback assumes the opponent's hand is as likely to be `72o` as
+/// `AA`, which understates how much a real raise (or even just a real deal)
+/// skews toward stronger starting hands, exactly the gap that made a
+/// preflop reraise/call look far more profitable than it is.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ChenPopulation;
+
+impl PopulationSource for ChenPopulation {
+    fn population_range(&self, _node: &str, _stack_bucket: StackBucket) -> Range {
+        crate::range::hands::chen_prior()
+    }
+}
+
 /// Resolves a sequence node to a range, falling back to the population average
 /// when the player-specific sample is below [`MIN_SAMPLE_HANDS`].
 pub struct RangeResolver<P> {
@@ -221,6 +238,31 @@ mod tests {
         let node = SequenceNode::new(7, StackBucket::Bb10, "MISSING");
         let resolved = resolver.resolve(&store, &node).await.unwrap();
         assert!(resolved.used_population);
+    }
+
+    /// Regression for the "coach's fallback assumes any two cards" gap:
+    /// below the trust threshold, a resolver built on [`ChenPopulation`]
+    /// must fall back to a strength-shaped prior, not flat uniform — the
+    /// nuts and the worst hand can't resolve to the same weight.
+    #[tokio::test]
+    async fn chen_population_fallback_favors_stronger_hands_over_the_worst_one() {
+        let store = MockStore::new();
+        let resolver = RangeResolver::new(ChenPopulation);
+        let node = SequenceNode::new(7, StackBucket::Bb10, "MISSING");
+        let resolved = resolver.resolve(&store, &node).await.unwrap();
+        assert!(resolved.used_population);
+        let aa = crate::range::hands::Hand::new(
+            crate::card::Rank::Ace,
+            crate::card::Rank::Ace,
+            false,
+        );
+        let seven_deuce = crate::range::hands::Hand::new(
+            crate::card::Rank::Seven,
+            crate::card::Rank::Two,
+            false,
+        );
+        assert!(resolved.weights[aa.index()] > resolved.weights[seven_deuce.index()]);
+        assert!((resolved.weights.iter().sum::<f32>() - 1.0).abs() < 1e-5);
     }
 
     #[test]

@@ -29,8 +29,8 @@ use crate::card::Card;
 use crate::db::{self, StoredRange};
 use crate::error::Result;
 use crate::game::{Action, GameState, Street};
-use crate::range::hands::{HAND_COUNT, Hand, Range, all_hands};
-use crate::range::sequence::{RangeResolver, SequenceNode, StackBucket, UniformPopulation};
+use crate::range::hands::{HAND_COUNT, Hand, Range, all_hands, chen_prior};
+use crate::range::sequence::{ChenPopulation, RangeResolver, SequenceNode, StackBucket};
 use crate::range_cache::PgRangeStore;
 
 /// How many of the most recent imported hands feed the window — every
@@ -481,33 +481,6 @@ const RANGE_SMOOTHING_TOTAL: f32 = 8.0;
 /// purely on strings.
 const PF_RAISER_NODE_KEY: &str = "PF_RAISER";
 
-/// A fixed, non-uniform prior over the 169 hand classes — proportional to
-/// each class's [`Hand::chen_score`] (+1 so the very worst class still
-/// keeps a small nonzero share) — used to smooth [`build_range_model`] and
-/// [`build_preflop_raise_range_model`] instead of a flat/uniform prior.
-///
-/// Regression for the "raise 4h8d into a real raise, call 70 more" coaching
-/// complaint: a *flat* pseudo-count still shrinks a thin sample toward
-/// "every hand equally likely", which a 169-way empirical distribution can
-/// never actually distinguish from noise at the sample sizes one local
-/// session accumulates (69 raises spread across 169 classes is under half
-/// an observation per class) — so even the raiser-specific range kept
-/// reading as barely-distinguishable-from-uniform, with premiums like AKo
-/// not even cracking the top 15 while things like K7o and J4o did. Shrinking
-/// toward "preflop raises skew toward higher Chen-score hands" instead is
-/// the actually-informative prior a thin sample should fall back to.
-fn chen_prior() -> [f32; HAND_COUNT] {
-    let mut weights = [0.0f32; HAND_COUNT];
-    for hand in all_hands() {
-        weights[hand.index()] = hand.chen_score() as f32 + 1.0;
-    }
-    let total: f32 = weights.iter().sum();
-    for weight in &mut weights {
-        *weight /= total;
-    }
-    weights
-}
-
 /// Laplace-smooths a per-hand-class tally into a normalized 169-hand range
 /// plus its raw sample count — the shared math behind
 /// [`build_range_model`] and [`build_preflop_raise_range_model`]. Shrinks
@@ -660,27 +633,35 @@ impl OpponentRangeModel {
 }
 
 /// Loads the resolved range model for the pooled opponent profile, applying
-/// the existing minimum-sample gate ([`RangeResolver`]) node by node.
+/// the existing minimum-sample gate ([`RangeResolver`]) node by node. Below
+/// that gate, resolves against [`ChenPopulation`] rather than a flat
+/// uniform population — a real hand only clears a preflop node into double
+/// digits of samples (the real-hands-only window is now deliberately
+/// thinner than it used to be, see [`load_gg_actions`]), so this fallback
+/// is the common case, not a rare edge.
+///
+/// Every node/bucket combination gets an entry either way — a resolved
+/// range always exists (real data or the population fallback), so there's
+/// no reason to drop the population-fallback case and let a caller apply
+/// its *own*, less informed uniform fallback on top of it. [`Self::resolve`]
+/// staying `Option`-shaped is defensive API surface, not a signal this
+/// loader actually leaves gaps.
 pub async fn load_range_model(pool: &PgPool, profile_id: i32) -> Result<OpponentRangeModel> {
-    let resolver = RangeResolver::new(UniformPopulation);
+    let resolver = RangeResolver::new(ChenPopulation);
     let store = PgRangeStore::new(pool.clone());
     let mut ranges = HashMap::new();
     for node in Node::ALL {
         for bucket in StackBucket::ALL {
             let sequence_node = SequenceNode::new(profile_id, bucket, node.key());
             let resolved = resolver.resolve(&store, &sequence_node).await?;
-            if !resolved.used_population {
-                ranges.insert((node, bucket), resolved.weights);
-            }
+            ranges.insert((node, bucket), resolved.weights);
         }
     }
     let mut preflop_raiser_ranges = HashMap::new();
     for bucket in StackBucket::ALL {
         let sequence_node = SequenceNode::new(profile_id, bucket, PF_RAISER_NODE_KEY);
         let resolved = resolver.resolve(&store, &sequence_node).await?;
-        if !resolved.used_population {
-            preflop_raiser_ranges.insert(bucket, resolved.weights);
-        }
+        preflop_raiser_ranges.insert(bucket, resolved.weights);
     }
     Ok(OpponentRangeModel {
         ranges,
@@ -1908,8 +1889,8 @@ Seat 3: 14c11a2a (big blind) folded on the River";
             .await
             .unwrap();
 
-        // Below MIN_SAMPLE_HANDS: falls back to the uniform population, so
-        // the resolved model carries nothing for this node.
+        // Below MIN_SAMPLE_HANDS: falls back to the Chen-population prior,
+        // not the trained (too-thin-to-trust) range.
         let aa = crate::range::hands::Hand::new(Rank::Ace, Rank::Ace, false);
         let sparse = vec![action(
             aa,
@@ -1922,8 +1903,8 @@ Seat 3: 14c11a2a (big blind) folded on the River";
         let resolved = load_range_model(&pool, profile_id).await.unwrap();
         assert_eq!(
             resolved.resolve(Node::RiverLead, StackBucket::Bb25),
-            None,
-            "a single sample stays below MIN_SAMPLE_HANDS and falls back to uniform"
+            Some(chen_prior()),
+            "a single sample stays below MIN_SAMPLE_HANDS and falls back to the Chen prior"
         );
 
         // At/above MIN_SAMPLE_HANDS: the resolved range is the trained one.

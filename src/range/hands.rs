@@ -172,6 +172,35 @@ pub fn all_hands() -> impl Iterator<Item = Hand> {
     (0..HAND_COUNT).map(Hand::from_index)
 }
 
+/// A fixed, non-uniform prior over the 169 hand classes — proportional to
+/// each class's [`Hand::chen_score`] (+1 so the very worst class still
+/// keeps a small nonzero share) — used in place of a flat/uniform prior
+/// both to smooth a thin empirical sample
+/// ([`crate::opponent_history::build_range_model`]) and as the population
+/// fallback below the trust threshold
+/// ([`crate::range::sequence::ChenPopulation`]).
+///
+/// Regression for the "raise 4h8d into a real raise, call 70 more" coaching
+/// complaint: a *flat* prior still shrinks a thin (or entirely absent)
+/// sample toward "every hand equally likely", which understates how much a
+/// real raise (or even just a real deal) skews toward stronger starting
+/// hands — with a flat prior, premiums like `AKo` didn't even crack a
+/// learned range's top 15 while things like `K7o` did, and a `72o` shove
+/// still showed positive EV purely because the opponent's *assumed* range
+/// was as weak on average as a random deal. Shrinking toward "hands skew
+/// toward higher Chen score" instead is the actually-informative default.
+pub fn chen_prior() -> Range {
+    let mut weights = [0.0f32; HAND_COUNT];
+    for hand in all_hands() {
+        weights[hand.index()] = hand.chen_score() as f32 + 1.0;
+    }
+    let total: f32 = weights.iter().sum();
+    for weight in &mut weights {
+        *weight /= total;
+    }
+    weights
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
