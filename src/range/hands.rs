@@ -118,6 +118,53 @@ impl Hand {
         let index = self.index();
         (index / MATRIX_SIZE, index % MATRIX_SIZE)
     }
+
+    /// Preflop starting-hand strength via the Chen Formula: a standard,
+    /// well-known closed-form score, natively 0 (the worst unplayable
+    /// hand) to 20 (`AA`). High-card points (`A=10, K=8, Q=7, J=6`, else
+    /// `rank/2` rounded up to the nearest half), doubled (minimum 5) for a
+    /// pair; otherwise +2 for suited, a gap penalty that grows with the
+    /// rank distance between the two cards, and +1 back for a 0- or
+    /// 1-gap hand whose high card is a jack or lower (straight-friendly
+    /// connectors).
+    pub fn chen_score(self) -> f64 {
+        let high_points = match self.high {
+            Rank::Ace => 10.0,
+            Rank::King => 8.0,
+            Rank::Queen => 7.0,
+            Rank::Jack => 6.0,
+            rank => (rank as u8 as f64 + 2.0) / 2.0,
+        };
+
+        if self.high == self.low {
+            return (high_points * 2.0).max(5.0);
+        }
+
+        let mut score = high_points;
+        if self.suited {
+            score += 2.0;
+        }
+        let gap = self.high as i32 - self.low as i32 - 1;
+        score -= match gap {
+            0 => 0.0,
+            1 => 1.0,
+            2 => 2.0,
+            3 => 4.0,
+            _ => 5.0,
+        };
+        if gap <= 1 && self.high <= Rank::Jack {
+            score += 1.0;
+        }
+        score.max(0.0)
+    }
+
+    /// [`Self::chen_score`] rescaled from its native 0..20 onto 0..4 — the
+    /// same coarse strength ladder the postflop rollout-policy tiers use
+    /// (see `crate::mcts::rollout::strength_tier`), so a preflop and
+    /// postflop tier feed the same fold/call/raise-mass curve consistently.
+    pub fn chen_tier(self) -> f64 {
+        (self.chen_score() / 20.0 * 4.0).clamp(0.0, 4.0)
+    }
 }
 
 /// Iterates over all 169 hand classes in index order.
@@ -132,6 +179,50 @@ mod tests {
 
     fn card(rank: Rank, suit: Suit) -> Card {
         Card::new(rank, suit)
+    }
+
+    #[test]
+    fn chen_score_ranks_known_hands_in_the_textbook_order() {
+        let aa = Hand::new(Rank::Ace, Rank::Ace, false);
+        let kk = Hand::new(Rank::King, Rank::King, false);
+        let two_two = Hand::new(Rank::Two, Rank::Two, false);
+        let ako = Hand::new(Rank::Ace, Rank::King, false);
+        let aks = Hand::new(Rank::Ace, Rank::King, true);
+        let seven_deuce = Hand::new(Rank::Seven, Rank::Two, false);
+        let jack_ten_suited = Hand::new(Rank::Jack, Rank::Ten, true);
+
+        assert_eq!(aa.chen_score(), 20.0, "AA is the textbook maximum");
+        assert_eq!(kk.chen_score(), 16.0);
+        assert_eq!(two_two.chen_score(), 5.0, "even 22 gets the pair floor of 5");
+        assert_eq!(ako.chen_score(), 10.0, "connected, no suited/gap adjustment");
+        assert_eq!(aks.chen_score(), 12.0, "suited adds 2");
+        assert_eq!(
+            jack_ten_suited.chen_score(),
+            9.0,
+            "6 (jack) + 2 (suited) + 1 (0-gap connector bonus)"
+        );
+
+        // Regression for the "raise 4h8d into a real raise" coaching
+        // complaint: the postflop-oriented eval_hand degenerated preflop to
+        // "pocket pair or not", so a premium non-paired hand like AKo
+        // scored *below* garbage like 72o (which accidentally paired
+        // best_hand's placeholder padding card). Chen scoring must not
+        // repeat that.
+        assert!(
+            ako.chen_score() > seven_deuce.chen_score(),
+            "AKo must outscore 72o"
+        );
+        assert!(
+            two_two.chen_score() > seven_deuce.chen_score(),
+            "even the smallest pair outscores unpaired junk"
+        );
+
+        for hand in all_hands() {
+            let score = hand.chen_score();
+            assert!((0.0..=20.0).contains(&score), "{score} out of 0..=20 range");
+            let tier = hand.chen_tier();
+            assert!((0.0..=4.0).contains(&tier), "{tier} out of 0..=4 range");
+        }
     }
 
     #[test]

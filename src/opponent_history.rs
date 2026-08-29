@@ -460,8 +460,9 @@ pub async fn load_hero_action_window(
 // ----------------------------------------------------------- range model
 
 /// Total Laplace pseudo-count blended across all 169 hand classes before
-/// normalizing a range (i.e. each class gets `RANGE_SMOOTHING_TOTAL /
-/// HAND_COUNT` pseudo-observations, not one full pseudo-observation each).
+/// normalizing a range, distributed according to [`chen_prior`] rather than
+/// split evenly (i.e. class `i` gets `RANGE_SMOOTHING_TOTAL * chen_prior()[i]`
+/// pseudo-observations, not `RANGE_SMOOTHING_TOTAL / HAND_COUNT` each).
 /// [`MIN_SAMPLE_HANDS`] only gates *whether* a node's range is trusted at
 /// all — it doesn't stop a barely-passing sample (e.g. 30-70 real actions
 /// spread across all 169 hand classes) from leaving most classes at a
@@ -491,16 +492,44 @@ const RANGE_SMOOTHING_TOTAL: f32 = 8.0;
 /// purely on strings.
 const PF_RAISER_NODE_KEY: &str = "PF_RAISER";
 
+/// A fixed, non-uniform prior over the 169 hand classes — proportional to
+/// each class's [`Hand::chen_score`] (+1 so the very worst class still
+/// keeps a small nonzero share) — used to smooth [`build_range_model`] and
+/// [`build_preflop_raise_range_model`] instead of a flat/uniform prior.
+///
+/// Regression for the "raise 4h8d into a real raise, call 70 more" coaching
+/// complaint: a *flat* pseudo-count still shrinks a thin sample toward
+/// "every hand equally likely", which a 169-way empirical distribution can
+/// never actually distinguish from noise at the sample sizes one local
+/// session accumulates (69 raises spread across 169 classes is under half
+/// an observation per class) — so even the raiser-specific range kept
+/// reading as barely-distinguishable-from-uniform, with premiums like AKo
+/// not even cracking the top 15 while things like K7o and J4o did. Shrinking
+/// toward "preflop raises skew toward higher Chen-score hands" instead is
+/// the actually-informative prior a thin sample should fall back to.
+fn chen_prior() -> [f32; HAND_COUNT] {
+    let mut weights = [0.0f32; HAND_COUNT];
+    for hand in all_hands() {
+        weights[hand.index()] = hand.chen_score() as f32 + 1.0;
+    }
+    let total: f32 = weights.iter().sum();
+    for weight in &mut weights {
+        *weight /= total;
+    }
+    weights
+}
+
 /// Laplace-smooths a per-hand-class tally into a normalized 169-hand range
 /// plus its raw sample count — the shared math behind
-/// [`build_range_model`] and [`build_preflop_raise_range_model`].
+/// [`build_range_model`] and [`build_preflop_raise_range_model`]. Shrinks
+/// toward [`chen_prior`] rather than a flat/uniform prior.
 fn smoothed_range(hand_counts: &[u32; HAND_COUNT]) -> StoredRange {
     let total: u32 = hand_counts.iter().sum();
-    let pseudo_per_class = RANGE_SMOOTHING_TOTAL / HAND_COUNT as f32;
+    let prior = chen_prior();
     let denom = total as f32 + RANGE_SMOOTHING_TOTAL;
     let mut weights: Range = [0.0f32; HAND_COUNT];
-    for (weight, count) in weights.iter_mut().zip(hand_counts.iter()) {
-        *weight = (*count as f32 + pseudo_per_class) / denom;
+    for (index, (weight, count)) in weights.iter_mut().zip(hand_counts.iter()).enumerate() {
+        *weight = (*count as f32 + RANGE_SMOOTHING_TOTAL * prior[index]) / denom;
     }
     StoredRange {
         weights,
@@ -1434,16 +1463,26 @@ Seat 3: 14c11a2a (big blind) folded on the River";
         let model = build_range_model(&actions);
         let main = &model[&(Node::PfOpen, StackBucket::Bb25)];
         assert_eq!(main.sample_count, 3);
-        let pseudo = RANGE_SMOOTHING_TOTAL / HAND_COUNT as f32;
+        let prior = chen_prior();
         let main_denom = 3.0 + RANGE_SMOOTHING_TOTAL;
-        assert!((main.weights[aa.index()] - (2.0 + pseudo) / main_denom).abs() < 1e-6);
-        assert!((main.weights[kk.index()] - (1.0 + pseudo) / main_denom).abs() < 1e-6);
-        // AA still outweighs KK, which still outweighs a hand class that
-        // never showed up in the window — smoothing damps the raw
-        // frequencies toward uniform without erasing the real signal.
-        let queens = hand(Rank::Queen, Rank::Queen, false);
+        assert!(
+            (main.weights[aa.index()] - (2.0 + RANGE_SMOOTHING_TOTAL * prior[aa.index()]) / main_denom)
+                .abs()
+                < 1e-6
+        );
+        assert!(
+            (main.weights[kk.index()] - (1.0 + RANGE_SMOOTHING_TOTAL * prior[kk.index()]) / main_denom)
+                .abs()
+                < 1e-6
+        );
+        // AA still outweighs KK (more raw hits, and AA's Chen prior is the
+        // biggest of any class), which still outweighs a hand class that
+        // never showed up in the window and has essentially no Chen-prior
+        // pull either — smoothing damps the raw frequencies toward the
+        // prior without erasing the real signal.
+        let seven_deuce = hand(Rank::Seven, Rank::Two, false);
         assert!(main.weights[aa.index()] > main.weights[kk.index()]);
-        assert!(main.weights[kk.index()] > main.weights[queens.index()]);
+        assert!(main.weights[kk.index()] > main.weights[seven_deuce.index()]);
         assert!(
             (main.weights.iter().sum::<f32>() - 1.0).abs() < 1e-5,
             "smoothed weights still sum to 1"
@@ -1452,7 +1491,12 @@ Seat 3: 14c11a2a (big blind) folded on the River";
         let other_bucket = &model[&(Node::PfOpen, StackBucket::Bb10)];
         assert_eq!(other_bucket.sample_count, 1);
         let other_denom = 1.0 + RANGE_SMOOTHING_TOTAL;
-        assert!((other_bucket.weights[aa.index()] - (1.0 + pseudo) / other_denom).abs() < 1e-6);
+        assert!(
+            (other_bucket.weights[aa.index()]
+                - (1.0 + RANGE_SMOOTHING_TOTAL * prior[aa.index()]) / other_denom)
+                .abs()
+                < 1e-6
+        );
     }
 
     #[test]
@@ -1941,8 +1985,8 @@ Seat 3: 14c11a2a (big blind) folded on the River";
         let range = resolved
             .resolve(Node::TurnVsBet, StackBucket::Bb15)
             .expect("40 samples clears MIN_SAMPLE_HANDS");
-        let expected_aa =
-            (40.0 + RANGE_SMOOTHING_TOTAL / HAND_COUNT as f32) / (40.0 + RANGE_SMOOTHING_TOTAL);
+        let expected_aa = (40.0 + RANGE_SMOOTHING_TOTAL * chen_prior()[aa.index()])
+            / (40.0 + RANGE_SMOOTHING_TOTAL);
         assert!((range[aa.index()] - expected_aa).abs() < 1e-6);
         let kk = crate::range::hands::Hand::new(Rank::King, Rank::King, false);
         assert!(

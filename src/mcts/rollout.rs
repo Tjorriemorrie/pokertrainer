@@ -1,6 +1,6 @@
 use rand::Rng;
 
-use crate::card::{Card, Deck, Rank};
+use crate::card::{Card, Deck};
 use crate::error::{Error, Result};
 use crate::eval::HandClass;
 use crate::game::{Action, ActionOutcome, GameState, Seat, Street};
@@ -41,53 +41,14 @@ fn tier_for(state: &GameState, seat: Seat) -> f64 {
     }
 }
 
-/// Preflop hand strength via the Chen Formula, rescaled from its native
-/// 0..20 (worst unplayable hand .. `AA`) onto the same 0..4 ladder
-/// [`strength_tier`] uses, so both feed [`fold_mass`]/[`raise_mass`]/
-/// [`bet_mass`] on a consistent scale.
+/// Preflop hand strength for two concrete hole cards: the hand class's
+/// [`crate::range::hands::Hand::chen_tier`], the same 0..4 ladder
+/// [`strength_tier`] uses so both feed [`fold_mass`]/[`raise_mass`]/
+/// [`bet_mass`] on a consistent scale. Kept alongside the postflop
+/// evaluation the range model shares the Chen scoring with (see
+/// `opponent_history::chen_prior`).
 fn preflop_tier(cards: [Card; 2]) -> f64 {
-    (chen_score(cards) / 20.0 * 4.0).clamp(0.0, 4.0)
-}
-
-/// The Chen Formula: a standard, well-known closed-form preflop starting-
-/// hand strength score. High card points (`A=10, K=8, Q=7, J=6`, else
-/// `rank/2` rounded up to the nearest half), doubled (minimum 5) for a
-/// pair; otherwise +2 for suited, a gap penalty that grows with the rank
-/// distance between the two cards, and +1 back for a 0- or 1-gap hand
-/// whose high card is a jack or lower (straight-friendly connectors).
-fn chen_score(cards: [Card; 2]) -> f64 {
-    let (a, b) = (cards[0], cards[1]);
-    let (high, low) = if a.rank() >= b.rank() { (a, b) } else { (b, a) };
-    let pair = high.rank() == low.rank();
-
-    let high_points = match high.rank() {
-        Rank::Ace => 10.0,
-        Rank::King => 8.0,
-        Rank::Queen => 7.0,
-        Rank::Jack => 6.0,
-        rank => (rank as u8 as f64 + 2.0) / 2.0,
-    };
-
-    if pair {
-        return (high_points * 2.0).max(5.0);
-    }
-
-    let mut score = high_points;
-    if high.suit() == low.suit() {
-        score += 2.0;
-    }
-    let gap = high.rank() as i32 - low.rank() as i32 - 1;
-    score -= match gap {
-        0 => 0.0,
-        1 => 1.0,
-        2 => 2.0,
-        3 => 4.0,
-        _ => 5.0,
-    };
-    if gap <= 1 && high.rank() <= Rank::Jack {
-        score += 1.0;
-    }
-    score.max(0.0)
+    crate::range::hands::Hand::from_cards(cards[0], cards[1]).chen_tier()
 }
 
 /// Fold mass for the opponent policy: proportional to the price of calling
