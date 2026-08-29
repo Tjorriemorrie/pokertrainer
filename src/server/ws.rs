@@ -385,7 +385,6 @@ async fn play_socket(
                 let outcome = handle_client_message(&mut *session, text.as_str(), latest_snapshot.as_ref());
                 ticks_since_snapshot += outcome.chart_ticks;
                 persist_records(app.pool.as_ref(), session_id, session).await;
-                persist_local_actions(app.pool.as_ref(), session).await;
                 persist_local_hero_actions(app.pool.as_ref(), session).await;
                 // Save before the frames leave, so a disconnect triggered by
                 // the rendered state resumes exactly that state.
@@ -706,29 +705,10 @@ async fn persist_records(
     }
 }
 
-/// Persists every local bot decision queued by the table since the last
-/// frame, into `local_opponent_actions` (no `session_id` — the window pools
+/// Persists every local hero decision queued by the table since the last
+/// frame, into `local_hero_actions` (no `session_id` — the window pools
 /// across every session). Failures are logged and dropped — the game never
 /// blocks on the database.
-async fn persist_local_actions(pool: Option<&PgPool>, session: &mut TableSession) {
-    let actions = session.take_local_actions();
-    if actions.is_empty() {
-        return;
-    }
-    let Some(pool) = pool else {
-        return;
-    };
-    if let Err(error) = crate::db::insert_local_opponent_actions(pool, &actions).await {
-        tracing::warn!(
-            %error,
-            dropped = actions.len(),
-            "local opponent actions could not be persisted — the table keeps playing"
-        );
-    }
-}
-
-/// Persists every local hero decision queued by the table since the last
-/// frame, into `local_hero_actions`. Mirrors [`persist_local_actions`].
 async fn persist_local_hero_actions(pool: Option<&PgPool>, session: &mut TableSession) {
     let actions = session.take_local_hero_actions();
     if actions.is_empty() {

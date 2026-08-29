@@ -6,9 +6,8 @@ use crate::range::hands::{HAND_COUNT, Range};
 
 pub use crate::range::hands::HAND_COUNT as RANGE_SIZE;
 
-/// Row shape shared by `local_opponent_actions`/`local_hero_actions`:
-/// (node, stack_bucket, hole_cards, action, hand_no, position,
-/// was_preflop_aggressor, facing_cbet).
+/// Row shape for `local_hero_actions`: (node, stack_bucket, hole_cards,
+/// action, hand_no, position, was_preflop_aggressor, facing_cbet).
 type LocalActionRow = (String, i16, String, String, i64, String, bool, bool);
 
 /// A stored contextual range: the 169-hand weights plus the number of hands
@@ -189,12 +188,12 @@ pub async fn upsert_contextual_action_frequency(
     Ok(())
 }
 
-/// One locally-generated bot decision, with the engine's true dealt hole
-/// cards — the fallback/fill source for the opponent history window
+/// One locally-generated hero decision, with the engine's true dealt hole
+/// cards — the fallback/fill source for the hero's own starting-hand window
 /// whenever the imported `gg_hands` alone don't reach it (see
 /// `opponent_history`).
 #[derive(Clone, Debug, PartialEq)]
-pub struct LocalOpponentAction {
+pub struct LocalHeroAction {
     pub node: String,
     pub stack_bucket: i16,
     /// e.g. `"As Kh"`.
@@ -213,97 +212,6 @@ pub struct LocalOpponentAction {
     pub was_preflop_aggressor: bool,
     /// Is the flop bet this actor is facing from that same preflop
     /// aggressor.
-    pub facing_cbet: bool,
-}
-
-/// Persists a batch of local opponent decisions atomically.
-pub async fn insert_local_opponent_actions(
-    pool: &PgPool,
-    actions: &[LocalOpponentAction],
-) -> Result<()> {
-    if actions.is_empty() {
-        return Ok(());
-    }
-    let mut transaction = pool.begin().await?;
-    for action in actions {
-        sqlx::query(
-            "INSERT INTO local_opponent_actions
-                 (node, stack_bucket, hole_cards, action, hand_no, position,
-                  was_preflop_aggressor, facing_cbet)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-        )
-        .bind(&action.node)
-        .bind(action.stack_bucket)
-        .bind(&action.hole_cards)
-        .bind(&action.action)
-        .bind(action.hand_no)
-        .bind(&action.position)
-        .bind(action.was_preflop_aggressor)
-        .bind(action.facing_cbet)
-        .execute(&mut *transaction)
-        .await?;
-    }
-    transaction.commit().await?;
-    Ok(())
-}
-
-/// Loads the most recent local opponent decisions (newest first), capped at
-/// `limit`.
-pub async fn load_recent_local_opponent_actions(
-    pool: &PgPool,
-    limit: i64,
-) -> Result<Vec<LocalOpponentAction>> {
-    if limit <= 0 {
-        return Ok(Vec::new());
-    }
-    let rows: Vec<LocalActionRow> = sqlx::query_as(
-        "SELECT node, stack_bucket, hole_cards, action, hand_no, position,
-                was_preflop_aggressor, facing_cbet
-         FROM local_opponent_actions
-         ORDER BY created_at DESC, id DESC
-         LIMIT $1",
-    )
-    .bind(limit)
-    .fetch_all(pool)
-    .await?;
-    Ok(rows
-        .into_iter()
-        .map(
-            |(node, stack_bucket, hole_cards, action, hand_no, position, was_preflop_aggressor, facing_cbet)| {
-                LocalOpponentAction {
-                    node,
-                    stack_bucket,
-                    hole_cards,
-                    action,
-                    hand_no,
-                    position,
-                    was_preflop_aggressor,
-                    facing_cbet,
-                }
-            },
-        )
-        .collect())
-}
-
-/// One locally-generated hero decision, with the engine's true dealt hole
-/// cards — the fallback/fill source for the hero's own starting-hand window
-/// whenever the imported `gg_hands` alone don't reach it (see
-/// `opponent_history`).
-#[derive(Clone, Debug, PartialEq)]
-pub struct LocalHeroAction {
-    pub node: String,
-    pub stack_bucket: i16,
-    /// e.g. `"As Kh"`.
-    pub hole_cards: String,
-    /// `"Fold"` / `"CallCheck"` / `"BetRaise"` / `"Shove"`.
-    pub action: String,
-    /// See [`LocalOpponentAction::hand_no`].
-    pub hand_no: i64,
-    /// See [`LocalOpponentAction::position`].
-    pub position: String,
-    /// See [`LocalOpponentAction::was_preflop_aggressor`].
-    pub was_preflop_aggressor: bool,
-    /// See [`LocalOpponentAction::facing_cbet`].
     pub facing_cbet: bool,
 }
 

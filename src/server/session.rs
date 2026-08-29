@@ -129,13 +129,13 @@ pub struct TableSession {
     /// an opponent has raised, or expires unused if the street changes first.
     pending_check_fold: Option<Street>,
     records: Vec<PendingDecision>,
-    /// Local bot decisions (with their true dealt cards) queued for
-    /// persistence into `local_opponent_actions` — the fallback/fill source
-    /// for the opponent history window; see [`crate::opponent_history`].
-    local_actions: Vec<crate::db::LocalOpponentAction>,
     /// The hero's own local decisions (with their true dealt cards) queued
-    /// for persistence into `local_hero_actions` — mirrors `local_actions`,
-    /// but fills out the hero's own starting-hand window.
+    /// for persistence into `local_hero_actions`, filling out the hero's own
+    /// starting-hand window. Unlike the opponent history window (which
+    /// deliberately excludes local bot decisions — see
+    /// [`crate::opponent_history`] — to avoid the bots' own play feeding
+    /// back into the model that calibrates them), the hero's local decisions
+    /// are the user's own real choices, so there's no feedback-loop risk.
     local_hero_actions: Vec<crate::db::LocalHeroAction>,
     /// Per-hand results (winner, hero all-in, hero bust) queued for
     /// persistence; the tournament detail page aggregates them.
@@ -195,7 +195,6 @@ impl TableSession {
             check_fold_requested: false,
             pending_check_fold: None,
             records: Vec::new(),
-            local_actions: Vec::new(),
             local_hero_actions: Vec::new(),
             hand_results: Vec::new(),
             hero_all_in_this_hand: false,
@@ -233,7 +232,6 @@ impl TableSession {
             check_fold_requested: false,
             pending_check_fold: None,
             records: Vec::new(),
-            local_actions: Vec::new(),
             local_hero_actions: Vec::new(),
             hand_results: Vec::new(),
             hero_all_in_this_hand: false,
@@ -286,7 +284,6 @@ impl TableSession {
             check_fold_requested: false,
             pending_check_fold: None,
             records: Vec::new(),
-            local_actions: Vec::new(),
             local_hero_actions: Vec::new(),
             hand_results: Vec::new(),
             hero_all_in_this_hand: false,
@@ -465,12 +462,6 @@ impl TableSession {
     /// Drains the decisions awaiting a database write.
     pub fn take_records(&mut self) -> Vec<PendingDecision> {
         std::mem::take(&mut self.records)
-    }
-
-    /// Drains the local bot decisions awaiting a database write into
-    /// `local_opponent_actions`.
-    pub fn take_local_actions(&mut self) -> Vec<crate::db::LocalOpponentAction> {
-        std::mem::take(&mut self.local_actions)
     }
 
     /// Drains the local hero decisions awaiting a database write into
@@ -687,13 +678,8 @@ impl TableSession {
             let actor = self.state.to_act();
             let legal = self.state.legal_actions();
             let call_amount = legal.call_amount;
-            // Captured before the action settles: the node/bucket/position/
-            // true-cards/c-bet-context describe the decision the actor is
-            // currently facing.
-            let node = decision_node(&self.state);
-            let stack_bucket = decision_stack_bucket(&self.state);
-            let position = decision_position(&self.state);
-            let hole_cards = self.state.rotated(actor).hero_cards();
+            // Captured before the action settles: the c-bet context
+            // describes the decision the actor is currently facing.
             let was_preflop_aggressor = self.was_preflop_aggressor(actor);
             let facing_cbet = self.facing_cbet();
             let action = match self.template {
@@ -713,16 +699,6 @@ impl TableSession {
             };
             self.opponents
                 .record(actor, action, self.state.street(), legal.call_amount > 0);
-            self.local_actions.push(crate::db::LocalOpponentAction {
-                node: node.key().to_string(),
-                stack_bucket: stack_bucket.as_i16(),
-                hole_cards: format!("{} {}", hole_cards[0].to_code(), hole_cards[1].to_code()),
-                action: ActionCategory::of(action).label().to_string(),
-                hand_no: self.hand_no as i64,
-                position: position.key().to_string(),
-                was_preflop_aggressor,
-                facing_cbet,
-            });
             self.pump_actions.push(action);
             let outcome = self.settle_action(action)?;
             tracing::info!(

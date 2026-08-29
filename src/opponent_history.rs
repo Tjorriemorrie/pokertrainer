@@ -2,10 +2,17 @@
 //! and the real imported field as one modeled "opponent" (the user's own
 //! framing — "it is the same opponent, I'm just playing against two of the
 //! same bot"). This module builds the window of that opponent's most recent
-//! [`HISTORY_WINDOW`] hands — real imported hands (`gg_hands`) first, since
-//! those only reveal hole cards at showdown, combined with every
-//! locally-generated bot decision (`local_opponent_actions`, where the
-//! engine's true deal is always known) — and turns that window into two
+//! [`HISTORY_WINDOW`] hands from real imported hands (`gg_hands`) only —
+//! deliberately *not* locally-generated bot decisions, which used to be
+//! merged in too. The bots pick their own actions with this same window's
+//! range/frequency models, so mixing their own recorded decisions back into
+//! the window that calibrates them is a feedback loop: any skew in how the
+//! bots play (a solver bug, an aggressive skill setting, anything) gets
+//! recorded as "realistic field behavior" and then reinforces itself,
+//! independent of what real opponents actually do. `gg_hands` alone gives a
+//! smaller, thinner sample but not a self-reinforcing one — see
+//! [`crate::opponent_history::chen_prior`] for how a thin sample now shrinks
+//! toward a sensible default instead of uniform. This window turns into two
 //! things:
 //!
 //! * a per-node [`Range`] prior (`contextual_ranges`), fed into the bots'
@@ -19,7 +26,7 @@ use std::collections::HashMap;
 use sqlx::PgPool;
 
 use crate::card::Card;
-use crate::db::{self, LocalOpponentAction, StoredRange};
+use crate::db::{self, StoredRange};
 use crate::error::Result;
 use crate::game::{Action, GameState, Street};
 use crate::range::hands::{HAND_COUNT, Hand, Range, all_hands};
@@ -27,15 +34,11 @@ use crate::range::sequence::{RangeResolver, SequenceNode, StackBucket, UniformPo
 use crate::range_cache::PgRangeStore;
 
 /// How many of the most recent imported hands feed the window — every
-/// preflop-or-later decision from `gg_hands` combined with every row in
-/// `local_opponent_actions`/`local_hero_actions` (those are already
-/// individual actions, not hands, so this cap only bounds the `gg_hands`
-/// side; local play is never large enough for that to matter in practice).
-/// Large enough that in practice it just means "everything gathered so
-/// far" — the starting-hand grid needs every sample it can get across 169
-/// hand classes, unlike the drill field-skill grading window
-/// ([`crate::opponent_analysis::ANALYSIS_WINDOW`]), which deliberately
-/// stays small to track *recent* skill.
+/// preflop-or-later decision from `gg_hands`. Large enough that in practice
+/// it just means "everything gathered so far" — the starting-hand grid
+/// needs every sample it can get across 169 hand classes, unlike the drill
+/// field-skill grading window ([`crate::opponent_analysis::ANALYSIS_WINDOW`]),
+/// which deliberately stays small to track *recent* skill.
 pub const HISTORY_WINDOW: i64 = 10_000;
 
 /// The name of the single pooled opponent profile both bot seats (and the
@@ -336,18 +339,6 @@ fn parse_hole_cards(text: &str) -> Option<Hand> {
 }
 
 impl HistoricAction {
-    fn from_local(row: LocalOpponentAction) -> Option<HistoricAction> {
-        Some(HistoricAction {
-            hand: Some(parse_hole_cards(&row.hole_cards)?),
-            node: Node::parse(&row.node)?,
-            stack_bucket: StackBucket::from_bb(row.stack_bucket as u32),
-            position: Position::parse(&row.position)?,
-            category: ActionCategory::parse(&row.action)?,
-            was_preflop_aggressor: row.was_preflop_aggressor,
-            facing_cbet: row.facing_cbet,
-        })
-    }
-
     fn from_local_hero(row: crate::db::LocalHeroAction) -> Option<HistoricAction> {
         Some(HistoricAction {
             hand: Some(parse_hole_cards(&row.hole_cards)?),
@@ -401,26 +392,6 @@ async fn load_gg_actions(pool: &PgPool, limit: i64) -> Result<(Vec<HistoricActio
     Ok((actions, hands.len()))
 }
 
-/// Loads the combined window for the opponent: every decision from the
-/// `hand_limit` most recent imported hands, plus every locally-recorded bot
-/// decision — real imported hands don't reveal an opponent's hole cards
-/// unless the hand went to showdown, so local play (the engine's true deal
-/// is always known there) is never just a fallback-when-thin, it's added in
-/// full every time. The second element is how many distinct hands (imported
-/// plus local) the window actually covers.
-pub async fn load_action_window(
-    pool: &PgPool,
-    hand_limit: i64,
-) -> Result<(Vec<HistoricAction>, usize)> {
-    let (mut actions, gg_hands) = load_gg_actions(pool, hand_limit).await?;
-    let local = db::load_recent_local_opponent_actions(pool, HISTORY_WINDOW).await?;
-    let local_hands: std::collections::HashSet<i64> =
-        local.iter().map(|row| row.hand_no).collect();
-    let window_hands = gg_hands + local_hands.len();
-    actions.extend(local.into_iter().filter_map(HistoricAction::from_local));
-    Ok((actions, window_hands))
-}
-
 /// Walks the most recent imported hands into the *hero's own* [`HistoricAction`]s.
 /// Unlike the opponent's window, the hero's hand is always known (it isn't a
 /// showdown reveal) — hands with no recorded `hero_cards` are skipped
@@ -459,7 +430,9 @@ async fn load_hero_gg_actions(pool: &PgPool, limit: i64) -> Result<(Vec<Historic
 
 /// Loads the combined window for the hero: every decision from the
 /// `hand_limit` most recent imported hands, plus every locally-recorded hero
-/// decision. Mirrors [`load_action_window`].
+/// decision — unlike the opponent window, the hero's own local decisions
+/// aren't a feedback-loop risk (they're the user's own real choices, not a
+/// model the coach then re-teaches from), so they stay merged in here.
 pub async fn load_hero_action_window(
     pool: &PgPool,
     hand_limit: i64,
@@ -1075,7 +1048,7 @@ pub struct OpponentModel {
 /// after importing new `gg_hands`, and periodically as local play
 /// accumulates.
 pub async fn refresh(pool: &PgPool) -> Result<HistorySummary> {
-    let (actions, window_hands) = load_action_window(pool, HISTORY_WINDOW).await?;
+    let (actions, window_hands) = load_gg_actions(pool, HISTORY_WINDOW).await?;
     let profile_id = db::upsert_opponent_profile(pool, POOLED_PROFILE_NAME, "FIELD").await?;
     let model = build_range_model(&actions);
     save_range_model(pool, profile_id, &model).await?;
@@ -1391,28 +1364,6 @@ Seat 3: 14c11a2a (big blind) folded on the River";
     }
 
     #[test]
-    fn local_action_round_trips_through_historic_action() {
-        let row = LocalOpponentAction {
-            node: Node::FlopVsBet.key().to_string(),
-            stack_bucket: StackBucket::Bb15.as_i16(),
-            hole_cards: "Qc Qd".to_string(),
-            action: ActionCategory::BetRaise.label().to_string(),
-            hand_no: 1,
-            position: Position::Button.key().to_string(),
-            was_preflop_aggressor: false,
-            facing_cbet: true,
-        };
-        let historic = HistoricAction::from_local(row).expect("well-formed row parses");
-        assert_eq!(historic.hand, Some(hand(Rank::Queen, Rank::Queen, false)));
-        assert_eq!(historic.node, Node::FlopVsBet);
-        assert_eq!(historic.stack_bucket, StackBucket::Bb15);
-        assert_eq!(historic.position, Position::Button);
-        assert_eq!(historic.category, ActionCategory::BetRaise);
-        assert!(!historic.was_preflop_aggressor);
-        assert!(historic.facing_cbet);
-    }
-
-    #[test]
     fn local_hero_action_round_trips_through_historic_action() {
         let row = crate::db::LocalHeroAction {
             node: Node::FlopVsBet.key().to_string(),
@@ -1432,33 +1383,6 @@ Seat 3: 14c11a2a (big blind) folded on the River";
         assert_eq!(historic.category, ActionCategory::BetRaise);
         assert!(!historic.was_preflop_aggressor);
         assert!(historic.facing_cbet);
-    }
-
-    #[test]
-    fn local_action_with_an_unknown_node_or_action_does_not_parse() {
-        let bad_node = LocalOpponentAction {
-            node: "MADE_UP".to_string(),
-            stack_bucket: 15,
-            hole_cards: "Qc Qd".to_string(),
-            action: "BetRaise".to_string(),
-            hand_no: 1,
-            position: Position::Third.key().to_string(),
-            was_preflop_aggressor: false,
-            facing_cbet: false,
-        };
-        assert_eq!(HistoricAction::from_local(bad_node), None);
-
-        let bad_cards = LocalOpponentAction {
-            node: "FLOP_LEAD".to_string(),
-            stack_bucket: 15,
-            hole_cards: "garbage".to_string(),
-            action: "Fold".to_string(),
-            hand_no: 1,
-            position: Position::Third.key().to_string(),
-            was_preflop_aggressor: false,
-            facing_cbet: false,
-        };
-        assert_eq!(HistoricAction::from_local(bad_cards), None);
     }
 
     // ------------------------------------------------------------- range
@@ -1924,56 +1848,6 @@ Seat 3: 14c11a2a (big blind) folded on the River";
         crate::db::test_pool().await
     }
 
-
-    #[tokio::test]
-    async fn local_opponent_actions_round_trip_and_fill_the_shortfall() {
-        let _guard = crate::analytics::DB_TEST_LOCK.lock().await;
-        let pool = test_pool().await;
-
-        let before = db::load_recent_local_opponent_actions(&pool, 5)
-            .await
-            .unwrap();
-        let rows = vec![
-            LocalOpponentAction {
-                node: Node::PfOpen.key().to_string(),
-                stack_bucket: StackBucket::Bb25.as_i16(),
-                hole_cards: "As Ks".to_string(),
-                action: ActionCategory::BetRaise.label().to_string(),
-                hand_no: 42,
-                position: Position::Button.key().to_string(),
-                was_preflop_aggressor: false,
-                facing_cbet: false,
-            },
-            LocalOpponentAction {
-                node: Node::FlopVsBet.key().to_string(),
-                stack_bucket: StackBucket::Bb10.as_i16(),
-                hole_cards: "7c 2d".to_string(),
-                action: ActionCategory::Fold.label().to_string(),
-                hand_no: 43,
-                position: Position::BigBlind.key().to_string(),
-                was_preflop_aggressor: false,
-                facing_cbet: true,
-            },
-        ];
-        db::insert_local_opponent_actions(&pool, &rows)
-            .await
-            .unwrap();
-
-        let after = db::load_recent_local_opponent_actions(&pool, (before.len() + 2) as i64)
-            .await
-            .unwrap();
-        assert_eq!(after.len(), before.len() + 2);
-        // Newest first: the two just-inserted rows lead, most-recent last-in first-out.
-        assert_eq!(after[0].hole_cards, "7c 2d");
-        assert_eq!(after[0].hand_no, 43);
-        assert_eq!(after[1].hole_cards, "As Ks");
-        assert_eq!(after[1].hand_no, 42);
-
-        let limited = db::load_recent_local_opponent_actions(&pool, 0)
-            .await
-            .unwrap();
-        assert!(limited.is_empty());
-    }
 
     #[tokio::test]
     async fn local_hero_actions_round_trip_and_fill_the_shortfall() {
